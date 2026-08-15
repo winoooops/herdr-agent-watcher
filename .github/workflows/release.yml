@@ -37,9 +37,15 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: macos-14
+          # Both Darwin slices come off one Apple Silicon runner. `macos-13`
+          # was used here first and queued forever: GitHub has retired it, and
+          # a label that no longer exists never gets a machine, it just waits.
+          # Cross-compiling also halves the macOS runner minutes, which bill at
+          # ten times the Linux rate. Apple's clang targets x86_64 natively, so
+          # the C dependencies in the tree build too.
+          - runner: macos-latest
             target: aarch64-apple-darwin
-          - runner: macos-13
+          - runner: macos-latest
             target: x86_64-apple-darwin
           - runner: ubuntu-latest
             target: x86_64-unknown-linux-musl
