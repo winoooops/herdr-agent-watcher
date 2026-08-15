@@ -320,3 +320,25 @@ fn unbind_with_no_record_is_a_no_op() {
     assert!(out.status.success());
     assert_eq!(env.config(), "[ui]\nx = 1\n");
 }
+
+#[test]
+fn the_manifest_declares_both_actions() {
+    let manifest: toml::Value = std::fs::read_to_string("herdr-plugin.toml")
+        .expect("manifest")
+        .parse()
+        .expect("valid TOML");
+    let actions = manifest["actions"].as_array().expect("actions");
+    for id in ["bind-sidebar-key", "unbind-sidebar-key"] {
+        let action = actions
+            .iter()
+            .find(|a| a["id"].as_str() == Some(id))
+            .unwrap_or_else(|| panic!("{id} is not declared in herdr-plugin.toml"));
+        let argv: Vec<&str> = action["command"]
+            .as_array()
+            .expect("command")
+            .iter()
+            .filter_map(toml::Value::as_str)
+            .collect();
+        assert_eq!(argv, vec!["target/release/herdr-agent-watcher", id]);
+    }
+}
