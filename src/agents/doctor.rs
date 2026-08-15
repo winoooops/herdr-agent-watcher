@@ -314,10 +314,12 @@ pub(crate) fn run(
             .and_then(window_size);
         let refusal = refused.get(&pane.pane_id);
         let (level, summary, remedy) = match (&shadow, flag_shadow, &pane.agent_session, size) {
-            // Before the "not rendered yet" arm: this pane HAS rendered, the
-            // write arrived, and the daemon turned it away. Waiting is the one
-            // thing that will not help.
-            (None, false, _, None) if refusal.is_some() => {
+            // Before BOTH size arms, not just the empty one. A refused pane
+            // often still has a readable status file -- the one its previous
+            // session wrote -- so the card shows numbers that will never move
+            // again. That is the version of this worth catching: nothing looks
+            // wrong. Waiting is the one thing that will not help either way.
+            (None, false, _, _) if refusal.is_some() => {
                 let refusal = refusal.expect("checked above");
                 (
                     Level::Fail,
@@ -853,7 +855,50 @@ mod tests {
         );
     }
 
-    /// Without this the previous test passes against an implementation that
+    /// The worst version of this: the card still shows numbers, from a status
+    /// file the refused session wrote before it was replaced. Nothing looks
+    /// wrong, and the figures never move again. Found by running it, not by
+    /// the test above -- there the resolver returns None, so `size` was never
+    /// `Some` while a refusal was outstanding.
+    #[test]
+    fn a_refusal_outranks_a_stale_status_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let binary = Path::new("/bin/herdr-agent-watcher");
+        let (settings, statusline, attention) = healthy(dir.path(), binary);
+        let status = dir.path().join("status.json");
+        std::fs::write(
+            &status,
+            json!({"context_window":{"context_window_size":200000}}).to_string(),
+        )
+        .unwrap();
+        let socket = socket_reporting(
+            dir.path(),
+            r#"{"w1:p1":{"offered":"958e9bb7-a0ae-434b-8a76-76e1504a8dcc","bound":"595edc8e-8764-4f98-a116-453113a8e5db"}}"#,
+        );
+        let report = run(
+            &socket,
+            &settings,
+            &statusline,
+            &attention,
+            binary,
+            &[input(
+                "w1:p1",
+                Some("958e9bb7-a0ae-434b-8a76-76e1504a8dcc"),
+                dir.path(),
+            )],
+            &|_, _| Some(status.clone()),
+            &[],
+        );
+        let pane = &report.panes[0];
+        assert!(
+            pane.summary.contains("refus"),
+            "a readable window size must not silence this: {}",
+            pane.summary
+        );
+        assert!(matches!(pane.remedy, Some(Remedy::ReopenPane)));
+    }
+
+    /// Without this the previous tests pass against an implementation that
     /// always says "refused".
     #[test]
     fn a_pane_with_no_refusal_still_reads_as_not_yet_rendered() {

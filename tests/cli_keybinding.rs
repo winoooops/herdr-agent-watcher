@@ -342,3 +342,22 @@ fn the_manifest_declares_both_actions() {
         assert_eq!(argv, vec!["target/release/herdr-agent-watcher", id]);
     }
 }
+
+/// The manifest carries its own version, and bumping Cargo.toml for a release
+/// left it behind at 0.1.0 -- herdr then reports a version the release assets
+/// do not use. Nothing else compares them.
+#[test]
+fn the_manifest_version_matches_the_crate() {
+    let manifest: toml::Value = std::fs::read_to_string("herdr-plugin.toml")
+        .expect("manifest")
+        .parse()
+        .expect("valid TOML");
+    let cargo: toml::Value = std::fs::read_to_string("Cargo.toml")
+        .expect("Cargo.toml")
+        .parse()
+        .expect("valid TOML");
+    assert_eq!(
+        manifest["version"].as_str(),
+        cargo["package"]["version"].as_str()
+    );
+}
