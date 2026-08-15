@@ -10,6 +10,8 @@ use crate::sidebar::format;
 use crate::sidebar::select::Sort;
 use crate::sidebar::style::{AgentAppearances, ConfigStatus};
 
+pub const DEFAULT_OPEN_SIDEBAR_KEY: &str = "prefix+a";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Theme {
     #[default]
@@ -61,6 +63,10 @@ pub struct Loaded {
     /// whenever `scope` is `All`, which is also what an unresolvable
     /// `Workspace` degrades to.
     pub workspace_id: Option<String>,
+    /// The key `bind-sidebar-key` installs. Lives here rather than in
+    /// `daemon::config` because the sidebar's loader is what reports unknown
+    /// tables, and this key is about the sidebar.
+    pub open_sidebar_key: String,
     pub appearances: AgentAppearances,
     pub status: ConfigStatus,
     pub problem_details: Vec<String>,
@@ -78,6 +84,7 @@ impl Default for Loaded {
             hide_idle: false,
             scope: Scope::default(),
             workspace_id: None,
+            open_sidebar_key: DEFAULT_OPEN_SIDEBAR_KEY.to_string(),
             appearances: builtin_appearances(),
             status: ConfigStatus {
                 problems: 0,
@@ -194,6 +201,7 @@ impl Loaded {
                 // here would duplicate that parse; reporting it would make a
                 // correct file look broken.
                 "daemon" => {}
+                "keys" => out.read_keys(value),
                 other => out.problem(format!("unknown table [{other}]")),
             }
         }
@@ -287,6 +295,21 @@ impl Loaded {
                     _ => self.problem("invalid value for list.scope".into()),
                 },
                 other => self.problem(format!("unknown key list.{other}")),
+            }
+        }
+    }
+
+    fn read_keys(&mut self, v: &Value) {
+        let Some(t) = v.as_table() else {
+            return self.problem("[keys] is not a table".into());
+        };
+        for (k, val) in t {
+            match k.as_str() {
+                "open_sidebar" => match val.as_str() {
+                    Some(key) if !key.is_empty() => self.open_sidebar_key = key.to_string(),
+                    _ => self.problem("invalid value for keys.open_sidebar".into()),
+                },
+                other => self.problem(format!("unknown key keys.{other}")),
             }
         }
     }
@@ -417,6 +440,37 @@ mod tests {
     fn the_daemons_table_is_not_the_sidebars_problem() {
         let l = load_str("[daemon]\ninterval_ms = 5000\n");
         assert_eq!(l.status.problems, 0, "{:?}", l.problem_details);
+    }
+
+    #[test]
+    fn the_keys_table_is_read_not_rejected() {
+        let l = load_str("[keys]\nopen_sidebar = \"prefix+x\"\n");
+        assert_eq!(l.status.problems, 0, "{:?}", l.problem_details);
+        assert_eq!(l.open_sidebar_key, "prefix+x");
+    }
+
+    #[test]
+    fn open_sidebar_defaults_and_rejects_junk() {
+        assert_eq!(load_str("").open_sidebar_key, "prefix+a");
+        for text in [
+            "[keys]\nopen_sidebar = 3\n",
+            "[keys]\nopen_sidebar = \"\"\n",
+        ] {
+            let l = load_str(text);
+            assert_eq!(l.open_sidebar_key, "prefix+a", "{text}");
+            assert_eq!(l.status.problems, 1, "{text}");
+        }
+    }
+
+    #[test]
+    fn an_unknown_key_in_keys_is_one_problem() {
+        let l = load_str("[keys]\nnope = \"prefix+x\"\n");
+        assert_eq!(l.status.problems, 1);
+        assert!(
+            l.problem_details[0].contains("keys.nope"),
+            "{:?}",
+            l.problem_details
+        );
     }
 
     #[test]
