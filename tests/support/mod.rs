@@ -1,3 +1,5 @@
+pub mod fake_herdr;
+
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};

@@ -59,9 +59,13 @@ fn main() {
             let args: Vec<String> = std::env::args().skip(2).collect();
             herdr_agent_watcher::agents::claude_bridge::cli_doctor(&args)
         }
+        "bind-sidebar-key" => {
+            let args: Vec<String> = std::env::args().skip(2).collect();
+            herdr_agent_watcher::agents::keybinding::cli_bind(&args)
+        }
         other => {
             eprintln!(
-                "usage: herdr-agent-watcher <daemon|sidebar|sidebar-open|stop|kimi-consent|claude-bridge|enable-claude-bridge|disable-claude-bridge|doctor> (got {other:?})"
+                "usage: herdr-agent-watcher <daemon|sidebar|sidebar-open|stop|kimi-consent|claude-bridge|enable-claude-bridge|disable-claude-bridge|doctor|bind-sidebar-key> (got {other:?})"
             );
             2
         }

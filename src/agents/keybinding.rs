@@ -195,6 +195,250 @@ fn write_config_hooked(
         .map_err(|error| format!("rename to {}: {error}", target.display()))
 }
 
+fn herdr_bin() -> PathBuf {
+    std::env::var_os("HERDR_BIN_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("herdr"))
+}
+
+/// A failed herdr call is a failure, not an empty string. Ignoring the exit
+/// status would let a broken `--default-config` return "" — from which every
+/// key looks free, and the binding is written over something.
+fn herdr(args: &[&str]) -> Result<String, String> {
+    let out = std::process::Command::new(herdr_bin())
+        .args(args)
+        .output()
+        .map_err(|error| format!("cannot run herdr {}: {error}", args.join(" ")))?;
+    if !out.status.success() {
+        return Err(format!(
+            "herdr {} failed ({}): {}",
+            args.join(" "),
+            out.status,
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// `HERDR_CONFIG_PATH` is what Herdr itself honours; otherwise the documented
+/// default. Not derived from `HERDR_SOCKET_PATH`: the two are overridable
+/// independently.
+pub(crate) fn herdr_config_path() -> Result<PathBuf, String> {
+    if let Some(path) = std::env::var_os("HERDR_CONFIG_PATH") {
+        return Ok(PathBuf::from(path));
+    }
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| dirs::home_dir().map(|home| home.join(".config")))
+        .ok_or_else(|| "cannot resolve a config directory".to_string())?;
+    Ok(base.join("herdr").join("config.toml"))
+}
+
+fn record_path() -> Result<PathBuf, String> {
+    Ok(crate::agents::claude_bridge::resolve_state_dir(None)?.join("keybinding-install.json"))
+}
+
+pub fn cli_bind(_args: &[String]) -> i32 {
+    match bind() {
+        Ok(message) => {
+            println!("{message}");
+            0
+        }
+        Err(error) => {
+            eprintln!("{error}");
+            1
+        }
+    }
+}
+
+fn bind() -> Result<String, String> {
+    let key = crate::sidebar::config::Loaded::load().open_sidebar_key;
+    let config_path = herdr_config_path()?;
+    let existing = match std::fs::read_to_string(&config_path) {
+        Ok(text) => Some(text),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            return Err(format!(
+                "cannot read {}: {error}",
+                config_path.display()
+            ))
+        }
+    };
+    let current = existing.clone().unwrap_or_default();
+    if !current.is_empty() && current.parse::<toml::Value>().is_err() {
+        return Err(format!(
+            "{} is not valid TOML; refusing to append to a file whose shape I cannot confirm",
+            config_path.display()
+        ));
+    }
+
+    // An existing record is never discarded silently. Anything but a verified
+    // installation in THIS config is a refusal: overwriting a record whose
+    // config_path has changed orphans that block permanently, with nothing
+    // left that knows how to remove it.
+    let record = record_path()?;
+    match std::fs::read_to_string(&record) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(format!("cannot read {}: {error}", record.display())),
+        Ok(text) => {
+            let previous: Record = serde_json::from_str(&text).map_err(|error| {
+                format!(
+                    "{} is unreadable ({error}); remove it by hand once you have checked \
+                     Herdr's config for a managed block",
+                    record.display()
+                )
+            })?;
+            if previous.config_path != config_path {
+                return Err(format!(
+                    "a binding is recorded in {}, not {}; run unbind-sidebar-key against \
+                     that config first",
+                    previous.config_path.display(),
+                    config_path.display()
+                ));
+            }
+            if !current.contains(&previous.appended) {
+                return Err(format!(
+                    "a binding for {} is recorded but its block is not in {} as it was \
+                     written; remove the record or restore the block, then run this again",
+                    previous.key,
+                    config_path.display()
+                ));
+            }
+            return Ok(format!("already bound: {}", previous.key));
+        }
+    }
+
+    let defaults = herdr(&["--default-config"])?;
+    if let Some(holder) = crate::agents::keys::holder(&defaults, &current, &key) {
+        return Err(format!(
+            "{key} is already bound to {holder}; set [keys] open_sidebar in the plugin's \
+             config.toml to something else, or free {key} in Herdr's config"
+        ));
+    }
+    if crate::agents::keys::occupied(&defaults, &current).contains(&key) {
+        return Err(format!("{key} is already bound in Herdr's config"));
+    }
+    ambiguity_check()?;
+
+    let (candidate, appended) = append_block(&current, &key);
+    validate(&candidate)?;
+
+    // The record goes down FIRST, as the Claude bridge does
+    // (`bridge_settings.rs:151-166`). A full or read-only state directory must
+    // not be able to change the operator's config and leave nothing that knows
+    // how to change it back.
+    let body = serde_json::to_string_pretty(&Record {
+        config_path: config_path.clone(),
+        appended,
+        created_file: existing.is_none(),
+        key: key.clone(),
+    })
+    .map_err(|error| format!("serialize record: {error}"))?;
+    std::fs::write(&record, body)
+        .map_err(|error| format!("write {}: {error}", record.display()))?;
+
+    if let Err(error) = write_config(&config_path, &candidate, existing.as_deref()) {
+        // Nothing was installed, so the record must not survive to claim
+        // otherwise.
+        let _ = std::fs::remove_file(&record);
+        return Err(error);
+    }
+
+    reload()?;
+    Ok(format!(
+        "bound {key} to open-sidebar in {}\n\
+         run unbind-sidebar-key before uninstalling this plugin, or the binding \
+         outlives it",
+        config_path.display()
+    ))
+}
+
+/// Herdr cannot tell which plugin an ambiguous action id means, and its own
+/// error says to "include plugin_id" — a field `CommandKeybindConfig` does not
+/// have. Detect it here rather than write a binding that cannot resolve.
+fn ambiguity_check() -> Result<(), String> {
+    let listed = herdr(&["plugin", "action", "list"])?;
+    let value: serde_json::Value = serde_json::from_str(&listed).unwrap_or_default();
+    let owners: Vec<String> = value
+        .get("result")
+        .and_then(|r| r.get("actions"))
+        .and_then(serde_json::Value::as_array)
+        .map(|actions| {
+            actions
+                .iter()
+                .filter(|a| {
+                    a.get("action_id").and_then(serde_json::Value::as_str)
+                        == Some("open-sidebar")
+                })
+                .filter_map(|a| Some(a.get("plugin_id")?.as_str()?.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+    if owners.len() > 1 {
+        return Err(format!(
+            "open-sidebar is declared by more than one installed plugin ({}); \
+             Herdr cannot tell which this binding means",
+            owners.join(", ")
+        ));
+    }
+    Ok(())
+}
+
+/// Run Herdr's own validator over the candidate before the operator's file is
+/// touched. A key Herdr rejects otherwise leaves them with
+/// `invalid keybinding … disabling binding` in a file they did not break.
+fn validate(candidate: &str) -> Result<(), String> {
+    let dir = std::env::temp_dir().join(format!("aw-keybind-{}", std::process::id()));
+    std::fs::create_dir_all(&dir)
+        .map_err(|error| format!("create {}: {error}", dir.display()))?;
+    let path = dir.join("config.toml");
+    std::fs::write(&path, candidate)
+        .map_err(|error| format!("write {}: {error}", path.display()))?;
+    let out = std::process::Command::new(herdr_bin())
+        .args(["config", "check"])
+        .env("HERDR_CONFIG_PATH", &path)
+        .output()
+        .map_err(|error| format!("cannot run herdr config check: {error}"))?;
+    let _ = std::fs::remove_dir_all(&dir);
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // A non-zero exit is a rejection too. Trusting only the "issues found"
+    // string means a validator that crashed reads as approval.
+    if !out.status.success() || text.contains("issues found") {
+        return Err(format!(
+            "Herdr would reject this config, so nothing was written:\n{}",
+            text.trim()
+        ));
+    }
+    Ok(())
+}
+
+/// Diagnostics are a failure, not a footnote (§4). The block is written and
+/// valid by this point, so the caller reports what happened and exits
+/// non-zero rather than claiming a binding that is not live.
+fn reload() -> Result<(), String> {
+    let text = herdr(&["server", "reload-config"])?;
+    let value: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|error| format!("herdr server reload-config returned no JSON: {error}"))?;
+    let diagnostics = value
+        .get("result")
+        .and_then(|r| r.get("diagnostics"))
+        .and_then(serde_json::Value::as_array)
+        .map(Vec::len)
+        .unwrap_or(0);
+    if diagnostics > 0 {
+        return Err(format!(
+            "the binding was written but herdr reported {diagnostics} diagnostic(s) on \
+             reload; run `herdr config check`:\n{}",
+            text.trim()
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
