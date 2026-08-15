@@ -232,6 +232,27 @@ your metrics.
 It never reports green on an incomplete picture: managed settings are not discoverable
 from here, so if every check passes and metrics are still missing, it says exactly that.
 
+## Troubleshooting
+
+**A Claude card shows `—` for CONTEXT, CACHE and COST.** Those three arrive only through the
+status line, so the bridge has to be on — [`doctor`](#doctor) says whether it is. If it is,
+the pane has either not rendered a status line since you enabled it (send it a prompt), or
+it is running a subagent: the status line then describes the subagent, whose model name
+appears on the card and whose usage starts at zero. The main session's numbers return on its
+next turn.
+
+**A pane has no card at all.** Herdr reports no `agent_session` for a pane that was open
+before the daemon started, so it cannot be bound. Close and reopen the pane.
+
+**A setting changed nothing.** `[daemon]` and `[list]` belong to **the plugin's**
+`config.toml`, not Herdr's. Herdr ignores tables it does not recognise, so a section in the
+wrong file is silent except in `herdr config check`. `herdr plugin list` prints the right
+directory.
+
+**`doctor` passes every check and metrics are still missing.** It says exactly that rather
+than reporting green: managed settings, workspace trust and launch flags are not visible
+from here, and any of them can outrank a status line.
+
 ## Kimi usage consent
 
 Kimi plan-usage lookup sends the configured API key to its `/usages` endpoint, so it stays
