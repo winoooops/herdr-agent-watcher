@@ -1,0 +1,33 @@
+name: CI
+on: [push, pull_request]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          # The action installs the MINIMAL profile; without this the two steps
+          # below depend on whatever the runner image happens to ship.
+          components: clippy, rustfmt
+      - run: cargo test --all-features
+      # NOT `-D warnings`: the repository carries ~52 pre-existing warnings, and
+      # pinning a lint gate to whatever stable ships would re-break CI on every
+      # toolchain bump. Clearing those is its own piece of work. Without the flag
+      # this still fails on any deny-by-default error, which is the class that
+      # matters — Step 2a cleared the only one standing.
+      - run: cargo clippy --all-targets --all-features
+      - run: cargo fmt --check
+
+  portable:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - name: Portable set builds without the runtime
+        run: cargo check --no-default-features
+      - name: Portable set builds for Windows
+        run: cargo check --no-default-features --target x86_64-pc-windows-msvc

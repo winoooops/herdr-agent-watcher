@@ -1,0 +1,11 @@
+{
+  "properties": {
+    "pane_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "type": "object"
+}

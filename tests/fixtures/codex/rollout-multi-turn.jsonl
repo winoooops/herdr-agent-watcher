@@ -1,0 +1,6 @@
+{"timestamp":"2026-05-03T21:56:49.215Z","type":"session_meta","payload":{"id":"sess-multi","cwd":"/tmp","cli_version":"0.128.0"}}
+{"timestamp":"2026-05-03T21:56:49.220Z","type":"turn_context","payload":{"model":"gpt-5.4"}}
+{"timestamp":"2026-05-03T21:56:49.300Z","type":"event_msg","payload":{"type":"task_complete","duration_ms":10000}}
+{"timestamp":"2026-05-03T21:56:49.400Z","type":"event_msg","payload":{"type":"task_complete","duration_ms":20000}}
+{"timestamp":"2026-05-03T21:56:49.500Z","type":"event_msg","payload":{"type":"task_complete","duration_ms":30000}}
+{"timestamp":"2026-05-03T21:56:49.600Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":50,"output_tokens":10,"reasoning_output_tokens":5,"total_tokens":110},"last_token_usage":{"input_tokens":100,"cached_input_tokens":50,"output_tokens":10,"reasoning_output_tokens":5,"total_tokens":110},"model_context_window":258400},"rate_limits":{"limit_id":"codex","primary":{"used_percent":1.0,"window_minutes":300,"resets_at":1}}}}

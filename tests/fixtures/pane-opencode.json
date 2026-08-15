@@ -1,0 +1,13 @@
+{
+ "pane_id": "demo:opencode",
+ "workspace_id": "demo-workspace",
+ "agent": "opencode",
+ "agent_session": {
+  "source": "herdr:opencode",
+  "agent": "opencode",
+  "kind": "id",
+  "value": "demo-opencode-session"
+ },
+ "cwd": "/workspace/demo",
+ "foreground_cwd": "/workspace/demo"
+}

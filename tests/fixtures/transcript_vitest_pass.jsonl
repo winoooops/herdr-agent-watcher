@@ -1,0 +1,2 @@
+{"type":"assistant","timestamp":"2026-04-28T12:00:00.000Z","message":{"content":[{"type":"tool_use","id":"toolu_v_1","name":"Bash","input":{"command":"vitest run","description":"Run tests"}}]}}
+{"type":"user","timestamp":"2026-04-28T12:00:01.500Z","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_v_1","is_error":false,"content":"\nTest Files  1 passed (1)\n     Tests  3 passed (3)\n"}]}}

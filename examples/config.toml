@@ -1,0 +1,23 @@
+# Agent Watcher configuration.
+# Location: $HERDR_PLUGIN_CONFIG_DIR/config.toml
+# Every key is optional; the commented value is the default.
+
+[appearance]
+# theme = "inherit"      # inherit | lumon
+# agent_mark = "dot"     # dot | initial | symbol
+
+[cards]
+# auto_expand = "none"   # none | all — o/↵ always toggles by hand
+# tool_calls = "bars"    # bars | jar
+# trace_lines = 5        # 1..=20
+
+[list]
+# sort = "smart"         # smart | group
+# hide_idle = false      # z toggles this at runtime
+
+# Per-agent overrides. Accepted ids: claude, codex, kimi, opencode.
+# `color` replaces the brand RGB only; the 16-colour fallback stays fixed.
+# [agent.claude]
+# color = "#d97757"
+# symbol = "✳"           # used only when agent_mark = "symbol"
+# label = "CLAUDE"

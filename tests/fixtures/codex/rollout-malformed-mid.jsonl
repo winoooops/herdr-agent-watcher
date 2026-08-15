@@ -1,0 +1,3 @@
+{"timestamp":"2026-05-03T21:56:49.215Z","type":"session_meta","payload":{"id":"sess-malformed","cli_version":"0.128.0"}}
+this is not json
+{"timestamp":"2026-05-03T21:56:49.220Z","type":"turn_context","payload":{"model":"gpt-5.4"}}

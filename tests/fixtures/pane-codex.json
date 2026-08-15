@@ -1,0 +1,13 @@
+{
+ "pane_id": "demo:codex",
+ "workspace_id": "demo-workspace",
+ "agent": "codex",
+ "agent_session": {
+  "source": "herdr:codex",
+  "agent": "codex",
+  "kind": "id",
+  "value": "demo-codex-session"
+ },
+ "cwd": "/workspace/demo",
+ "foreground_cwd": "/workspace/demo"
+}

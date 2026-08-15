@@ -1,0 +1,30 @@
+{
+  "properties": {
+    "body": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "position": {
+      "anyOf": [
+        {
+          "$ref": "#/schemas/request/$defs/ToastHerdrPosition"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "sound": {
+      "$ref": "#/schemas/request/$defs/NotificationShowSound"
+    },
+    "title": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "title"
+  ],
+  "type": "object"
+}

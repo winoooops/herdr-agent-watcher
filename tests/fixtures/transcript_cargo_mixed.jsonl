@@ -1,0 +1,2 @@
+{"type":"assistant","timestamp":"2026-04-28T13:00:00.000Z","message":{"content":[{"type":"tool_use","id":"c1","name":"Bash","input":{"command":"cargo test"}}]}}
+{"type":"user","timestamp":"2026-04-28T13:00:05.000Z","message":{"content":[{"type":"tool_result","tool_use_id":"c1","is_error":false,"content":"running 3 tests\ntest mycrate::a::test_x ... ok\ntest mycrate::a::test_y ... FAILED\ntest mycrate::b::test_z ... ignored\n\ntest result: FAILED. 1 passed; 1 failed; 1 ignored; 0 measured; 0 filtered out\n"}]}}

@@ -1,0 +1,87 @@
+{
+  "properties": {
+    "agent": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "applies_to_source": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "clear_display_agent": {
+      "default": false,
+      "type": "boolean"
+    },
+    "clear_state_labels": {
+      "default": false,
+      "type": "boolean"
+    },
+    "clear_title": {
+      "default": false,
+      "type": "boolean"
+    },
+    "display_agent": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "pane_id": {
+      "type": "string"
+    },
+    "seq": {
+      "format": "uint64",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "source": {
+      "type": "string"
+    },
+    "state_labels": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "type": "object"
+    },
+    "title": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "tokens": {
+      "additionalProperties": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "maxProperties": 16,
+      "propertyNames": {
+        "pattern": "^[A-Za-z0-9_-]{1,32}$"
+      },
+      "type": "object"
+    },
+    "ttl_ms": {
+      "format": "uint64",
+      "maximum": 86400000,
+      "minimum": 1,
+      "type": [
+        "integer",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "pane_id",
+    "source"
+  ],
+  "type": "object"
+}

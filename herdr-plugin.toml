@@ -1,0 +1,46 @@
+id = "agent-watcher"
+name = "Agent Watcher"
+version = "0.1.0"
+min_herdr_version = "0.8.0"
+description = "Coding-agent observability: transcript watchers, metrics, and notifications for Claude Code, Codex, Kimi Code, and OpenCode."
+platforms = ["macos", "linux"]
+
+[[startup]]
+command = ["target/release/agent-watcher", "daemon"]
+
+[[panes]]
+id = "sidebar"
+title = "Agent Watcher"
+description = "Live coding-agent observability cards"
+placement = "split"
+command = ["/bin/sh", "-lc", "exec \"$HERDR_PLUGIN_ROOT/target/release/agent-watcher\" sidebar"]
+
+[[actions]]
+id = "restart-daemon"
+title = "Start or restart the agents daemon"
+command = ["target/release/agent-watcher", "daemon"]
+
+[[actions]]
+id = "stop-daemon"
+title = "Stop the agents daemon"
+command = ["target/release/agent-watcher", "stop"]
+
+[[actions]]
+id = "open-sidebar"
+title = "Open the Agent Watcher sidebar (each invoke opens a new split)"
+command = ["target/release/agent-watcher", "sidebar-open"]
+
+[[actions]]
+id = "kimi-consent-on"
+title = "Enable Kimi usage reporting consent"
+command = ["target/release/agent-watcher", "kimi-consent", "on"]
+
+[[actions]]
+id = "kimi-consent-off"
+title = "Disable Kimi usage reporting consent"
+command = ["target/release/agent-watcher", "kimi-consent", "off"]
+
+[[actions]]
+id = "kimi-consent-status"
+title = "Show Kimi usage reporting consent"
+command = ["target/release/agent-watcher", "kimi-consent", "status"]
