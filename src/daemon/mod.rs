@@ -3,6 +3,8 @@ pub mod store;
 
 #[cfg(all(feature = "runtime", unix))]
 pub(crate) mod routes;
+#[cfg(all(feature = "runtime", unix))]
+pub mod config;
 
 /// Unix-only by construction (it names a socket) and only ever called from
 /// runtime code. Gated with its callers, kept exactly as it is.
