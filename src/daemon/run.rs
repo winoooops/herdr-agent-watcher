@@ -199,6 +199,10 @@ pub fn run() -> i32 {
                 for pane in &panes {
                     let cwd = pane.foreground_cwd.clone().or_else(|| pane.cwd.clone());
                     store.set_pane_list_cwd(&pane.pane_id, cwd);
+                    // Not at `set_agent`: that is inside `bind_pane`, which
+                    // receives only pane_id/agent/session and never sees a
+                    // `PaneInfo`. This loop does.
+                    store.set_pane_workspace(&pane.pane_id, Some(pane.workspace_id.clone()));
                 }
             }
             Err(HerdrClientError::Connect { .. }) => {

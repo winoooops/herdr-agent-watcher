@@ -47,6 +47,11 @@ pub struct PaneTelemetry {
     /// Not serialized: provenance is daemon-internal (§1.2a).
     #[serde(skip)]
     cwd_source: CwdSource,
+    /// The workspace herdr reports for this pane, from the reconcile loop.
+    /// `None` means "not placed yet", which the sidebar shows rather than
+    /// hides (§3.2).
+    #[serde(default)]
+    pub workspace_id: Option<String>,
     #[serde(default)]
     pub tool_counts: BTreeMap<String, u64>,
     #[serde(default)]
@@ -129,6 +134,22 @@ impl TelemetryStore {
             }
             entry.cwd = Some(cwd);
             entry.cwd_source = CwdSource::PaneList;
+            true
+        });
+    }
+
+    /// Never creates an entry: a pane with no agent has no card, and a
+    /// workspace alone is not a reason to make one. Empty maps to `None` —
+    /// `PaneInfo::workspace_id` is `#[serde(default)]` (`herdr/api.rs:22`), so
+    /// an absent field arrives as `""`, and `Some("")` would defeat the
+    /// distinction this field exists to draw.
+    pub fn set_pane_workspace(&self, pane_id: &str, workspace: Option<String>) {
+        let workspace = workspace.filter(|id| !id.is_empty());
+        self.mutate_existing(pane_id, |entry| {
+            if entry.workspace_id == workspace {
+                return false;
+            }
+            entry.workspace_id = workspace;
             true
         });
     }
@@ -447,6 +468,27 @@ pub(crate) fn normalise_event(event: &str, payload: &mut Value) {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_workspace_is_recorded_and_an_empty_one_is_not() {
+        let store = TelemetryStore::default();
+        store.set_agent("w4:p1", "claude");
+        store.set_pane_workspace("w4:p1", Some("w4".into()));
+        assert_eq!(
+            store.snapshot().1["w4:p1"].workspace_id.as_deref(),
+            Some("w4")
+        );
+
+        store.set_agent("w4:p2", "codex");
+        store.set_pane_workspace("w4:p2", Some(String::new()));
+        assert_eq!(store.snapshot().1["w4:p2"].workspace_id, None);
+
+        store.set_pane_workspace("w4:p3", Some("w4".into()));
+        assert!(
+            !store.snapshot().1.contains_key("w4:p3"),
+            "a workspace alone does not create a card"
+        );
+    }
 
     #[test]
     fn folds_tool_calls_by_id_and_counts_terminals_once() {

@@ -97,6 +97,12 @@ fn binds_pane_reports_state_and_exits_when_herdr_dies() {
         Duration::from_secs(5),
     );
 
+    let snapshot = support::state_snapshot(&state_socket).expect("snapshot");
+    assert_eq!(
+        snapshot["panes"]["p1"]["workspace_id"], "w1",
+        "the reconcile loop must record each pane's workspace: {snapshot}"
+    );
+
     let mut subscriber = std::os::unix::net::UnixStream::connect(&state_socket).unwrap();
     subscriber
         .set_read_timeout(Some(Duration::from_millis(500)))
