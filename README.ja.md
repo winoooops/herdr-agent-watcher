@@ -85,6 +85,8 @@ herdr plugin action invoke <id> --plugin herdr-agent-watcher
 | `restart-daemon` | デーモンを起動 / 再起動 | |
 | `stop-daemon` | デーモンを停止 | |
 | `open-sidebar` | 新しい分割ペインでサイドバーを開く | [サイドバー](#サイドバー) |
+| `bind-sidebar-key` | サイドバーを開くキーを割り当てる | [サイドバー](#サイドバー) |
+| `unbind-sidebar-key` | その割り当てを削除する | [サイドバー](#サイドバー) |
 | `enable-claude-bridge` | メトリクスブリッジを Claude 自身の設定に導入 | [Claude メトリクスブリッジ](#claude-メトリクスブリッジ) |
 | `disable-claude-bridge` | 設定ファイルを有効化前の状態に戻す | [Claude メトリクスブリッジ](#claude-メトリクスブリッジ) |
 | `doctor` | メトリクスが欠けている理由と対処を示す | [Doctor](#doctor) |
@@ -149,24 +151,24 @@ herdr plugin action invoke open-sidebar --plugin herdr-agent-watcher
 `HERDR_WORKSPACE_ID` が無い場合 — Herdr ペイン外でサイドバーを実行した場合 — scope は
 `all` にフォールバックし、サイドバーのフッター上部にその理由を表示します。
 
-開く操作をキーに割り当てるには、次をプラグインではなく **Herdr の**設定
-（`~/.config/herdr/config.toml`）へ追加します:
-
-```toml
-[[keys.command]]
-key = "prefix+a"
-type = "plugin_action"
-command = "open-sidebar"
-description = "Open the Agent Watcher sidebar"
-```
+キーで開くには:
 
 ```sh
-herdr config check          # 検証する
-herdr server reload-config  # Herdr を再起動せずに反映する
+herdr plugin action invoke bind-sidebar-key --plugin herdr-agent-watcher
 ```
 
-prefix の既定は `ctrl+b` なので、この割り当ては `ctrl+b` の次に `a` です。別のキーに
-するときは `herdr --default-config` で空いているか確認してください。
+この操作は割り当てを **Herdr の**設定に書き込みます。キーがすでに使われている場合は拒否し、
+何がそのキーを使っているかを示します。既定値は `prefix+a` です。Herdr の既定の prefix
+では、`ctrl+b` の次に `a` を押します。割り当てる前に、プラグインの `config.toml` で変更できます:
+
+```toml
+[keys]
+open_sidebar = "prefix+a"
+```
+
+`unbind-sidebar-key` はその割り当てを削除します。**プラグインをアンインストールする前に
+実行してください**。そうしないと、割り当て先のアクションが無くなった後も割り当てが残ります。
+Herdr はアンインストール時に何も実行しません。
 
 デーモンが利用できない、または切断された場合、ペインはその旨を表示してキー入力を待ちます。
 state socket（`$HERDR_PLUGIN_STATE_DIR/herdr-agent-watcher-state.sock`、

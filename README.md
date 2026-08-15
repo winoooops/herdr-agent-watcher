@@ -83,6 +83,8 @@ Output goes to the plugin log — read the last run with
 | `restart-daemon` | Start or restart the daemon | |
 | `stop-daemon` | Stop the daemon | |
 | `open-sidebar` | Open the live sidebar in a new split | [Sidebar](#sidebar) |
+| `bind-sidebar-key` | Bind a key to open the sidebar | [Sidebar](#sidebar) |
+| `unbind-sidebar-key` | Remove that binding | [Sidebar](#sidebar) |
 | `enable-claude-bridge` | Install the metrics bridge into Claude's own settings | [Claude metrics bridge](#claude-metrics-bridge) |
 | `disable-claude-bridge` | Restore the settings file to its pre-enable state | [Claude metrics bridge](#claude-metrics-bridge) |
 | `doctor` | Say why metrics are missing, and what to do | [Doctor](#doctor) |
@@ -146,24 +148,23 @@ what makes opening one per workspace useful. A pane the daemon has not placed ye
 rather than hidden. Without `HERDR_WORKSPACE_ID` — running the sidebar outside a Herdr pane
 — the scope falls back to `all` and the sidebar says so above its footer.
 
-To bind opening one to a key, add this to **Herdr's** config (`~/.config/herdr/config.toml`),
-not the plugin's:
-
-```toml
-[[keys.command]]
-key = "prefix+a"
-type = "plugin_action"
-command = "open-sidebar"
-description = "Open the Agent Watcher sidebar"
-```
+To open it with a key:
 
 ```sh
-herdr config check          # validate it
-herdr server reload-config  # apply it, without restarting Herdr
+herdr plugin action invoke bind-sidebar-key --plugin herdr-agent-watcher
 ```
 
-The prefix defaults to `ctrl+b`, so that binding is `ctrl+b` then `a`. To pick a different
-key, check it is free in `herdr --default-config`.
+That writes the binding into **Herdr's** config, refusing if the key is already taken and
+naming what holds it. The default is `prefix+a` — with Herdr's default prefix, `ctrl+b` then
+`a`. Change it in the plugin's `config.toml` before binding:
+
+```toml
+[keys]
+open_sidebar = "prefix+a"
+```
+
+`unbind-sidebar-key` takes it back out. **Run it before uninstalling the plugin**, or the
+binding outlives the action it points at — Herdr runs nothing on uninstall.
 
 If the daemon is unavailable or disconnects, the pane says so and waits for a key. Its
 state socket (`$HERDR_PLUGIN_STATE_DIR/herdr-agent-watcher-state.sock`,

@@ -79,6 +79,8 @@ herdr plugin action invoke <id> --plugin herdr-agent-watcher
 | `restart-daemon` | 启动或重启 daemon | |
 | `stop-daemon` | 停止 daemon | |
 | `open-sidebar` | 在新分屏里打开实时侧边栏 | [侧边栏](#侧边栏) |
+| `bind-sidebar-key` | 绑定一个打开侧边栏的快捷键 | [侧边栏](#侧边栏) |
+| `unbind-sidebar-key` | 移除该绑定 | [侧边栏](#侧边栏) |
 | `enable-claude-bridge` | 把指标桥接装进 Claude 自己的配置 | [Claude 指标桥接](#claude-指标桥接) |
 | `disable-claude-bridge` | 把配置文件还原到启用前的状态 | [Claude 指标桥接](#claude-指标桥接) |
 | `doctor` | 指出指标为什么缺失，以及该做什么 | [Doctor](#doctor) |
@@ -139,24 +141,23 @@ workspace 各开一个 sidebar 真正有用。daemon 尚未确定 workspace 的 
 被隐藏。在没有 `HERDR_WORKSPACE_ID` 时 —— 也就是在 Herdr pane 外运行 sidebar —— scope
 会回退到 `all`，sidebar 也会在 footer 上方说明原因。
 
-要绑定一个快捷键来打开 sidebar，请把下面内容加到 **Herdr 的**配置
-（`~/.config/herdr/config.toml`），而不是插件配置：
-
-```toml
-[[keys.command]]
-key = "prefix+a"
-type = "plugin_action"
-command = "open-sidebar"
-description = "Open the Agent Watcher sidebar"
-```
+要用快捷键打开它：
 
 ```sh
-herdr config check          # 校验
-herdr server reload-config  # 生效，无需重启 Herdr
+herdr plugin action invoke bind-sidebar-key --plugin herdr-agent-watcher
 ```
 
-prefix 默认是 `ctrl+b`，所以这个绑定是先按 `ctrl+b` 再按 `a`。想换别的键，先用
-`herdr --default-config` 确认它空闲。
+这会把绑定写入 **Herdr 的**配置；如果这个键已经被占用，操作会拒绝并指出占用它的项目。
+默认值是 `prefix+a` —— 使用 Herdr 的默认 prefix 时，就是先按 `ctrl+b` 再按 `a`。
+绑定前可在插件的 `config.toml` 中修改：
+
+```toml
+[keys]
+open_sidebar = "prefix+a"
+```
+
+`unbind-sidebar-key` 会移除该绑定。**卸载插件前先运行它**，否则绑定会比它指向的 action
+存留得更久 —— Herdr 卸载插件时不会运行任何命令。
 
 daemon 不可用或断开时，面板会说明并等待按键。它的 state socket
 （`$HERDR_PLUGIN_STATE_DIR/herdr-agent-watcher-state.sock`，`WIRE_VERSION = 2`）
