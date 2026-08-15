@@ -74,6 +74,98 @@ pub(crate) fn expand(expression: &str) -> Vec<String> {
     (first..=last).map(|n| format!("{prefix}{n}")).collect()
 }
 
+/// Every chord Herdr would answer to, given its defaults and the operator's
+/// config. One overlay, not two sets: an operator value REPLACES the default
+/// for that action, and an empty one releases it entirely (verified against
+/// Herdr 0.8.0 — `toggle_sidebar = ""` is `config: ok` and frees `prefix+b`).
+pub(crate) fn occupied(default_config: &str, operator_config: &str) -> BTreeSet<String> {
+    let mut by_action = defaults(default_config);
+    by_action.remove("prefix"); // names the prefix itself, not a chord
+
+    let parsed: toml::Value = operator_config
+        .parse()
+        .unwrap_or(toml::Value::Table(toml::map::Map::new()));
+    let keys = parsed.get("keys").and_then(toml::Value::as_table);
+
+    let mut out = BTreeSet::new();
+    if let Some(keys) = keys {
+        for (action, value) in keys {
+            match value {
+                toml::Value::String(s) if s.is_empty() => {
+                    by_action.remove(action.as_str());
+                }
+                toml::Value::String(s) => {
+                    by_action.insert(action.clone(), s.clone());
+                }
+                toml::Value::Array(items) => {
+                    by_action.remove(action.as_str());
+                    for chord in items.iter().filter_map(toml::Value::as_str) {
+                        out.extend(expand(chord));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    for expression in by_action.values() {
+        out.extend(expand(expression));
+    }
+
+    // `[[keys.command]]` is an array of tables under the same `keys` table.
+    if let Some(commands) = keys
+        .and_then(|k| k.get("command"))
+        .and_then(toml::Value::as_array)
+    {
+        for chord in commands
+            .iter()
+            .filter_map(|entry| entry.get("key")?.as_str())
+        {
+            out.extend(expand(chord));
+        }
+    }
+    out
+}
+
+/// The action name holding `chord`, for an error message that tells the
+/// operator what they would have to give up.
+pub(crate) fn holder(
+    default_config: &str,
+    operator_config: &str,
+    chord: &str,
+) -> Option<String> {
+    let mut by_action = defaults(default_config);
+    by_action.remove("prefix");
+    if let Ok(parsed) = operator_config.parse::<toml::Value>() {
+        if let Some(keys) = parsed.get("keys").and_then(toml::Value::as_table) {
+            for (action, value) in keys {
+                match value {
+                    toml::Value::String(s) if s.is_empty() => {
+                        by_action.remove(action.as_str());
+                    }
+                    toml::Value::String(s) => {
+                        by_action.insert(action.clone(), s.clone());
+                    }
+                    toml::Value::Array(items) => {
+                        by_action.remove(action.as_str());
+                        if items
+                            .iter()
+                            .filter_map(toml::Value::as_str)
+                            .any(|c| expand(c).iter().any(|k| k == chord))
+                        {
+                            return Some(action.clone());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    by_action
+        .into_iter()
+        .find(|(_, expression)| expand(expression).iter().any(|k| k == chord))
+        .map(|(action, _)| action)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -134,5 +226,60 @@ mod tests {
                 .map(|n| format!("prefix+alt+{n}"))
                 .collect::<Vec<_>>()
         );
+    }
+
+    fn occupied_for(config: &str) -> BTreeSet<String> {
+        occupied(FIXTURE, config)
+    }
+
+    #[test]
+    fn defaults_alone_occupy_the_expected_chords() {
+        let o = occupied_for("");
+        assert!(o.contains("prefix+b")); // toggle_sidebar
+        assert!(o.contains("prefix+minus")); // split_horizontal
+        assert!(o.contains("prefix+1")); // switch_tab range
+        assert!(o.contains("prefix+9"));
+        assert!(!o.contains("prefix+a"));
+    }
+
+    #[test]
+    fn an_empty_operator_value_releases_a_default() {
+        let o = occupied_for("[keys]\ntoggle_sidebar = \"\"\n");
+        assert!(!o.contains("prefix+b"), "an empty value unbinds it");
+    }
+
+    #[test]
+    fn an_operator_scalar_replaces_the_default_it_overrides() {
+        let o = occupied_for("[keys]\ntoggle_sidebar = \"prefix+a\"\n");
+        assert!(o.contains("prefix+a"), "the new key is taken");
+        assert!(!o.contains("prefix+b"), "and the old one is free");
+    }
+
+    #[test]
+    fn an_operator_array_takes_every_member() {
+        let o = occupied_for("[keys]\nfocus_pane_left = [\"prefix+h\", \"ctrl+shift+h\"]\n");
+        assert!(o.contains("prefix+h"));
+        assert!(o.contains("ctrl+shift+h"));
+    }
+
+    #[test]
+    fn existing_command_bindings_are_occupied_too() {
+        let o = occupied_for(
+            "[[keys.command]]\nkey = \"prefix+a\"\ntype = \"shell\"\ncommand = \"ls\"\n",
+        );
+        assert!(o.contains("prefix+a"));
+    }
+
+    #[test]
+    fn who_holds_it_names_the_action() {
+        assert_eq!(
+            holder(FIXTURE, "", "prefix+b").as_deref(),
+            Some("toggle_sidebar")
+        );
+        assert_eq!(
+            holder(FIXTURE, "", "prefix+1").as_deref(),
+            Some("switch_tab")
+        );
+        assert_eq!(holder(FIXTURE, "", "prefix+a"), None);
     }
 }
