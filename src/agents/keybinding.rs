@@ -141,11 +141,7 @@ fn command_entries(text: &str) -> Result<Vec<toml::Value>, String> {
 /// window of several syscalls (`bridge_settings.rs:62-91`); this narrows it to
 /// one, and the remedy is the one that error already gives — say so and tell
 /// the operator to run it again.
-pub(crate) fn write_config(
-    path: &Path,
-    body: &str,
-    expected: Option<&str>,
-) -> Result<(), String> {
+pub(crate) fn write_config(path: &Path, body: &str, expected: Option<&str>) -> Result<(), String> {
     write_config_hooked(path, body, expected, &|| {})
 }
 
@@ -257,12 +253,7 @@ fn bind() -> Result<String, String> {
     let existing = match std::fs::read_to_string(&config_path) {
         Ok(text) => Some(text),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(error) => {
-            return Err(format!(
-                "cannot read {}: {error}",
-                config_path.display()
-            ))
-        }
+        Err(error) => return Err(format!("cannot read {}: {error}", config_path.display())),
     };
     let current = existing.clone().unwrap_or_default();
     if !current.is_empty() && current.parse::<toml::Value>().is_err() {
@@ -367,8 +358,7 @@ fn ambiguity_check() -> Result<(), String> {
             actions
                 .iter()
                 .filter(|a| {
-                    a.get("action_id").and_then(serde_json::Value::as_str)
-                        == Some("open-sidebar")
+                    a.get("action_id").and_then(serde_json::Value::as_str) == Some("open-sidebar")
                 })
                 .filter_map(|a| Some(a.get("plugin_id")?.as_str()?.to_string()))
                 .collect()
@@ -389,8 +379,7 @@ fn ambiguity_check() -> Result<(), String> {
 /// `invalid keybinding … disabling binding` in a file they did not break.
 fn validate(candidate: &str) -> Result<(), String> {
     let dir = std::env::temp_dir().join(format!("aw-keybind-{}", std::process::id()));
-    std::fs::create_dir_all(&dir)
-        .map_err(|error| format!("create {}: {error}", dir.display()))?;
+    std::fs::create_dir_all(&dir).map_err(|error| format!("create {}: {error}", dir.display()))?;
     let path = dir.join("config.toml");
     std::fs::write(&path, candidate)
         .map_err(|error| format!("write {}: {error}", path.display()))?;
@@ -511,12 +500,8 @@ fn unbind() -> Result<String, String> {
     // is not a guarantee that what is left parses the way Herdr expects.
     validate(&remainder)?;
     if installed.created_file && remainder.trim().is_empty() {
-        std::fs::remove_file(&installed.config_path).map_err(|error| {
-            format!(
-                "remove {}: {error}",
-                installed.config_path.display()
-            )
-        })?;
+        std::fs::remove_file(&installed.config_path)
+            .map_err(|error| format!("remove {}: {error}", installed.config_path.display()))?;
     } else {
         write_config(&installed.config_path, &remainder, Some(&current))?;
     }
@@ -620,8 +605,7 @@ mod tests {
     #[test]
     fn a_neighbouring_entry_survives() {
         let (text, appended) = bound("a = 1\n");
-        let other =
-            "\n[[keys.command]]\nkey = \"prefix+z\"\ntype = \"shell\"\ncommand = \"ls\"\n";
+        let other = "\n[[keys.command]]\nkey = \"prefix+z\"\ntype = \"shell\"\ncommand = \"ls\"\n";
         let with_other = format!("{text}{other}");
         assert_eq!(
             remove_block(&with_other, &appended).unwrap(),
@@ -635,8 +619,7 @@ mod tests {
     #[test]
     fn a_record_describing_two_entries_is_refused() {
         let (_, ours) = bound("");
-        let theirs =
-            "[[keys.command]]\nkey = \"prefix+z\"\ntype = \"shell\"\ncommand = \"ls\"\n";
+        let theirs = "[[keys.command]]\nkey = \"prefix+z\"\ntype = \"shell\"\ncommand = \"ls\"\n";
         let two = format!("{ours}{theirs}");
         let config = format!("a = 1\n{two}");
         let error = remove_block(&config, &two).expect_err("must refuse");
@@ -651,22 +634,14 @@ mod tests {
         std::fs::set_permissions(&existing, std::fs::Permissions::from_mode(0o600)).unwrap();
         write_config(&existing, "a = 2\n", None).unwrap();
         assert_eq!(
-            std::fs::metadata(&existing)
-                .unwrap()
-                .permissions()
-                .mode()
-                & 0o777,
+            std::fs::metadata(&existing).unwrap().permissions().mode() & 0o777,
             0o600
         );
 
         let fresh = dir.path().join("fresh.toml");
         write_config(&fresh, "a = 1\n", None).unwrap();
         assert_eq!(
-            std::fs::metadata(&fresh)
-                .unwrap()
-                .permissions()
-                .mode()
-                & 0o777,
+            std::fs::metadata(&fresh).unwrap().permissions().mode() & 0o777,
             0o644
         );
     }
@@ -679,12 +654,10 @@ mod tests {
         std::fs::write(&real, "a = 1\n").unwrap();
         std::os::unix::fs::symlink(&real, &link).unwrap();
         write_config(&link, "a = 2\n", None).unwrap();
-        assert!(
-            std::fs::symlink_metadata(&link)
-                .unwrap()
-                .file_type()
-                .is_symlink()
-        );
+        assert!(std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
         assert_eq!(std::fs::read_to_string(&real).unwrap(), "a = 2\n");
     }
 
@@ -713,8 +686,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         std::fs::write(&path, "a = 1\n").unwrap();
-        let error =
-            write_config(&path, "a = 2\n", Some("something else")).expect_err("abort");
+        let error = write_config(&path, "a = 2\n", Some("something else")).expect_err("abort");
         assert!(error.contains("changed"), "{error}");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "a = 1\n");
     }

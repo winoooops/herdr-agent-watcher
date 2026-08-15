@@ -48,9 +48,7 @@ exit 0
             r#"{{"result":{{"actions":[{}]}}}}"#,
             owners
                 .iter()
-                .map(|id| format!(
-                    r#"{{"action_id":"open-sidebar","plugin_id":"{id}"}}"#
-                ))
+                .map(|id| format!(r#"{{"action_id":"open-sidebar","plugin_id":"{id}"}}"#))
                 .collect::<Vec<_>>()
                 .join(",")
         )),
@@ -70,7 +68,9 @@ impl FakeHerdr {
     }
 
     pub fn fail(&self) {
-        let script = std::fs::read_to_string(&self.bin).unwrap().replace("exit 0", "exit 1");
+        let script = std::fs::read_to_string(&self.bin)
+            .unwrap()
+            .replace("exit 0", "exit 1");
         std::fs::write(&self.bin, script).unwrap();
     }
 

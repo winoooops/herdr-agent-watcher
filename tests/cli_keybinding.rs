@@ -98,7 +98,11 @@ fn bind_twice_is_already_bound() {
 
     let second = env.run("bind-sidebar-key");
     assert!(second.status.success());
-    assert_eq!(env.config(), after_first, "the block must not be duplicated");
+    assert_eq!(
+        env.config(),
+        after_first,
+        "the block must not be duplicated"
+    );
     assert!(String::from_utf8_lossy(&second.stdout).contains("already bound"));
 }
 
@@ -255,7 +259,11 @@ fn unbind_refuses_when_the_block_was_edited() {
 
     let out = env.run("unbind-sidebar-key");
     assert!(!out.status.success());
-    assert_eq!(env.config(), edited, "an edited block is not ours to remove");
+    assert_eq!(
+        env.config(),
+        edited,
+        "an edited block is not ours to remove"
+    );
 }
 
 #[test]
@@ -296,17 +304,9 @@ fn unbind_refuses_when_the_block_is_there_but_the_record_is_gone() {
 fn unbind_refuses_when_it_cannot_read_the_config() {
     use std::os::unix::fs::PermissionsExt;
     let env = Env::new(Some("[ui]\nx = 1\n"), "", "config: ok");
-    std::fs::set_permissions(
-        &env.herdr_config,
-        std::fs::Permissions::from_mode(0o000),
-    )
-    .unwrap();
+    std::fs::set_permissions(&env.herdr_config, std::fs::Permissions::from_mode(0o000)).unwrap();
     let out = env.run("unbind-sidebar-key");
-    std::fs::set_permissions(
-        &env.herdr_config,
-        std::fs::Permissions::from_mode(0o644),
-    )
-    .unwrap();
+    std::fs::set_permissions(&env.herdr_config, std::fs::Permissions::from_mode(0o644)).unwrap();
     assert!(
         !out.status.success(),
         "an unreadable config is not a clean one"

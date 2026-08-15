@@ -128,11 +128,7 @@ pub(crate) fn occupied(default_config: &str, operator_config: &str) -> BTreeSet<
 
 /// The action name holding `chord`, for an error message that tells the
 /// operator what they would have to give up.
-pub(crate) fn holder(
-    default_config: &str,
-    operator_config: &str,
-    chord: &str,
-) -> Option<String> {
+pub(crate) fn holder(default_config: &str, operator_config: &str, chord: &str) -> Option<String> {
     let mut by_action = defaults(default_config);
     by_action.remove("prefix");
     if let Ok(parsed) = operator_config.parse::<toml::Value>() {
@@ -183,10 +179,7 @@ mod tests {
             d.get("split_horizontal").map(String::as_str),
             Some("prefix+minus")
         );
-        assert_eq!(
-            d.get("switch_tab").map(String::as_str),
-            Some("prefix+1..9")
-        );
+        assert_eq!(d.get("switch_tab").map(String::as_str), Some("prefix+1..9"));
         assert_eq!(d.get("prefix").map(String::as_str), Some("ctrl+b"));
     }
 
