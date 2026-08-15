@@ -39,6 +39,15 @@ pub enum ToolCallStyle {
     Jar,
 }
 
+/// Which panes a sidebar lists. `Workspace` means the workspace the sidebar's
+/// own pane is in; see `Loaded::resolve_scope`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Scope {
+    #[default]
+    All,
+    Workspace,
+}
+
 pub struct Loaded {
     pub theme: Theme,
     pub agent_mark: AgentMark,
@@ -47,6 +56,11 @@ pub struct Loaded {
     pub trace_lines: u8,
     pub sort: Sort,
     pub hide_idle: bool,
+    pub scope: Scope,
+    /// The workspace this sidebar is in, once `resolve_scope` has run. `None`
+    /// whenever `scope` is `All`, which is also what an unresolvable
+    /// `Workspace` degrades to.
+    pub workspace_id: Option<String>,
     pub appearances: AgentAppearances,
     pub status: ConfigStatus,
     pub problem_details: Vec<String>,
@@ -62,6 +76,8 @@ impl Default for Loaded {
             trace_lines: 5,
             sort: Sort::default(),
             hide_idle: false,
+            scope: Scope::default(),
+            workspace_id: None,
             appearances: builtin_appearances(),
             status: ConfigStatus {
                 problems: 0,
@@ -243,6 +259,11 @@ impl Loaded {
                     Some(b) => self.hide_idle = b,
                     None => self.problem("invalid value for list.hide_idle".into()),
                 },
+                "scope" => match val.as_str() {
+                    Some("all") => self.scope = Scope::All,
+                    Some("workspace") => self.scope = Scope::Workspace,
+                    _ => self.problem("invalid value for list.scope".into()),
+                },
                 other => self.problem(format!("unknown key list.{other}")),
             }
         }
@@ -374,6 +395,29 @@ mod tests {
     fn the_daemons_table_is_not_the_sidebars_problem() {
         let l = load_str("[daemon]\ninterval_ms = 5000\n");
         assert_eq!(l.status.problems, 0, "{:?}", l.problem_details);
+    }
+
+    #[test]
+    fn scope_parses_both_known_values_and_defaults_to_all() {
+        assert_eq!(load_str("").scope, Scope::All);
+        assert_eq!(load_str("[list]\nscope = \"all\"\n").scope, Scope::All);
+        assert_eq!(
+            load_str("[list]\nscope = \"workspace\"\n").scope,
+            Scope::Workspace
+        );
+    }
+
+    #[test]
+    fn an_unknown_scope_is_a_problem_and_falls_back_to_all() {
+        for text in [
+            "[list]\nscope = \"Workspace\"\n",
+            "[list]\nscope = \"tab\"\n",
+            "[list]\nscope = 3\n",
+        ] {
+            let l = load_str(text);
+            assert_eq!(l.scope, Scope::All, "{text}");
+            assert_eq!(l.status.problems, 1, "{text}");
+        }
     }
 
     #[test]
