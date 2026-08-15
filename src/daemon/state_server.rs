@@ -100,6 +100,7 @@ fn handle_connection(
                     version: WIRE_VERSION,
                     seq,
                     panes,
+                    refused: routes.refusals(),
                 },
             );
         }
@@ -111,6 +112,9 @@ fn handle_connection(
                     version: WIRE_VERSION,
                     seq,
                     panes,
+                    // The sidebar does not read this; `doctor` asks for a
+                    // snapshot, not a subscription.
+                    refused: Default::default(),
                 },
             )
             .is_ok()

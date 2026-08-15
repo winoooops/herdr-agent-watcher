@@ -171,24 +171,21 @@ pub(crate) fn window_size(status_path: &Path) -> Option<u64> {
     (size > 0).then_some(size)
 }
 
-fn daemon_answers(socket: &Path) -> bool {
+/// What the daemon says about itself. `None` means it did not answer.
+///
+/// The reply was previously parsed only far enough to prove it was alive, and
+/// the rest thrown away -- including the one field that says why a pane's
+/// status line is being turned away.
+fn daemon_state(socket: &Path) -> Option<crate::daemon::state_wire::Hello> {
     use std::io::{BufRead, BufReader, Write};
-    let Ok(mut stream) = std::os::unix::net::UnixStream::connect(socket) else {
-        return false;
-    };
+    let mut stream = std::os::unix::net::UnixStream::connect(socket).ok()?;
     let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(750)));
     let _ = stream.set_write_timeout(Some(std::time::Duration::from_millis(750)));
-    if writeln!(stream, r#"{{"method":"snapshot"}}"#).is_err() {
-        return false;
-    }
-    let Ok(reader) = stream.try_clone() else {
-        return false;
-    };
+    writeln!(stream, r#"{{"method":"snapshot"}}"#).ok()?;
+    let reader = stream.try_clone().ok()?;
     let mut line = String::new();
-    BufReader::new(reader).read_line(&mut line).is_ok()
-        && serde_json::from_str::<Value>(&line)
-            .ok()
-            .is_some_and(|reply| !reply["version"].is_null())
+    BufReader::read_line(&mut BufReader::new(reader), &mut line).ok()?;
+    serde_json::from_str(&line).ok()
 }
 
 fn executable_and_names(path: &Path, binary: &Path) -> bool {
@@ -200,6 +197,15 @@ fn executable_and_names(path: &Path, binary: &Path) -> bool {
         && std::fs::read_to_string(path)
             .map(|body| body.contains(&*binary.to_string_lossy()))
             .unwrap_or(false)
+}
+
+/// Session ids are UUIDs; two of them in one line is unreadable at sidebar
+/// width, and the first segment is enough to see that they differ.
+fn short(session: &str) -> &str {
+    session
+        .split_once('-')
+        .map(|(head, _)| head)
+        .unwrap_or(session)
 }
 
 /// Eight arguments, one over clippy's default. Every one of them is a path or
@@ -238,7 +244,12 @@ pub(crate) fn run(
             id: "restart-daemon",
         }),
     });
-    let up = daemon_answers(socket);
+    let state = daemon_state(socket);
+    let refused = state
+        .as_ref()
+        .map(|state| state.refused.clone())
+        .unwrap_or_default();
+    let up = state.is_some();
     report.checks.push(Check {
         id: CheckId::DaemonReachable,
         level: if up { Level::Ok } else { Level::Fail },
@@ -301,7 +312,23 @@ pub(crate) fn run(
             .and_then(|session| resolve(&pane.pane_id, session))
             .as_deref()
             .and_then(window_size);
+        let refusal = refused.get(&pane.pane_id);
         let (level, summary, remedy) = match (&shadow, flag_shadow, &pane.agent_session, size) {
+            // Before the "not rendered yet" arm: this pane HAS rendered, the
+            // write arrived, and the daemon turned it away. Waiting is the one
+            // thing that will not help.
+            (None, false, _, None) if refusal.is_some() => {
+                let refusal = refusal.expect("checked above");
+                (
+                    Level::Fail,
+                    format!(
+                        "status line refused: it reports session {}, the daemon has {} bound",
+                        short(&refusal.offered),
+                        short(&refusal.bound)
+                    ),
+                    Some(Remedy::ReopenPane),
+                )
+            }
             (Some((path, command)), _, _, _) => {
                 shadowed += 1;
                 (
@@ -465,9 +492,15 @@ mod tests {
     use serde_json::json;
 
     fn answering_socket(dir: &Path) -> PathBuf {
+        socket_reporting(dir, "{}")
+    }
+
+    /// `refused` is the JSON object the daemon would put in its snapshot.
+    fn socket_reporting(dir: &Path, refused: &str) -> PathBuf {
         use std::io::{BufRead, BufReader, Write};
         let socket = dir.join("state.sock");
         let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let reply = format!(r#"{{"version":2,"seq":0,"panes":{{}},"refused":{refused}}}"#);
         std::thread::spawn(move || {
             while let Ok((mut stream, _)) = listener.accept() {
                 let mut line = String::new();
@@ -475,7 +508,7 @@ mod tests {
                     continue;
                 };
                 let _ = BufReader::new(cloned).read_line(&mut line);
-                let _ = writeln!(stream, r#"{{"version":2,"seq":0,"panes":{{}}}}"#);
+                let _ = writeln!(stream, "{reply}");
             }
         });
         socket
@@ -774,6 +807,74 @@ mod tests {
             .unwrap();
         assert_ne!(verdict.level, Level::Ok);
         assert!(verdict.summary.contains("cannot see"));
+    }
+
+    /// The case that reads as "no metrics yet" but is not: the pane rendered,
+    /// the write arrived, and the daemon turned it away because the session in
+    /// the pane was replaced. Waiting will never fix it.
+    #[test]
+    fn a_refused_session_is_named_and_sends_you_to_reopen_the_pane() {
+        let dir = tempfile::tempdir().unwrap();
+        let binary = Path::new("/bin/herdr-agent-watcher");
+        let (settings, statusline, attention) = healthy(dir.path(), binary);
+        // UUID-shaped, because that is what a session id is: the summary
+        // prints only the first segment, and a fixture that ignores that
+        // asserts against a line the reader will never see.
+        //
+        // One line: the protocol is newline-delimited, and a newline inside
+        // the payload truncates it at the reader.
+        let socket = socket_reporting(
+            dir.path(),
+            r#"{"w1:p1":{"offered":"958e9bb7-a0ae-434b-8a76-76e1504a8dcc","bound":"595edc8e-8764-4f98-a116-453113a8e5db"}}"#,
+        );
+        let report = run(
+            &socket,
+            &settings,
+            &statusline,
+            &attention,
+            binary,
+            &[input(
+                "w1:p1",
+                Some("958e9bb7-a0ae-434b-8a76-76e1504a8dcc"),
+                dir.path(),
+            )],
+            &|_, _| None,
+            &[],
+        );
+        let pane = &report.panes[0];
+        assert!(matches!(pane.remedy, Some(Remedy::ReopenPane)), "{pane:?}");
+        assert!(pane.summary.contains("refus"), "{}", pane.summary);
+        assert!(pane.summary.contains("958e9bb7"), "{}", pane.summary);
+        assert!(pane.summary.contains("595edc8e"), "{}", pane.summary);
+        assert!(
+            !pane.summary.contains("76e1504a8dcc"),
+            "a whole UUID does not fit on a doctor line: {}",
+            pane.summary
+        );
+    }
+
+    /// Without this the previous test passes against an implementation that
+    /// always says "refused".
+    #[test]
+    fn a_pane_with_no_refusal_still_reads_as_not_yet_rendered() {
+        let dir = tempfile::tempdir().unwrap();
+        let binary = Path::new("/bin/herdr-agent-watcher");
+        let (settings, statusline, attention) = healthy(dir.path(), binary);
+        let socket = answering_socket(dir.path());
+        let report = run(
+            &socket,
+            &settings,
+            &statusline,
+            &attention,
+            binary,
+            &[input("w1:p1", Some("s1"), dir.path())],
+            &|_, _| None,
+            &[],
+        );
+        assert!(matches!(
+            report.panes[0].remedy,
+            Some(Remedy::WaitOrInteract)
+        ));
     }
 
     #[test]

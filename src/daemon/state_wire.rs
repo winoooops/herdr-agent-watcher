@@ -10,12 +10,25 @@ pub struct StatusPath {
     pub path: Option<String>,
 }
 
+/// Why one pane's status line is being turned away, for `doctor`. Not
+/// telemetry: the sidebar draws nothing from it.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Refusal {
+    pub offered: String,
+    pub bound: String,
+}
+
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct Hello {
     pub version: u32,
     pub seq: u64,
     #[serde(default)]
     pub panes: HashMap<String, PaneTelemetry>,
+    /// Additive, so no `WIRE_VERSION` bump: a sidebar built before this
+    /// ignores a field it does not know, and bumping would make every running
+    /// one report a mismatch for something it does not read.
+    #[serde(default)]
+    pub refused: HashMap<String, Refusal>,
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
