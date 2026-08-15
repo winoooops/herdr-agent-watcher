@@ -1,5 +1,31 @@
 mod support;
 
+#[test]
+fn doctor_reports_a_rejected_interval_from_the_plugin_config() {
+    let config = tempfile::tempdir().expect("tempdir");
+    let state = tempfile::tempdir().expect("tempdir");
+    let claude = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        config.path().join("config.toml"),
+        "[daemon]\ninterval_ms = 0\n",
+    )
+    .expect("write");
+
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_herdr-agent-watcher"))
+        .arg("doctor")
+        .env("CLAUDE_CONFIG_DIR", claude.path())
+        .env("HERDR_PLUGIN_CONFIG_DIR", config.path())
+        .env("HERDR_PLUGIN_STATE_DIR", state.path())
+        .env_remove("AGENT_WATCHER_INTERVAL_MS")
+        .env_remove("HERDR_SOCKET_PATH")
+        .output()
+        .expect("run doctor");
+
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("daemon.interval_ms"), "{text}");
+    assert!(text.contains("1000"), "{text}");
+}
+
 fn fake_state_socket(dir: &std::path::Path, reply: Option<&str>) -> std::path::PathBuf {
     use std::io::{BufRead, BufReader, Write};
     let socket = dir.join("state.sock");

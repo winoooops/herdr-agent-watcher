@@ -760,6 +760,7 @@ pub fn cli_doctor(_args: &[String]) -> i32 {
             argv: process_argv_for_pane(&info.pane_id),
         })
         .collect();
+    let config_problems = crate::daemon::config::DaemonConfig::load().problems;
     let report = doctor::run(
         &socket,
         &settings,
@@ -768,6 +769,7 @@ pub fn cli_doctor(_args: &[String]) -> i32 {
         &me,
         &panes,
         &|pane, session| resolve_status_path(&socket, pane, session).ok(),
+        &config_problems,
     );
     print!("{}", doctor::render(&report));
     0

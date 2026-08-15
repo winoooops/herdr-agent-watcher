@@ -19,6 +19,7 @@ pub(crate) enum CheckId {
     NothingShadowing,
     HooksEnabled,
     MetricsPresent,
+    ConfigValid,
 }
 
 #[derive(Debug, Clone)]
@@ -209,8 +210,29 @@ pub(crate) fn run(
     binary: &Path,
     panes: &[PaneInput],
     resolve: &dyn Fn(&str, &str) -> Option<PathBuf>,
+    config_problems: &[String],
 ) -> Report {
     let mut report = Report::default();
+    report.checks.push(Check {
+        id: CheckId::ConfigValid,
+        level: if config_problems.is_empty() {
+            Level::Ok
+        } else {
+            Level::Warn
+        },
+        summary: if config_problems.is_empty() {
+            "config.toml accepted".to_string()
+        } else {
+            format!(
+                "{} setting(s) in config.toml were rejected; defaults applied",
+                config_problems.len()
+            )
+        },
+        evidence: (!config_problems.is_empty()).then(|| config_problems.join("\n    ")),
+        remedy: (!config_problems.is_empty()).then_some(Remedy::PluginAction {
+            id: "restart-daemon",
+        }),
+    });
     let up = daemon_answers(socket);
     report.checks.push(Check {
         id: CheckId::DaemonReachable,
@@ -480,6 +502,59 @@ mod tests {
         }
     }
 
+    fn run_with_config_problems(problems: &[String]) -> (tempfile::TempDir, Report) {
+        let dir = tempfile::tempdir().unwrap();
+        let binary = Path::new("/bin/herdr-agent-watcher");
+        let (settings, statusline, attention) = healthy(dir.path(), binary);
+        let socket = answering_socket(dir.path());
+        let status = dir.path().join("status.json");
+        std::fs::write(
+            &status,
+            json!({"context_window":{"context_window_size":200000}}).to_string(),
+        )
+        .unwrap();
+        let report = run(
+            &socket,
+            &settings,
+            &statusline,
+            &attention,
+            binary,
+            &[input("w1:p1", Some("s1"), dir.path())],
+            &|_, _| Some(status.clone()),
+            problems,
+        );
+        (dir, report)
+    }
+
+    #[test]
+    fn a_rejected_interval_is_reported() {
+        let problems =
+            vec!["daemon.interval_ms must be positive, found 0; using 1000".to_string()];
+        let (_dir, report) = run_with_config_problems(&problems);
+        let check = report
+            .checks
+            .iter()
+            .find(|c| c.id == CheckId::ConfigValid)
+            .expect("a ConfigValid check");
+        assert_eq!(check.level, Level::Warn);
+
+        let text = render(&report);
+        assert!(text.contains("daemon.interval_ms"), "{text}");
+        assert!(text.contains("1000"), "{text}");
+    }
+
+    #[test]
+    fn a_clean_config_is_one_green_check() {
+        let (_dir, report) = run_with_config_problems(&[]);
+        let check = report
+            .checks
+            .iter()
+            .find(|c| c.id == CheckId::ConfigValid)
+            .expect("a ConfigValid check");
+        assert_eq!(check.level, Level::Ok);
+        assert!(check.evidence.is_none());
+    }
+
     #[test]
     fn parent_project_status_line_is_found_and_no_status_line_is_ignored() {
         let dir = tempfile::tempdir().unwrap();
@@ -657,6 +732,7 @@ mod tests {
             binary,
             &[input("w1:p1", Some("s1"), dir.path())],
             &|_, _| Some(status.clone()),
+            &[],
         );
         assert!(report.checks.iter().all(|check| check.level == Level::Ok));
         assert_eq!(report.panes[0].window_size, Some(200_000));
@@ -669,6 +745,7 @@ mod tests {
             binary,
             &[input("w1:p1", None, dir.path())],
             &|_, _| None,
+            &[],
         );
         assert!(matches!(
             no_session.panes[0].remedy,
@@ -684,6 +761,7 @@ mod tests {
             binary,
             &[input("w1:p1", Some("s1"), dir.path())],
             &|_, _| Some(status.clone()),
+            &[],
         );
         let verdict = unknown
             .checks
@@ -715,6 +793,7 @@ mod tests {
             binary,
             &[input("w1:p1", Some("s1"), &project)],
             &|_, _| None,
+            &[],
         );
         match &report.panes[0].remedy {
             Some(Remedy::WriteSettingsBlock { path, block }) => {
