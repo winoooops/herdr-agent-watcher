@@ -942,10 +942,7 @@ mod tests {
     }
 
     fn with_state_dir_env<T>(value: Option<&std::ffi::OsStr>, body: impl FnOnce() -> T) -> T {
-        with_env(
-            &[("HERDR_PLUGIN_STATE_DIR", value.map(Into::into))],
-            body,
-        )
+        with_env(&[("HERDR_PLUGIN_STATE_DIR", value.map(Into::into))], body)
     }
 
     #[test]

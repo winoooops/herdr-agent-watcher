@@ -202,6 +202,11 @@ fn executable_and_names(path: &Path, binary: &Path) -> bool {
             .unwrap_or(false)
 }
 
+/// Eight arguments, one over clippy's default. Every one of them is a path or
+/// a value this function must not go and fetch for itself — that is what makes
+/// it a pure report builder the tests can drive. Bundling them into a struct
+/// would move the same eight names one line up and buy nothing.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn run(
     socket: &Path,
     settings_path: &Path,
@@ -528,8 +533,7 @@ mod tests {
 
     #[test]
     fn a_rejected_interval_is_reported() {
-        let problems =
-            vec!["daemon.interval_ms must be positive, found 0; using 1000".to_string()];
+        let problems = vec!["daemon.interval_ms must be positive, found 0; using 1000".to_string()];
         let (_dir, report) = run_with_config_problems(&problems);
         let check = report
             .checks

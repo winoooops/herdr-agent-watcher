@@ -2,9 +2,9 @@ pub mod state_wire;
 pub mod store;
 
 #[cfg(all(feature = "runtime", unix))]
-pub(crate) mod routes;
-#[cfg(all(feature = "runtime", unix))]
 pub mod config;
+#[cfg(all(feature = "runtime", unix))]
+pub(crate) mod routes;
 
 /// Unix-only by construction (it names a socket) and only ever called from
 /// runtime code. Gated with its callers, kept exactly as it is.

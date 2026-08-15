@@ -123,10 +123,7 @@ mod tests {
                 "theirs".to_string(),
                 placed(CardState::Running, 2, Some("w9")),
             ),
-            (
-                "unplaced".to_string(),
-                placed(CardState::Running, 1, None),
-            ),
+            ("unplaced".to_string(), placed(CardState::Running, 1, None)),
         ])
     }
 
