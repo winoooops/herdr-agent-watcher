@@ -25,8 +25,9 @@
 herdr plugin install winoooops/herdr-agent-watcher
 ```
 
-需要 Herdr 0.8.0+ 和 Rust 1.88+ —— Herdr 会在安装时执行 `cargo build --release`，工具链
-缺失时它只报错，不会替你安装。
+需要 Herdr 0.8.0+。安装时会下载 macOS 和 Linux（x86_64 与 arm64）的预编译二进制并校验
+SHA256。如果没有匹配你平台的产物、或下载环节出任何问题，就改为从源码编译 —— 那条路需要
+Rust 1.88+，工具链缺失时 Herdr 只报错，不会替你安装。
 
 往一个**已在运行**的 Herdr server 里安装时不会自动启动 daemon，需要手动跑一次：
 
@@ -208,10 +209,8 @@ sidecar 树中，而那棵树是冻结的。
 - [ ] 回收失效的 bridge 目录。判据用**存活性** —— pane id 不在 Herdr 的 pane 列表里
       **且**没有进程持有它 —— 绝不用 unbind（rebind 是常态），也绝不用 mtime
       （会误伤长时间空闲但仍开着的 pane）
-- [ ] 每个 release 发布预编译二进制，让安装不再需要 `cargo`。herdr 没有任何关于 release
-      asset 的支持，但 `[[build]]` 是任意命令 —— 它可以去下载并校验产物而不是编译，
-      当前平台没有匹配的 asset 时再回退到 `cargo build --release`。这件事落地之后，
-      Rust 这条要求就该从 **安装** 挪到 **本地开发** —— 那时只有要改插件的人才需要编译
+- [x] 每个 release 发布预编译二进制，让安装不再需要 `cargo`。`[[build]]` 现在跑
+      `scripts/fetch-or-build.sh`：下载匹配平台的产物、校验 SHA256，任何一步失败就改为编译
 - [ ] sidebar 的 `:` 命令模式，以及整页 doctor 视图
 - [ ] 修掉 flaky 的 `pane_without_cwd_uses_herdrs_cwd_for_that_pane` 测试
 

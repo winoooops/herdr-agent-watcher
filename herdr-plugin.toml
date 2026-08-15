@@ -6,7 +6,10 @@ description = "Coding-agent observability: transcript watchers, metrics, and not
 platforms = ["macos", "linux"]
 
 [[build]]
-command = ["cargo", "build", "--release"]
+# Not a compile step by contract — it only has to leave a working binary at
+# target/release/herdr-agent-watcher. It fetches a verified release asset when
+# one matches the platform and compiles when anything goes wrong.
+command = ["sh", "scripts/fetch-or-build.sh"]
 platforms = ["macos", "linux"]
 
 [[startup]]

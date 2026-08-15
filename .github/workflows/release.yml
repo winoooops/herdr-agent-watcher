@@ -1,0 +1,97 @@
+name: Release
+
+# Publishes the four binaries `scripts/fetch-or-build.sh` knows how to fetch.
+# Their names must stay in step with the `case` in that script: it looks for
+# `herdr-agent-watcher-<version>-<target>` in the release tagged `v<version>`.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  # A tag that disagrees with Cargo.toml publishes assets under a version the
+  # install script will never ask for. Fail here rather than ship a release
+  # that silently makes everyone compile.
+  guard:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: check
+        run: |
+          set -euo pipefail
+          cargo_version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
+          tag_version="${GITHUB_REF_NAME#v}"
+          if [ "$cargo_version" != "$tag_version" ]; then
+            echo "tag $GITHUB_REF_NAME does not match Cargo.toml version $cargo_version" >&2
+            exit 1
+          fi
+          echo "version=$cargo_version" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: guard
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14
+            target: aarch64-apple-darwin
+          - runner: macos-13
+            target: x86_64-apple-darwin
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      # musl is what makes the Linux builds work on any distribution rather than
+      # only on one as new as this runner's glibc.
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - run: cargo build --release --target ${{ matrix.target }}
+      - name: Name the asset the way the install script looks for it
+        run: |
+          set -euo pipefail
+          asset="herdr-agent-watcher-${{ needs.guard.outputs.version }}-${{ matrix.target }}"
+          cp "target/${{ matrix.target }}/release/herdr-agent-watcher" "$asset"
+          echo "ASSET=$asset" >> "$GITHUB_ENV"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ASSET }}
+          path: ${{ env.ASSET }}
+          if-no-files-found: error
+
+  publish:
+    needs: [guard, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: assets
+          merge-multiple: true
+      # Two spaces between hash and name: `fetch-or-build.sh` greps for
+      # "  <asset>" at end of line, which is also what sha256sum -c expects.
+      - name: Checksums
+        run: |
+          set -euo pipefail
+          cd assets
+          chmod +x herdr-agent-watcher-*
+          sha256sum herdr-agent-watcher-* > SHA256SUMS
+          cat SHA256SUMS
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes \
+            assets/*

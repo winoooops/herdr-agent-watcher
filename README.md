@@ -27,8 +27,10 @@ plan-usage lookup, which is off until you turn it on — see
 herdr plugin install winoooops/herdr-agent-watcher
 ```
 
-Requires Herdr 0.8.0+ and Rust 1.88+ — Herdr runs `cargo build --release` during install
-and reports a failure rather than installing a toolchain.
+Requires Herdr 0.8.0+. Install fetches a prebuilt binary for macOS and Linux (x86_64 and
+arm64) and checks its SHA256. If no asset matches your platform, or anything about the
+download fails, it builds from source instead — that path needs Rust 1.88+, which Herdr
+reports rather than installs.
 
 Installing into an already-running Herdr server does not start the daemon. Run it once:
 
@@ -223,12 +225,9 @@ required to degrade to.
 - [ ] Reap dead bridge directories. Key the reaper on **liveness** — the pane id is absent
       from Herdr's pane list *and* no process holds it — never on unbind (rebind is the
       common case) and never on mtime (it would hit long-idle panes that are still open)
-- [ ] Publish a prebuilt binary per release so `cargo` is not required to install. Herdr
-      has no documented support for release assets, but `[[build]]` is an arbitrary
-      command — it can fetch and verify an artifact instead of compiling one, falling back
-      to `cargo build --release` when no asset matches the platform. When this lands, the
-      Rust requirement moves out of **Install** and into **Local development**, where it
-      belongs — building would only be for hacking on the plugin
+- [x] Publish a prebuilt binary per release so `cargo` is not required to install.
+      `[[build]]` runs `scripts/fetch-or-build.sh`, which fetches the asset matching the
+      platform, verifies its SHA256, and compiles instead on any failure
 - [ ] A `:` command mode in the sidebar, with a full-page doctor view
 - [ ] Fix the flaky `pane_without_cwd_uses_herdrs_cwd_for_that_pane` test
 
