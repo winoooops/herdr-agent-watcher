@@ -52,6 +52,30 @@ for its module-boundary declaration.
 
 ## Sanctioned modifications (Apache §4(b)-style registry)
 
+### M0a-4 — `serde_helpers.rs` test data
+
+`assert_eq!(p.ratio, Some(3.14))` → `1.5` in
+`lenient_f64_accepts_numbers_rejects_others`. `clippy::approx_constant` is deny-by-default
+and read 3.14 as π, which made `cargo clippy` unusable repo-wide. Test data only; no
+production behaviour differs from the vimeflow original. (Commit `e249327`.)
+
+### M0a-6 — `src/agents/claude_bridge.rs` forks bridge generation
+
+`src/agent/adapter/claude_code/bridge.rs` is frozen, so Agent Watcher generates its own
+overlay. Three deliberate differences from the original:
+
+1. **Destinations are baked in, not read from `$VIMEFLOW_STATUS_FILE` /
+   `$VIMEFLOW_ATTENTION_FILE`.** The plugin never spawns the PTY, so it cannot set env.
+2. **`attention.jsonl` is created only when absent.** The original truncates on every
+   generation, which was safe when generation ran once per spawned session; here it runs
+   per launch, and the watcher holds a cursor.
+3. **`UserPromptSubmit` synthesises a name-only record.** The original does too, via an
+   inline command; routing it through the shared append path would have written the user's
+   prompt text to disk.
+
+`shell_quote_path` and `write_executable_script` are private in the frozen tree and are
+reimplemented rather than widened.
+
 The OpenCode bridge is a PUBLIC artifact installed into the user's OpenCode config, so it
 follows the product-neutral naming policy rather than the frozen-tree rule (commit
 `c0f374a`, intentional). Files diverging from the sidecar source as a result — future

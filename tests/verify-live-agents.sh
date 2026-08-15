@@ -23,7 +23,7 @@ filter='[
   else $panes
   end'
 
-herdr plugin action invoke restart-daemon --plugin agent-watcher >/dev/null
+herdr plugin action invoke restart-daemon --plugin herdr-agent-watcher >/dev/null
 
 attempt=0
 while [ "$attempt" -lt 5 ]; do

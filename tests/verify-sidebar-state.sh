@@ -1,8 +1,8 @@
 #!/bin/sh
 set -eu
 
-state_dir=${HERDR_PLUGIN_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/herdr/plugins/agent-watcher}
-socket_path=$state_dir/agent-watcher-state.sock
+state_dir=${HERDR_PLUGIN_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/herdr/plugins/herdr-agent-watcher}
+socket_path=$state_dir/herdr-agent-watcher-state.sock
 
 if [ ! -S "$socket_path" ]; then
   printf 'Agent Watcher state socket not found: %s\n' "$socket_path" >&2

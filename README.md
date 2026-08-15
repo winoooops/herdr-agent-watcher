@@ -1,80 +1,45 @@
-# Agent Watcher for Herdr
+# herdr-agent-watcher
 
-> Renamed from `vimeflow-agents` on 2026-08-10. Agent Watcher is a standalone,
-> product-neutral Herdr plugin; Vimeflow may consume it later but does not own its scope.
+**English** · [简体中文](README.zh-CN.md) · [日本語](README.ja.md)
 
-Coding-agent observability for Herdr. The plugin watches local agent state and
-transcripts, reports pane metadata, and sends lifecycle notifications. Local
-observation is the default; Kimi plan-usage reporting is an explicit opt-in.
+Coding-agent observability for [Herdr](https://herdr.dev): live sidebar cards, lifecycle
+notifications, and a zero-config metrics bridge for Claude Code.
 
-## Install for local development
+![The Agent Watcher sidebar](docs/sidebar.png)
 
-Requires Herdr 0.8.0+ and Rust 1.88+.
+Four agents in one pane. The expanded Claude card shows CONTEXT, CACHE and COST — the
+three metrics Claude Code reports only through a status line, which is what the bridge
+below exists to deliver.
 
-```sh
-cargo build --release
-herdr plugin link "$PWD"
-herdr plugin action invoke restart-daemon --plugin agent-watcher
-```
+The idea began inside [Vimeflow](https://github.com/winoooops/vimeflow), where watching
+coding agents was one layer of a much larger Electron app.
 
-The stock Herdr UI receives notifications and pane metadata tokens including
-`agent_watcher_state`, `agent_watcher_phase`, `agent_watcher_model`,
-`agent_watcher_context_pct`, `agent_watcher_attention`, and
-`agent_watcher_title`.
+Pairs with [herdr-agent-title-sync](https://github.com/winoooops/herdr-agent-title-sync),
+which keeps Herdr pane titles in step with what each agent is doing.
 
-## Sidebar
+Local observation is the default. The one thing that leaves your machine is Kimi's
+plan-usage lookup, which is off until you turn it on — see
+[Kimi usage consent](#kimi-usage-consent).
 
-Open the live Agent Watcher sidebar in a right-hand split:
+## Install
 
 ```sh
-herdr plugin action invoke open-sidebar --plugin agent-watcher
+herdr plugin install winoooops/herdr-agent-watcher
 ```
 
-Each invocation intentionally opens another split. Cards show agent state,
-agent/model, title, context use, cache hit rate, cost, tool count, and the three
-newest tool traces. Use Up/Down or PageUp/PageDown to scroll and `q`, Escape, or
-Ctrl-C to close.
+Requires Herdr 0.8.0+ and Rust 1.88+ — Herdr runs `cargo build --release` during install
+and reports a failure rather than installing a toolchain.
 
-If the daemon is unavailable or disconnects, the pane reports that state and
-waits for a key before closing. The sidebar's state socket is plugin-internal:
-`$HERDR_PLUGIN_STATE_DIR/agent-watcher-state.sock`. Its newline-delimited JSON
-protocol is currently `WIRE_VERSION = 1` and is not a public integration API.
-
-Stop the daemon with:
+Installing into an already-running Herdr server does not start the daemon. Run it once:
 
 ```sh
-herdr plugin action invoke stop-daemon --plugin agent-watcher
+herdr plugin action invoke restart-daemon --plugin herdr-agent-watcher
 ```
 
-## Supported agents
-
-- Claude Code (`claude`, `claude-code`) — live verified
-- Codex CLI (`codex`) — live verified
-- Kimi Code (`kimi`) — live verified
-- OpenCode (`opencode`) — live verified
-
-To add an agent, implement `AgentAdapter` under `src/agents/` and register it
-with `AgentRegistry` in `src/daemon/run.rs`. Agent-specific parsing belongs in
-the adapter; Herdr socket details stay behind `HerdrPort`.
-
-### Kimi usage consent
-
-Kimi plan-usage lookup sends the configured API key to its `/usages` endpoint,
-so it stays disabled until explicitly enabled. Use the Herdr plugin actions
-`kimi-consent-on`, `kimi-consent-off`, and `kimi-consent-status`; revocation is
-picked up by the running daemon without a restart.
-
-### OpenCode bridge
-
-The first OpenCode bind installs or updates the bundled bridge in OpenCode's
-plugin directory. `AGENT_WATCHER_OPENCODE_PLUGINS_DIR` and
-`AGENT_WATCHER_OPENCODE_BRIDGE_DIR` override the install and event directories.
-
-## Configuration
-
-`AGENT_WATCHER_INTERVAL_MS` sets the reconciliation interval in milliseconds.
-It must be positive and defaults to `1000`. Set it in the environment that
-launches Herdr, then restart the daemon.
+Herdr's own stock UI works without the sidebar: it receives lifecycle notifications and
+pane metadata tokens — `agent_watcher_state`, `agent_watcher_phase`, `agent_watcher_model`,
+`agent_watcher_context_pct`, `agent_watcher_attention` and `agent_watcher_title`. Those
+names are the integration surface with Herdr and are deliberately stable.
 
 ## Verify
 
@@ -82,11 +47,6 @@ Scan every supported live agent pane without exposing pane or session IDs:
 
 ```sh
 ./tests/verify-live-agents.sh
-```
-
-Verify the sidebar's internal state socket with the same sanitized output:
-
-```sh
 ./tests/verify-sidebar-state.sh
 ```
 
@@ -96,11 +56,188 @@ Tier A runs against the deterministic fake Herdr socket and is always enabled:
 cargo test --test e2e_fake_herdr
 ```
 
-Tier B starts the installed Herdr binary with isolated HOME/XDG directories and
-is ignored by default:
+Tier B starts the installed Herdr binary with isolated HOME/XDG directories and is ignored
+by default:
 
 ```sh
 cargo test --test e2e_real_herdr -- --ignored
 ```
 
 Run all regular tests with `cargo test`.
+
+## Commands
+
+Every action is invoked the same way:
+
+```sh
+herdr plugin action invoke <id> --plugin herdr-agent-watcher
+```
+
+Output goes to the plugin log — read the last run with
+`herdr plugin log list --plugin herdr-agent-watcher --limit 1`.
+
+| Action | What it does | More |
+| --- | --- | --- |
+| `restart-daemon` | Start or restart the daemon | |
+| `stop-daemon` | Stop the daemon | |
+| `open-sidebar` | Open the live sidebar in a new split | [Sidebar](#sidebar) |
+| `enable-claude-bridge` | Install the metrics bridge into Claude's own settings | [Claude metrics bridge](#claude-metrics-bridge) |
+| `disable-claude-bridge` | Restore the settings file to its pre-enable state | [Claude metrics bridge](#claude-metrics-bridge) |
+| `doctor` | Say why metrics are missing, and what to do | [Doctor](#doctor) |
+| `kimi-consent-on` | Allow Kimi plan-usage lookup | [Kimi usage consent](#kimi-usage-consent) |
+| `kimi-consent-off` | Revoke it — takes effect without a restart | [Kimi usage consent](#kimi-usage-consent) |
+| `kimi-consent-status` | Show the current setting | [Kimi usage consent](#kimi-usage-consent) |
+
+## Configuration
+
+`AGENT_WATCHER_INTERVAL_MS` is how often the daemon reconciles with Herdr, in
+milliseconds. It must be positive and defaults to `1000`. To set it to 5 seconds:
+
+```sh
+echo 'export AGENT_WATCHER_INTERVAL_MS=5000' >> ~/.zshrc
+```
+
+Then start a fresh Herdr session — the daemon inherits the server's environment, so
+`restart-daemon` on its own will not pick it up.
+
+## Sidebar
+
+```sh
+herdr plugin action invoke open-sidebar --plugin herdr-agent-watcher
+```
+
+Each invocation intentionally opens another split. Cards show agent state, agent/model,
+title, context use, cache hit rate, cost, tool count, and the three newest tool traces.
+Use `j`/`k` or PageUp/PageDown to scroll, `o`/`↵` to expand, `z` to hide idle agents, and
+`q`, Escape, or Ctrl-C to close.
+
+If the daemon is unavailable or disconnects, the pane reports that state and waits for a
+key before closing. The sidebar's state socket is plugin-internal:
+`$HERDR_PLUGIN_STATE_DIR/herdr-agent-watcher-state.sock`. Its newline-delimited JSON
+protocol is currently `WIRE_VERSION = 2` and is not a public integration API.
+
+Stop the daemon with:
+
+```sh
+herdr plugin action invoke stop-daemon --plugin herdr-agent-watcher
+```
+
+## Supported agents
+
+| Agent | Where its metrics come from | Bridge | State |
+| --- | --- | --- | --- |
+| Claude Code (`claude`, `claude-code`) | its status line, only | **required** — one `enable-claude-bridge` | ✅ |
+| Codex CLI (`codex`) | rollout transcript | none | ✅ |
+| Kimi Code (`kimi`) | transcript, plus an opt-in usage API | none | ✅ |
+| OpenCode (`opencode`) | bundled bridge plugin | installed for you on first bind | ✅ |
+
+Only Claude needs a bridge you invoke, and only because no hook event it emits carries
+usage data — its status line is the single channel. OpenCode's bridge is a plugin this one
+installs on your behalf; Codex and Kimi need nothing.
+
+To add an agent, implement `AgentAdapter` under `src/agents/` and register it with
+`AgentRegistry` in `src/daemon/run.rs`. Agent-specific parsing belongs in the adapter;
+Herdr socket details stay behind `HerdrPort`.
+
+## Claude metrics bridge
+
+Claude Code reports CONTEXT, CACHE and COST only through its status line, so it needs a
+bridge the other three agents do not.
+
+```sh
+herdr plugin action invoke enable-claude-bridge --plugin herdr-agent-watcher
+```
+
+That edits Claude's own user settings — it prints which file — and chains your existing
+status line behind the bridge so it still runs. No `PATH`, no new shell: every Claude is
+bridged in every pane, including sessions already running, which pick it up on their next
+status-line render.
+
+```sh
+herdr plugin action invoke disable-claude-bridge --plugin herdr-agent-watcher
+```
+
+restores the file, removing the `statusLine` entirely if you had none. A status line you
+changed after enabling is left alone — the bridge takes back only what is still its own.
+
+## Doctor
+
+Run it when a card reads `— bridge not connected (README)`, or any time metrics are
+missing and you want to know why.
+
+```sh
+herdr plugin action invoke doctor --plugin herdr-agent-watcher
+herdr plugin log list --plugin herdr-agent-watcher --limit 1
+```
+
+Doctor names the cause and prints the fix. The one case it cannot fix for you is a project
+with its own `statusLine`, which outranks the user tier — it emits a block to paste into
+that project's `.claude/settings.local.json`, keeping both the project's status line and
+your metrics.
+
+It never reports green on an incomplete picture: managed settings are not discoverable
+from here, so if every check passes and metrics are still missing, it says exactly that.
+
+## Kimi usage consent
+
+Kimi plan-usage lookup sends the configured API key to its `/usages` endpoint, so it stays
+disabled until explicitly enabled. Use the Herdr plugin actions `kimi-consent-on`,
+`kimi-consent-off`, and `kimi-consent-status`; revocation is picked up by the running
+daemon without a restart.
+
+## OpenCode bridge
+
+The first OpenCode bind installs or updates the bundled bridge in OpenCode's plugin
+directory. `AGENT_WATCHER_OPENCODE_PLUGINS_DIR` and `AGENT_WATCHER_OPENCODE_BRIDGE_DIR`
+override the install and event directories. The bridge plugin keeps its
+`agent-watcher-opencode-bridge` filename: it lives in the ported sidecar tree, which is
+frozen.
+
+## Design notes
+
+[`DESIGN.md`](DESIGN.md) records why the plugin is shaped this way: why Claude needs a
+bridge the other three agents do not, why it installs into Claude's own settings instead of
+intercepting `PATH`, why the daemon owns the destination, and what a broken bridge is
+required to degrade to.
+
+## Known limitations
+
+- **A pane that was open before the daemon started has no card.** Herdr reports no
+  `agent_session` for it, so it cannot be bound. Close and reopen the pane.
+- **A pane moved between workspaces keeps its retired id.** A process's pane id is fixed
+  at exec, so the daemon no longer recognises it. Doctor shows this rather than failing
+  silently, but the session has to be recreated.
+- **One Herdr session at a time.** The daemon's lock and sockets live in the user-global
+  `$HERDR_PLUGIN_STATE_DIR`, so a second Herdr session replaces the first daemon.
+- **`attention.jsonl` is unbounded.** Append-only, with a 192KB per-payload cap but no
+  total cap and no rotation.
+- **A session's first turn may produce no completion notification**, and four of the five
+  hook payloads are stored verbatim — so the guarantee is "the prompt is not persisted",
+  not "no user text is persisted". Both live in the frozen `src/agent/**` tree.
+
+## Future work
+
+- [ ] Read settings from the plugin's own `config.toml` instead of
+      `AGENT_WATCHER_INTERVAL_MS`, so configuration no longer depends on which environment
+      the Herdr server was launched from
+- [ ] Reap dead bridge directories. Key the reaper on **liveness** — the pane id is absent
+      from Herdr's pane list *and* no process holds it — never on unbind (rebind is the
+      common case) and never on mtime (it would hit long-idle panes that are still open)
+- [ ] Publish a prebuilt binary per release so `cargo` is not required to install. Herdr
+      has no documented support for release assets, but `[[build]]` is an arbitrary
+      command — it can fetch and verify an artifact instead of compiling one, falling back
+      to `cargo build --release` when no asset matches the platform. When this lands, the
+      Rust requirement moves out of **Install** and into **Local development**, where it
+      belongs — building would only be for hacking on the plugin
+- [ ] A `:` command mode in the sidebar, with a full-page doctor view
+- [ ] Fix the flaky `pane_without_cwd_uses_herdrs_cwd_for_that_pane` test
+
+## Local development
+
+```sh
+cargo build --release
+herdr plugin link "$PWD"
+herdr plugin action invoke restart-daemon --plugin herdr-agent-watcher
+```
+
+`plugin link` skips the build step by design; build the working directory yourself.

@@ -42,6 +42,31 @@ fn canonical_of(t: &PaneTelemetry) -> Option<&'static str> {
     t.agent.as_deref().and_then(agent_ids::canonical)
 }
 
+/// Which "no value" message CONTEXT, CACHE and COST get. For every agent but
+/// Claude the absence really is the agent's own limit. Claude reports all three
+/// through a settings overlay, so their absence means the bridge never reached
+/// this pane — telling the reader "not reported by this agent" there sends them
+/// looking at the agent instead of at their PATH, cwd or pane id (README,
+/// "Claude metrics bridge").
+///
+/// The tell is `contextWindowSize == 0`, NOT a missing `contextWindow` block.
+/// `context_window_from_dto` returns a defaulted `ContextWindowStatus` when the
+/// payload carries no block, and `context_window_size` is a plain `u64`, so the
+/// key is present on every parsed status and only its value distinguishes the
+/// seed from a real report. `metrics::context` bails on the same `window == 0`.
+fn missing_metric(t: &PaneTelemetry, width: u16) -> &'static str {
+    let reported_window = t
+        .status
+        .as_ref()
+        .and_then(|s| s.get("contextWindow")?.get("contextWindowSize")?.as_u64())
+        .unwrap_or(0);
+    if canonical_of(t) == Some("claude") && reported_window == 0 {
+        format::unbridged(width)
+    } else {
+        format::unavailable(width)
+    }
+}
+
 fn look<'a>(t: &PaneTelemetry, appearances: &'a AgentAppearances) -> Option<&'a AgentAppearance> {
     appearances.get(canonical_of(t)?)
 }
@@ -279,7 +304,7 @@ fn metrics_line(t: &PaneTelemetry, cx: &CardCtx<'_>) -> Line {
                 Span::new(format!(" {pct}"), Style::semantic(Role::Body, semantic)),
             ]
         }
-        None => vec![Span::body("  "), Span::body(format::unavailable(cx.width))],
+        None => vec![Span::body("  "), Span::body(missing_metric(t, cx.width))],
     };
     let right = vec![
         Span::emphasis(format::count(t.tool_call_total)),
@@ -587,6 +612,19 @@ pub fn expanded_card(t: &PaneTelemetry, cx: &CardCtx<'_>) -> Vec<Line> {
     lines.push(blank());
     let cells = GAUGE_MAX_CELLS.min(width.saturating_sub(13)).max(6);
 
+    // CONTEXT, CACHE and COST go missing together and for one reason, so the
+    // sentence is spent on the FIRST row that lacks a value and every later row
+    // falls back to the bare dash. Repeated five times it reads as five separate
+    // problems, which is the opposite of what the message is for.
+    let mut explained = false;
+    let mut mark = || {
+        if std::mem::replace(&mut explained, true) {
+            format::UNAVAILABLE
+        } else {
+            missing_metric(t, width)
+        }
+    };
+
     match t.status.as_ref().and_then(metrics::context) {
         Some(c) => {
             lines.push(label_row(
@@ -610,15 +648,8 @@ pub fn expanded_card(t: &PaneTelemetry, cx: &CardCtx<'_>) -> Vec<Line> {
             ));
         }
         None => {
-            lines.push(label_row(
-                "CONTEXT",
-                vec![Span::body(format::unavailable(width))],
-                width,
-            ));
-            lines.push(detail(
-                &[(format::unavailable(width).to_string(), "")],
-                width,
-            ));
+            lines.push(label_row("CONTEXT", vec![Span::body(mark())], width));
+            lines.push(detail(&[(mark().to_string(), "")], width));
         }
     }
     lines.push(blank());
@@ -651,15 +682,8 @@ pub fn expanded_card(t: &PaneTelemetry, cx: &CardCtx<'_>) -> Vec<Line> {
             ));
         }
         None => {
-            lines.push(label_row(
-                "CACHE",
-                vec![Span::body(format::unavailable(width))],
-                width,
-            ));
-            lines.push(detail(
-                &[(format::unavailable(width).to_string(), "")],
-                width,
-            ));
+            lines.push(label_row("CACHE", vec![Span::body(mark())], width));
+            lines.push(detail(&[(mark().to_string(), "")], width));
         }
     }
     lines.push(blank());
@@ -672,7 +696,7 @@ pub fn expanded_card(t: &PaneTelemetry, cx: &CardCtx<'_>) -> Vec<Line> {
         "COST",
         vec![match cost {
             Some(v) => Span::emphasis(format!("{} session", format::money(v))),
-            None => Span::body(format::unavailable(width).to_string()),
+            None => Span::body(mark().to_string()),
         }],
         width,
     ));
@@ -1373,8 +1397,12 @@ mod tests {
 
     #[test]
     fn the_unavailable_marker_has_two_forms_and_both_are_used() {
+        // Kimi, not Claude: for Claude a missing metric means an unlanded bridge and
+        // draws the other marker, so testing the width rule here would test that
+        // instead.
         let app = appearances();
-        let mut t = claude_expanded();
+        let mut t = PaneTelemetry::with_agent("kimi");
+        t.card_state = CardState::Running;
         t.status = Some(json!({}));
         let wide = plain(&expanded_card(&t, &ctx(&app, 44))).join("\n");
         let narrow = plain(&expanded_card(&t, &ctx(&app, 34))).join("\n");
@@ -1387,6 +1415,119 @@ mod tests {
             "28 cells do not fit at 34 (§2.6)"
         );
         assert!(narrow.contains('—'), "but the em dash is the invariant");
+    }
+
+    /// The status an UNBRIDGED Claude actually carries, built by running the real
+    /// decoder over the exact seed `SidecarAdapter::seed_claude_status` writes.
+    ///
+    /// Do not hand-write this shape. The first version of this test asserted
+    /// against `{"modelDisplayName": …}` — something `parse_statusline` never
+    /// emits — so it passed green while the live card stayed wrong.
+    fn unbridged_status() -> Value {
+        let seed = json!({
+            "session_id": "s1",
+            "transcript_path": "/tmp/s1.jsonl",
+            "model": { "id": "unknown", "display_name": "Claude Code" },
+        })
+        .to_string();
+        let event = crate::agent::adapter::claude_code::statusline::parse_statusline("s1", &seed)
+            .expect("the seed parses")
+            .event;
+        let status = serde_json::to_value(&event).expect("the event serialises");
+        // Pin the trap itself: the block is PRESENT, only its size is zero. A
+        // predicate testing `contextWindow.is_none()` reads this as bridged.
+        assert!(
+            status.get("contextWindow").is_some(),
+            "a defaulted block is still emitted: {status}"
+        );
+        assert_eq!(status["contextWindow"]["contextWindowSize"], 0);
+        status
+    }
+
+    #[test]
+    fn a_claude_without_the_bridge_says_so_instead_of_blaming_the_agent() {
+        // The whole point: four different misconfigurations (PATH, a session that
+        // predates the shim, a divergent cwd, a stale pane id) all land here, and
+        // "not reported by this agent" sends the reader to the wrong place.
+        let app = appearances();
+        let mut t = claude_expanded();
+        t.status = Some(unbridged_status());
+        let card = plain(&expanded_card(&t, &ctx(&app, 44))).join("\n");
+        assert!(card.contains("— bridge not connected (README)"), "{card}");
+        assert!(
+            !card.contains("not reported by this agent"),
+            "Claude does report these — the bridge did not land:\n{card}"
+        );
+
+        // Said ONCE. All three metrics are missing for the same reason, and five
+        // copies of one sentence read as five problems.
+        assert_eq!(
+            card.matches("bridge not connected").count(),
+            1,
+            "the explanation is spent on the first empty row only:\n{card}"
+        );
+        assert!(
+            card.contains("CACHE   —") && card.contains("COST    —"),
+            "the later rows still mark themselves empty:\n{card}"
+        );
+
+        // Narrow falls back to the same em dash as the other marker (§2.6).
+        let narrow = plain(&expanded_card(&t, &ctx(&app, 34))).join("\n");
+        assert!(!narrow.contains("bridge not connected"));
+        assert!(narrow.contains('—'));
+    }
+
+    #[test]
+    fn the_unbridged_marker_never_overflows_a_pane() {
+        // `justify` does NOT truncate — its gap bottoms out at 1 — so a marker
+        // wider than the old one can push the compact metrics line past the pane
+        // edge. The expanded card is safe (label_row clips), the compact one is
+        // not, and a big call count is what closes the last cells.
+        let app = appearances();
+        let mut t = claude_expanded();
+        t.status = Some(unbridged_status());
+        t.tool_call_total = 999_999;
+        // From 34: `header` overflows below that for EVERY agent, bridged or not
+        // (a pre-existing clip bug in the state label, not this marker's).
+        for width in 34u16..=80 {
+            for line in compact_card(&t, &ctx(&app, width))
+                .into_iter()
+                .chain(expanded_card(&t, &ctx(&app, width)))
+            {
+                let drawn: usize = line.iter().map(|s| format::width(&s.text)).sum();
+                assert!(
+                    drawn <= width as usize,
+                    "width {width}: drew {drawn} cells: {:?}",
+                    plain(&[line])
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_bridged_claude_is_never_labelled_unbridged() {
+        let app = appearances();
+        let card = plain(&expanded_card(&claude_expanded(), &ctx(&app, 44))).join("\n");
+        assert!(!card.contains("bridge not connected"), "{card}");
+        assert!(card.contains("COST"), "the real metrics render: {card}");
+    }
+
+    #[test]
+    fn a_non_claude_agent_is_never_labelled_unbridged() {
+        // Kimi, Codex and OpenCode read their own transcripts; they have no bridge
+        // to be missing, so the marker would be meaningless there.
+        let app = appearances();
+        for agent in ["kimi", "codex", "opencode"] {
+            let mut t = PaneTelemetry::with_agent(agent);
+            t.card_state = CardState::Running;
+            t.status = Some(json!({}));
+            let card = plain(&expanded_card(&t, &ctx(&app, 44))).join("\n");
+            assert!(!card.contains("bridge not connected"), "{agent}: {card}");
+            assert!(
+                card.contains("not reported by this agent"),
+                "{agent}: {card}"
+            );
+        }
     }
 
     #[test]

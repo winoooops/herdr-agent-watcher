@@ -16,16 +16,18 @@ pub struct SidecarAdapter {
     events: Arc<dyn EventSink>,
     runtime: tokio::runtime::Handle,
     app_data_dir: std::path::PathBuf,
+    routes: crate::daemon::routes::BridgeRoutes,
 }
 
 impl SidecarAdapter {
-    pub fn new(
+    pub(crate) fn new(
         pty_state: PtyState,
         events: Arc<dyn EventSink>,
         runtime: tokio::runtime::Handle,
         app_data_dir: std::path::PathBuf,
+        routes: crate::daemon::routes::BridgeRoutes,
     ) -> Self {
-        let watcher_state = adapter::AgentWatcherState::default();
+        let watcher_state = routes.watchers().clone();
         let transcript_state = adapter::base::TranscriptState::default();
         let notifications = NotificationWatcherService::new(
             pty_state.clone(),
@@ -41,6 +43,7 @@ impl SidecarAdapter {
             events,
             runtime,
             app_data_dir,
+            routes,
         }
     }
 
@@ -53,6 +56,8 @@ impl SidecarAdapter {
             .get_cwd(&pane.pane_id)
             .map(PathBuf::from)
             .ok_or_else(|| format!("Claude pane {} has no cwd", pane.pane_id))?;
+        // Both sides must normalise identically or they key different bridges (§5).
+        let cwd = crate::agents::claude_bridge::canonical_cwd(&cwd).unwrap_or(cwd);
         let status_path = crate::agent::adapter::claude_code::bridge::session_status_file(
             &self.app_data_dir,
             &cwd,
@@ -156,12 +161,13 @@ impl AgentAdapter for SidecarAdapter {
                 );
             }
         }
+        self.routes.bind(&pane.pane_id, &pane.agent_session);
         Ok(())
     }
 
     fn unbind(&self, pane_id: &str) -> Result<(), String> {
         self.notifications.stop(pane_id);
-        match self.runtime.block_on(adapter::stop_agent_watcher_inner(
+        let result = match self.runtime.block_on(adapter::stop_agent_watcher_inner(
             self.pty_state.clone(),
             self.watcher_state.clone(),
             self.transcript_state.clone(),
@@ -170,7 +176,11 @@ impl AgentAdapter for SidecarAdapter {
         )) {
             Err(error) if error.starts_with("No active watcher") => Ok(()),
             result => result,
+        };
+        if result.is_ok() {
+            self.routes.unbind(pane_id);
         }
+        result
     }
 }
 
@@ -199,7 +209,7 @@ fn seed_opencode_index_at(
         "sessionID": pane.agent_session,
         "pid": pid,
         "directory": cwd,
-        "slug": "agent-watcher",
+        "slug": "herdr-agent-watcher",
         "time": time,
     });
     let mut index = std::fs::OpenOptions::new()

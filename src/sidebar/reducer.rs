@@ -52,7 +52,7 @@ mod tests {
         let mut state = State::default();
         apply_line(
             &mut state,
-            r#"{"version":1,"seq":10,"panes":{"p1":{"card_state":"running"}}}"#,
+            r#"{"version":2,"seq":10,"panes":{"p1":{"card_state":"running"}}}"#,
         )
         .unwrap();
         assert_eq!(state.panes.len(), 1);

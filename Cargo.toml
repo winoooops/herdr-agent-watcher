@@ -1,5 +1,5 @@
 [package]
-name = "agent-watcher"
+name = "herdr-agent-watcher"
 version = "0.1.0"
 description = "Coding-agent observability plugin for herdr: transcript watchers, metrics, and notifications for Claude Code, Codex, Kimi Code, and OpenCode."
 license = "Apache-2.0"
@@ -7,7 +7,7 @@ edition = "2021"
 rust-version = "1.88"
 
 [lib]
-name = "agent_watcher"
+name = "herdr_agent_watcher"
 path = "src/lib.rs"
 
 [features]
@@ -21,12 +21,12 @@ runtime = [
 ]
 
 [[bin]]
-name = "agent-watcher"
+name = "herdr-agent-watcher"
 path = "src/main.rs"
 required-features = ["runtime"]
 
 [dependencies]
-serde_json = "1.0"
+serde_json = { version = "1.0", features = ["preserve_order"] }
 serde = { version = "1.0", features = ["derive"] }
 portable-pty = { version = "0.8", optional = true }
 thiserror = "2.0"

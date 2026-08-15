@@ -100,9 +100,13 @@ pub fn run() -> i32 {
         .expect("tokio runtime");
     let client = HerdrClient::from_env();
     let store = Arc::new(crate::daemon::store::TelemetryStore::default());
+    let routes = crate::daemon::routes::BridgeRoutes::with_watchers(
+        crate::agent::adapter::AgentWatcherState::default(),
+    );
     let _state_server = match crate::daemon::state_server::StateServer::start(
         &crate::daemon::state_socket_path(),
         store.clone(),
+        routes.clone(),
     ) {
         Ok(server) => server,
         Err(error) => {
@@ -120,6 +124,7 @@ pub fn run() -> i32 {
         events,
         runtime.handle().clone(),
         app_data_dir(),
+        routes,
     ))]);
     let mut bindings = Bindings::default();
     let mut skipped = HashSet::new();

@@ -54,7 +54,7 @@ fn isolated_real_herdr_serves_the_daemon() {
     wait_for(|| socket.exists(), Duration::from_secs(10));
 
     std::env::set_var("HERDR_SOCKET_PATH", &socket);
-    let probe = agent_watcher::herdr::client::HerdrClient::from_env();
+    let probe = herdr_agent_watcher::herdr::client::HerdrClient::from_env();
     wait_for(
         || match probe.pane_list() {
             Ok(_) => true,
@@ -68,7 +68,7 @@ fn isolated_real_herdr_serves_the_daemon() {
 
     let plugin_state = tmp.path().join("plugin-state");
     let mut daemon = ProcessGuard(
-        Command::new(env!("CARGO_BIN_EXE_agent-watcher"))
+        Command::new(env!("CARGO_BIN_EXE_herdr-agent-watcher"))
             .arg("daemon")
             .env("HERDR_SOCKET_PATH", &socket)
             .env("HERDR_PLUGIN_STATE_DIR", &plugin_state)
@@ -78,7 +78,7 @@ fn isolated_real_herdr_serves_the_daemon() {
             .unwrap(),
     );
     wait_for(
-        || plugin_state.join("agent-watcher.lock").exists(),
+        || plugin_state.join("herdr-agent-watcher.lock").exists(),
         Duration::from_secs(5),
     );
     std::thread::sleep(Duration::from_millis(500));

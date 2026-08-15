@@ -1,46 +1,65 @@
-id = "agent-watcher"
+id = "herdr-agent-watcher"
 name = "Agent Watcher"
 version = "0.1.0"
 min_herdr_version = "0.8.0"
 description = "Coding-agent observability: transcript watchers, metrics, and notifications for Claude Code, Codex, Kimi Code, and OpenCode."
 platforms = ["macos", "linux"]
 
+[[build]]
+command = ["cargo", "build", "--release"]
+platforms = ["macos", "linux"]
+
 [[startup]]
-command = ["target/release/agent-watcher", "daemon"]
+command = ["target/release/herdr-agent-watcher", "daemon"]
 
 [[panes]]
 id = "sidebar"
 title = "Agent Watcher"
 description = "Live coding-agent observability cards"
 placement = "split"
-command = ["/bin/sh", "-lc", "exec \"$HERDR_PLUGIN_ROOT/target/release/agent-watcher\" sidebar"]
+command = ["/bin/sh", "-lc", "exec \"$HERDR_PLUGIN_ROOT/target/release/herdr-agent-watcher\" sidebar"]
 
 [[actions]]
 id = "restart-daemon"
 title = "Start or restart the agents daemon"
-command = ["target/release/agent-watcher", "daemon"]
+command = ["target/release/herdr-agent-watcher", "daemon"]
 
 [[actions]]
 id = "stop-daemon"
 title = "Stop the agents daemon"
-command = ["target/release/agent-watcher", "stop"]
+command = ["target/release/herdr-agent-watcher", "stop"]
 
 [[actions]]
 id = "open-sidebar"
 title = "Open the Agent Watcher sidebar (each invoke opens a new split)"
-command = ["target/release/agent-watcher", "sidebar-open"]
+command = ["target/release/herdr-agent-watcher", "sidebar-open"]
+
+[[actions]]
+id = "enable-claude-bridge"
+title = "Enable Claude metrics (writes to your Claude settings)"
+command = ["target/release/herdr-agent-watcher", "enable-claude-bridge"]
+
+[[actions]]
+id = "disable-claude-bridge"
+title = "Disable Claude metrics and restore your settings"
+command = ["target/release/herdr-agent-watcher", "disable-claude-bridge"]
+
+[[actions]]
+id = "doctor"
+title = "Diagnose the Claude metrics bridge"
+command = ["target/release/herdr-agent-watcher", "doctor"]
 
 [[actions]]
 id = "kimi-consent-on"
 title = "Enable Kimi usage reporting consent"
-command = ["target/release/agent-watcher", "kimi-consent", "on"]
+command = ["target/release/herdr-agent-watcher", "kimi-consent", "on"]
 
 [[actions]]
 id = "kimi-consent-off"
 title = "Disable Kimi usage reporting consent"
-command = ["target/release/agent-watcher", "kimi-consent", "off"]
+command = ["target/release/herdr-agent-watcher", "kimi-consent", "off"]
 
 [[actions]]
 id = "kimi-consent-status"
 title = "Show Kimi usage reporting consent"
-command = ["target/release/agent-watcher", "kimi-consent", "status"]
+command = ["target/release/herdr-agent-watcher", "kimi-consent", "status"]

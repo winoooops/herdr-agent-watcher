@@ -64,7 +64,7 @@ pub fn collect_pane_values(value: &Value) -> Vec<&Value> {
 }
 
 impl HerdrClient {
-    pub const METADATA_SOURCE: &'static str = "plugin:agent-watcher";
+    pub const METADATA_SOURCE: &'static str = "plugin:herdr-agent-watcher";
 
     pub fn pane_list(&self) -> Result<Vec<PaneInfo>, HerdrClientError> {
         let value = self.request("pane.list", json!({}))?;
@@ -161,7 +161,7 @@ mod tests {
             (
                 include_str!("../../tests/fixtures/plugin-pane-open-params-schema.json"),
                 json!({
-                    "plugin_id": "agent-watcher",
+                    "plugin_id": "herdr-agent-watcher",
                     "entrypoint": "sidebar",
                     "placement": "split",
                     "direction": "right",

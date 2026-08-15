@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use serde_json::Value;
 
-use crate::daemon::state_wire::{Delta, Hello, WIRE_VERSION};
+use crate::daemon::state_wire::{Delta, Hello, StatusPath, WIRE_VERSION};
 use crate::daemon::store::TelemetryStore;
 
 pub const HEARTBEAT_MS: u64 = 5_000;
@@ -17,13 +17,18 @@ pub struct StateServer {
 }
 
 impl StateServer {
-    pub fn start(path: &Path, store: Arc<TelemetryStore>) -> std::io::Result<Self> {
-        Self::start_with_heartbeat(path, store, HEARTBEAT_MS)
+    pub(crate) fn start(
+        path: &Path,
+        store: Arc<TelemetryStore>,
+        routes: crate::daemon::routes::BridgeRoutes,
+    ) -> std::io::Result<Self> {
+        Self::start_with_heartbeat(path, store, routes, HEARTBEAT_MS)
     }
 
     fn start_with_heartbeat(
         path: &Path,
         store: Arc<TelemetryStore>,
+        routes: crate::daemon::routes::BridgeRoutes,
         heartbeat_ms: u64,
     ) -> std::io::Result<Self> {
         if let Some(parent) = path.parent() {
@@ -41,14 +46,20 @@ impl StateServer {
                     break;
                 };
                 let store = store.clone();
-                std::thread::spawn(move || handle_connection(stream, store, heartbeat_ms));
+                let routes = routes.clone();
+                std::thread::spawn(move || handle_connection(stream, store, routes, heartbeat_ms));
             }
         });
         Ok(Self { _thread: thread })
     }
 }
 
-fn handle_connection(mut stream: UnixStream, store: Arc<TelemetryStore>, heartbeat_ms: u64) {
+fn handle_connection(
+    mut stream: UnixStream,
+    store: Arc<TelemetryStore>,
+    routes: crate::daemon::routes::BridgeRoutes,
+    heartbeat_ms: u64,
+) {
     let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
     let Ok(reader_stream) = stream.try_clone() else {
         return;
@@ -67,6 +78,20 @@ fn handle_connection(mut stream: UnixStream, store: Arc<TelemetryStore>, heartbe
     };
 
     match request["method"].as_str() {
+        Some("status-path") => {
+            let pane = request["pane_id"].as_str().unwrap_or_default();
+            let session = request["session_id"].as_str().unwrap_or_default();
+            let path = routes
+                .resolve(pane, session)
+                .map(|path| path.to_string_lossy().into_owned());
+            let _ = write_json_line(
+                &mut stream,
+                &StatusPath {
+                    version: WIRE_VERSION,
+                    path,
+                },
+            );
+        }
         Some("snapshot") => {
             let (seq, panes) = store.snapshot();
             let _ = write_json_line(
@@ -147,7 +172,13 @@ mod tests {
             "agent-lifecycle",
             serde_json::json!({"sessionId":"p1","phase":"running"}),
         );
-        let _server = StateServer::start_with_heartbeat(&socket, store.clone(), 100).unwrap();
+        let _server = StateServer::start_with_heartbeat(
+            &socket,
+            store.clone(),
+            crate::daemon::routes::BridgeRoutes::default(),
+            100,
+        )
+        .unwrap();
 
         let mut client = UnixStream::connect(&socket).unwrap();
         client.write_all(b"{\"method\":\"snapshot\"}\n").unwrap();
@@ -187,7 +218,13 @@ mod tests {
         let temporary = tempfile::tempdir().unwrap();
         let socket = temporary.path().join("state.sock");
         let store = Arc::new(TelemetryStore::default());
-        let _server = StateServer::start_with_heartbeat(&socket, store, 100).unwrap();
+        let _server = StateServer::start_with_heartbeat(
+            &socket,
+            store,
+            crate::daemon::routes::BridgeRoutes::default(),
+            100,
+        )
+        .unwrap();
 
         let mut malformed = UnixStream::connect(&socket).unwrap();
         malformed.write_all(b"not json\n").unwrap();
@@ -199,5 +236,58 @@ mod tests {
         BufReader::new(client).read_line(&mut line).unwrap();
         let hello: Hello = serde_json::from_str(&line).unwrap();
         assert_eq!(hello.version, WIRE_VERSION);
+    }
+
+    fn seed_watcher(routes: &crate::daemon::routes::BridgeRoutes, pane: &str) {
+        use crate::agent::adapter::base::WatcherHandle;
+        let handle = WatcherHandle::new_for_test(
+            crate::agent::adapter::base::TranscriptState::default(),
+            pane.to_string(),
+        );
+        routes.watchers().insert(
+            pane.to_string(),
+            handle,
+            crate::agent::types::AgentType::ClaudeCode,
+        );
+    }
+
+    fn ask(socket: &std::path::Path, session: &str) -> serde_json::Value {
+        let mut stream = UnixStream::connect(socket).expect("connect");
+        writeln!(
+            stream,
+            r#"{{"method":"status-path","pane_id":"w1:p1","session_id":"{session}"}}"#
+        )
+        .expect("request");
+        let mut line = String::new();
+        BufReader::new(stream.try_clone().expect("clone"))
+            .read_line(&mut line)
+            .expect("reply");
+        serde_json::from_str(&line).expect("json")
+    }
+
+    #[test]
+    fn the_socket_answers_status_path_for_a_matching_session() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket = dir.path().join("state.sock");
+        let routes = crate::daemon::routes::BridgeRoutes::default();
+        seed_watcher(&routes, "w1:p1");
+        routes.bind("w1:p1", "s1");
+        let _server = StateServer::start(&socket, Arc::new(TelemetryStore::default()), routes)
+            .expect("start");
+        let reply = ask(&socket, "s1");
+        assert_eq!(reply["version"], 2);
+        assert!(!reply["path"].is_null());
+    }
+
+    #[test]
+    fn the_socket_answers_null_for_a_mismatched_session() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket = dir.path().join("state.sock");
+        let routes = crate::daemon::routes::BridgeRoutes::default();
+        seed_watcher(&routes, "w1:p1");
+        routes.bind("w1:p1", "s1");
+        let _server = StateServer::start(&socket, Arc::new(TelemetryStore::default()), routes)
+            .expect("start");
+        assert!(ask(&socket, "OTHER")["path"].is_null());
     }
 }

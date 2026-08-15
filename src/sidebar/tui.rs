@@ -285,12 +285,12 @@ pub fn run() -> i32 {
     let socket = crate::daemon::state_socket_path();
     let Ok(mut stream) = UnixStream::connect(&socket) else {
         return draw_message_and_wait(&format!(
-            "agent-watcher daemon is not running\n(no state socket at {})",
+            "herdr-agent-watcher daemon is not running\n(no state socket at {})",
             socket.display()
         ));
     };
     if stream.write_all(b"{\"method\":\"subscribe\"}\n").is_err() {
-        return draw_message_and_wait("agent-watcher daemon closed the state socket");
+        return draw_message_and_wait("herdr-agent-watcher daemon closed the state socket");
     }
     let wire = spawn_reader(stream);
 
@@ -344,13 +344,13 @@ pub fn run() -> i32 {
                 Ok(WireEvent::Ended) => {
                     drop(terminal);
                     drop(guard);
-                    return draw_message_and_wait("agent-watcher daemon disconnected");
+                    return draw_message_and_wait("herdr-agent-watcher daemon disconnected");
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => break,
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                     drop(terminal);
                     drop(guard);
-                    return draw_message_and_wait("agent-watcher daemon disconnected");
+                    return draw_message_and_wait("herdr-agent-watcher daemon disconnected");
                 }
             }
         }

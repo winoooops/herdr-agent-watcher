@@ -2,7 +2,13 @@ use std::collections::HashMap;
 
 use crate::daemon::store::PaneTelemetry;
 
-pub const WIRE_VERSION: u32 = 1;
+pub const WIRE_VERSION: u32 = 2;
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct StatusPath {
+    pub version: u32,
+    pub path: Option<String>,
+}
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct Hello {
@@ -26,7 +32,7 @@ mod tests {
 
     #[test]
     fn wire_types_round_trip_and_default_optional_fields() {
-        let hello: Hello = serde_json::from_str(r#"{"version":1,"seq":2}"#).unwrap();
+        let hello: Hello = serde_json::from_str(r#"{"version":2,"seq":2}"#).unwrap();
         assert!(hello.panes.is_empty());
         let encoded = serde_json::to_string(&hello).unwrap();
         let decoded: Hello = serde_json::from_str(&encoded).unwrap();

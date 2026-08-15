@@ -1,4 +1,4 @@
-//! Durable command alias store (`~/.config/agent-watcher/aliases.toml`).
+//! Durable command alias store (`~/.config/herdr-agent-watcher/aliases.toml`).
 //!
 //! User-defined shell aliases are injected into every spawned pane's shell
 //! via the bridge `init.sh` (see `agent::adapter::claude_code::bridge`). They
@@ -150,7 +150,7 @@ impl AgentAliasesStore {
     }
 }
 
-/// Rust-owned durable cache for `~/.config/agent-watcher/aliases.toml`.
+/// Rust-owned durable cache for `~/.config/herdr-agent-watcher/aliases.toml`.
 ///
 /// Mirrors `AppSettingsCache`: atomic write (`tempfile.persist`) + in-memory
 /// mirror. Missing / corrupt / version-mismatched files load as the default
@@ -169,13 +169,13 @@ impl AliasesCache {
         }
     }
 
-    /// Resolve the canonical aliases.toml path (`~/.config/agent-watcher/aliases.toml`).
+    /// Resolve the canonical aliases.toml path (`~/.config/herdr-agent-watcher/aliases.toml`).
     pub fn default_path() -> PathBuf {
         dirs::home_dir()
             .map(|home| home.join(".config"))
             .or_else(dirs::config_dir)
             .unwrap_or_else(std::env::temp_dir)
-            .join("agent-watcher")
+            .join("herdr-agent-watcher")
             .join("aliases.toml")
     }
 

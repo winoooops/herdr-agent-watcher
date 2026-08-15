@@ -5,6 +5,12 @@ use unicode_width::UnicodeWidthStr;
 pub const UNAVAILABLE: &str = "—";
 /// The full form, 28 cells (§2.6).
 pub const UNAVAILABLE_LONG: &str = "— not reported by this agent";
+/// Claude's three metrics arrive through a settings overlay rather than its
+/// transcript, so their absence is a bridge that never landed — a fixable
+/// configuration, not a property of the agent. 31 cells: wider than
+/// `UNAVAILABLE_LONG`, but `label_row` allows `width - 8`, which is 36 at the
+/// 44-cell threshold where either sentence is shown at all.
+pub const UNBRIDGED_LONG: &str = "— bridge not connected (README)";
 
 pub fn width(s: &str) -> usize {
     UnicodeWidthStr::width(s)
@@ -90,6 +96,16 @@ pub fn tokens(n: u64) -> String {
 pub fn unavailable(width: u16) -> &'static str {
     if width >= 44 {
         UNAVAILABLE_LONG
+    } else {
+        UNAVAILABLE
+    }
+}
+
+/// Same width rule as `unavailable`: below 44 cells neither message fits, and the
+/// bare dash is what both degrade to.
+pub fn unbridged(width: u16) -> &'static str {
+    if width >= 44 {
+        UNBRIDGED_LONG
     } else {
         UNAVAILABLE
     }

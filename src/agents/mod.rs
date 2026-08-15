@@ -1,4 +1,8 @@
+pub(crate) mod bridge_scripts;
+pub(crate) mod bridge_settings;
+pub mod claude_bridge;
 pub mod consent;
+pub(crate) mod doctor;
 pub mod sidecar;
 
 use std::collections::HashMap;

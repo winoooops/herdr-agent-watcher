@@ -14,11 +14,11 @@ fn state_dir() -> PathBuf {
 }
 
 fn lock_path() -> PathBuf {
-    state_dir().join("agent-watcher.lock")
+    state_dir().join("herdr-agent-watcher.lock")
 }
 
 fn control_path() -> PathBuf {
-    state_dir().join("agent-watcher-control.sock")
+    state_dir().join("herdr-agent-watcher-control.sock")
 }
 
 fn try_flock(file: &File) -> bool {
@@ -59,7 +59,7 @@ pub fn claim() -> Option<Singleton> {
         let deadline = Instant::now() + Duration::from_secs(4);
         request_shutdown(deadline.saturating_duration_since(Instant::now()));
         if !wait_until(deadline, || try_flock(&file)) {
-            eprintln!("another agent-watcher daemon holds the lock and did not exit");
+            eprintln!("another herdr-agent-watcher daemon holds the lock and did not exit");
             return None;
         }
     }

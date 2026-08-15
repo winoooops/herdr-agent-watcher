@@ -53,7 +53,7 @@ fn binds_pane_reports_state_and_exits_when_herdr_dies() {
     }]));
 
     let daemon = ProcessGuard(
-        Command::new(env!("CARGO_BIN_EXE_agent-watcher"))
+        Command::new(env!("CARGO_BIN_EXE_herdr-agent-watcher"))
             .arg("daemon")
             .env("HERDR_SOCKET_PATH", &fake.socket_path)
             .env("HERDR_PLUGIN_STATE_DIR", &state)
@@ -65,7 +65,7 @@ fn binds_pane_reports_state_and_exits_when_herdr_dies() {
     );
 
     wait_for(
-        || state.join("agent-watcher.lock").exists(),
+        || state.join("herdr-agent-watcher.lock").exists(),
         Duration::from_secs(3),
     );
     wait_for(
@@ -84,11 +84,11 @@ fn binds_pane_reports_state_and_exits_when_herdr_dies() {
         Duration::from_secs(5),
     );
 
-    let state_socket = state.join("agent-watcher-state.sock");
+    let state_socket = state.join("herdr-agent-watcher-state.sock");
     wait_for(
         || {
             support::state_snapshot(&state_socket).is_some_and(|snapshot| {
-                snapshot["version"] == agent_watcher::daemon::state_wire::WIRE_VERSION
+                snapshot["version"] == herdr_agent_watcher::daemon::state_wire::WIRE_VERSION
                     && snapshot["panes"]["p1"]
                         .get("status")
                         .is_some_and(|status| !status.is_null())
@@ -109,7 +109,7 @@ fn binds_pane_reports_state_and_exits_when_herdr_dies() {
     reader.read_line(&mut hello).unwrap();
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&hello).unwrap()["version"],
-        agent_watcher::daemon::state_wire::WIRE_VERSION,
+        herdr_agent_watcher::daemon::state_wire::WIRE_VERSION,
     );
 
     let transcript = home.join(".claude/projects/demo/sess-1.jsonl");
@@ -201,7 +201,7 @@ fn codex_binds_pane_and_reports_state() {
     }]));
 
     let daemon = ProcessGuard(
-        Command::new(env!("CARGO_BIN_EXE_agent-watcher"))
+        Command::new(env!("CARGO_BIN_EXE_herdr-agent-watcher"))
             .arg("daemon")
             .env("HERDR_SOCKET_PATH", &fake.socket_path)
             .env("HERDR_PLUGIN_STATE_DIR", &state)
@@ -264,7 +264,7 @@ fn kimi_binds_pane_and_reports_state() {
     }]));
 
     let daemon = ProcessGuard(
-        Command::new(env!("CARGO_BIN_EXE_agent-watcher"))
+        Command::new(env!("CARGO_BIN_EXE_herdr-agent-watcher"))
             .arg("daemon")
             .env("HERDR_SOCKET_PATH", &fake.socket_path)
             .env("HERDR_PLUGIN_STATE_DIR", &state)
@@ -361,7 +361,7 @@ fn kimi_consent_changes_reach_the_running_daemon() {
         "cwd": cwd,
     }]));
     let daemon = ProcessGuard(
-        Command::new(env!("CARGO_BIN_EXE_agent-watcher"))
+        Command::new(env!("CARGO_BIN_EXE_herdr-agent-watcher"))
             .arg("daemon")
             .env("HERDR_SOCKET_PATH", &fake.socket_path)
             .env("HERDR_PLUGIN_STATE_DIR", &state)
@@ -382,7 +382,7 @@ fn kimi_consent_changes_reach_the_running_daemon() {
     std::thread::sleep(Duration::from_millis(1_600));
     assert_eq!(requests.load(Ordering::Relaxed), 0);
 
-    assert!(Command::new(env!("CARGO_BIN_EXE_agent-watcher"))
+    assert!(Command::new(env!("CARGO_BIN_EXE_herdr-agent-watcher"))
         .args(["kimi-consent", "on"])
         .env("HERDR_PLUGIN_STATE_DIR", &state)
         .status()
@@ -393,7 +393,7 @@ fn kimi_consent_changes_reach_the_running_daemon() {
         Duration::from_secs(5),
     );
 
-    assert!(Command::new(env!("CARGO_BIN_EXE_agent-watcher"))
+    assert!(Command::new(env!("CARGO_BIN_EXE_herdr-agent-watcher"))
         .args(["kimi-consent", "off"])
         .env("HERDR_PLUGIN_STATE_DIR", &state)
         .status()
@@ -478,7 +478,7 @@ fn opencode_binds_pane_reports_state_and_installs_bridge() {
     }]));
 
     let daemon = ProcessGuard(
-        Command::new(env!("CARGO_BIN_EXE_agent-watcher"))
+        Command::new(env!("CARGO_BIN_EXE_herdr-agent-watcher"))
             .arg("daemon")
             .env("HERDR_SOCKET_PATH", &fake.socket_path)
             .env("HERDR_PLUGIN_STATE_DIR", &state)
@@ -538,7 +538,7 @@ fn takeover_replaces_running_daemon_within_deadline() {
     std::fs::create_dir_all(&home).unwrap();
 
     let spawn_daemon = || {
-        Command::new(env!("CARGO_BIN_EXE_agent-watcher"))
+        Command::new(env!("CARGO_BIN_EXE_herdr-agent-watcher"))
             .arg("daemon")
             .env("HERDR_SOCKET_PATH", &fake.socket_path)
             .env("HERDR_PLUGIN_STATE_DIR", &state)
@@ -554,7 +554,8 @@ fn takeover_replaces_running_daemon_within_deadline() {
     );
 
     let stalled =
-        std::os::unix::net::UnixStream::connect(state.join("agent-watcher-control.sock")).unwrap();
+        std::os::unix::net::UnixStream::connect(state.join("herdr-agent-watcher-control.sock"))
+            .unwrap();
     let started = std::time::Instant::now();
     let mut second = ProcessGuard(spawn_daemon());
     wait_for(
@@ -576,7 +577,7 @@ fn takeover_of_unresponsive_holder_fails_within_deadline() {
         .create(true)
         .read(true)
         .write(true)
-        .open(state.join("agent-watcher.lock"))
+        .open(state.join("herdr-agent-watcher.lock"))
         .unwrap();
     use std::os::unix::io::AsRawFd;
     assert_eq!(
@@ -584,7 +585,8 @@ fn takeover_of_unresponsive_holder_fails_within_deadline() {
         0
     );
     let listener =
-        std::os::unix::net::UnixListener::bind(state.join("agent-watcher-control.sock")).unwrap();
+        std::os::unix::net::UnixListener::bind(state.join("herdr-agent-watcher-control.sock"))
+            .unwrap();
     std::thread::spawn(move || {
         if let Ok((stream, _)) = listener.accept() {
             std::thread::sleep(Duration::from_secs(6));
@@ -593,7 +595,7 @@ fn takeover_of_unresponsive_holder_fails_within_deadline() {
     });
 
     let started = std::time::Instant::now();
-    let status = Command::new(env!("CARGO_BIN_EXE_agent-watcher"))
+    let status = Command::new(env!("CARGO_BIN_EXE_herdr-agent-watcher"))
         .arg("daemon")
         .env("HERDR_PLUGIN_STATE_DIR", &state)
         .status()
@@ -636,8 +638,8 @@ fn non_default_config_reaches_what_is_drawn() {
     // The view is pure, so this needs no daemon and no TTY: load a config, build
     // the ViewInput from it, render, and assert on the text. This is the path
     // that would otherwise accept a setting and silently ignore it.
-    use agent_watcher::daemon::store::{CardState, PaneTelemetry};
-    use agent_watcher::sidebar::{config::Loaded, reducer::State, view};
+    use herdr_agent_watcher::daemon::store::{CardState, PaneTelemetry};
+    use herdr_agent_watcher::sidebar::{config::Loaded, reducer::State, view};
 
     let cfg = Loaded::from_toml(
         "[list]\nsort = \"group\"\n\n[appearance]\nagent_mark = \"initial\"\n\n[cards]\ntool_calls = \"jar\"\nauto_expand = \"all\"\n",
@@ -730,7 +732,7 @@ fn a_rebind_resets_session_scoped_state_but_keeps_cwd() {
     fake.set_panes(pane("sess-1"));
 
     let _daemon = ProcessGuard(
-        Command::new(env!("CARGO_BIN_EXE_agent-watcher"))
+        Command::new(env!("CARGO_BIN_EXE_herdr-agent-watcher"))
             .arg("daemon")
             .env("HERDR_SOCKET_PATH", &fake.socket_path)
             .env("HERDR_PLUGIN_STATE_DIR", &state)
@@ -740,7 +742,7 @@ fn a_rebind_resets_session_scoped_state_but_keeps_cwd() {
             .unwrap(),
     );
 
-    let socket = state.join("agent-watcher-state.sock");
+    let socket = state.join("herdr-agent-watcher-state.sock");
     let total = || {
         support::state_snapshot(&socket)
             .and_then(|snapshot| snapshot["panes"]["p1"]["tool_call_total"].as_u64())

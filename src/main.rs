@@ -2,12 +2,12 @@ fn main() {
     env_logger::init();
     let mode = std::env::args().nth(1).unwrap_or_default();
     let code = match mode.as_str() {
-        "daemon" => agent_watcher::daemon::run::run(),
-        "sidebar" => agent_watcher::sidebar::tui::run(),
+        "daemon" => herdr_agent_watcher::daemon::run::run(),
+        "sidebar" => herdr_agent_watcher::sidebar::tui::run(),
         "sidebar-open" => {
-            let client = agent_watcher::herdr::client::HerdrClient::from_env();
+            let client = herdr_agent_watcher::herdr::client::HerdrClient::from_env();
             let plugin_id =
-                std::env::var("HERDR_PLUGIN_ID").unwrap_or_else(|_| "agent-watcher".into());
+                std::env::var("HERDR_PLUGIN_ID").unwrap_or_else(|_| "herdr-agent-watcher".into());
             match client.plugin_pane_open(&plugin_id, "sidebar") {
                 Ok(()) => 0,
                 Err(error) => {
@@ -16,9 +16,9 @@ fn main() {
                 }
             }
         }
-        "stop" => agent_watcher::daemon::singleton::stop(),
+        "stop" => herdr_agent_watcher::daemon::singleton::stop(),
         "kimi-consent" => {
-            use agent_watcher::agents::consent;
+            use herdr_agent_watcher::agents::consent;
             let path = consent::consent_path();
             match std::env::args().nth(2).as_deref() {
                 Some("on") => consent::set_and_persist(&path, true)
@@ -34,14 +34,34 @@ fn main() {
                     i32::from(!enabled)
                 }
                 _ => {
-                    eprintln!("usage: agent-watcher kimi-consent <on|off|status>");
+                    eprintln!("usage: herdr-agent-watcher kimi-consent <on|off|status>");
                     2
                 }
             }
         }
+        "claude-bridge" => {
+            let args: Vec<String> = std::env::args().skip(2).collect();
+            herdr_agent_watcher::agents::claude_bridge::cli_claude_bridge(&args)
+        }
+        "generate-scripts" => {
+            let args: Vec<String> = std::env::args().skip(2).collect();
+            herdr_agent_watcher::agents::claude_bridge::cli_generate_scripts(&args)
+        }
+        "enable-claude-bridge" => {
+            let args: Vec<String> = std::env::args().skip(2).collect();
+            herdr_agent_watcher::agents::claude_bridge::cli_enable(&args)
+        }
+        "disable-claude-bridge" => {
+            let args: Vec<String> = std::env::args().skip(2).collect();
+            herdr_agent_watcher::agents::claude_bridge::cli_disable(&args)
+        }
+        "doctor" => {
+            let args: Vec<String> = std::env::args().skip(2).collect();
+            herdr_agent_watcher::agents::claude_bridge::cli_doctor(&args)
+        }
         other => {
             eprintln!(
-                "usage: agent-watcher <daemon|sidebar|sidebar-open|stop|kimi-consent> (got {other:?})"
+                "usage: herdr-agent-watcher <daemon|sidebar|sidebar-open|stop|kimi-consent|claude-bridge|enable-claude-bridge|disable-claude-bridge|doctor> (got {other:?})"
             );
             2
         }
