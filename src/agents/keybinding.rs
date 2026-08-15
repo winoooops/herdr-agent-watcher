@@ -133,9 +133,72 @@ fn command_entries(text: &str) -> Result<Vec<toml::Value>, String> {
         .unwrap_or_default())
 }
 
+/// The same discipline as `bridge_settings::write_settings`, with the re-read
+/// moved to just before the rename.
+///
+/// `expected` is an OPTIMISTIC check, not a compare-and-swap: an editor saving
+/// between the read and the rename is still lost. `write_settings` leaves a
+/// window of several syscalls (`bridge_settings.rs:62-91`); this narrows it to
+/// one, and the remedy is the one that error already gives — say so and tell
+/// the operator to run it again.
+pub(crate) fn write_config(
+    path: &Path,
+    body: &str,
+    expected: Option<&str>,
+) -> Result<(), String> {
+    write_config_hooked(path, body, expected, &|| {})
+}
+
+/// `after_temp` runs between writing the temp file and the re-read. Production
+/// passes a no-op; the ordering test passes a closure that changes the target,
+/// which an implementation re-reading too early would not see.
+fn write_config_hooked(
+    path: &Path,
+    body: &str,
+    expected: Option<&str>,
+    after_temp: &dyn Fn(),
+) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    // Follow the symlink, so a config living in a dotfiles repo is updated
+    // rather than replaced by a regular file.
+    let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let mode = std::fs::metadata(&target)
+        .map(|meta| meta.permissions().mode() & 0o777)
+        .unwrap_or(0o644);
+    let dir = target
+        .parent()
+        .ok_or_else(|| format!("no parent for {}", target.display()))?;
+    std::fs::create_dir_all(dir).map_err(|error| format!("create {}: {error}", dir.display()))?;
+
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let tmp = dir.join(format!(
+        ".herdr-config.{}.{}.tmp",
+        std::process::id(),
+        SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    std::fs::write(&tmp, body).map_err(|error| format!("write {}: {error}", tmp.display()))?;
+    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode))
+        .map_err(|error| format!("chmod {}: {error}", tmp.display()))?;
+    after_temp();
+
+    if let Some(expected) = expected {
+        let now = std::fs::read_to_string(&target).unwrap_or_default();
+        if now != expected {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(format!(
+                "{} changed while we were editing it; nothing was written, run this again",
+                target.display()
+            ));
+        }
+    }
+    std::fs::rename(&tmp, &target)
+        .map_err(|error| format!("rename to {}: {error}", target.display()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn a_block_is_appended_after_one_blank_line() {
@@ -242,5 +305,81 @@ mod tests {
         let config = format!("a = 1\n{two}");
         let error = remove_block(&config, &two).expect_err("must refuse");
         assert!(error.contains("record is corrupt"), "{error}");
+    }
+
+    #[test]
+    fn the_mode_is_preserved_and_a_new_file_is_644() {
+        let dir = tempfile::tempdir().unwrap();
+        let existing = dir.path().join("config.toml");
+        std::fs::write(&existing, "a = 1\n").unwrap();
+        std::fs::set_permissions(&existing, std::fs::Permissions::from_mode(0o600)).unwrap();
+        write_config(&existing, "a = 2\n", None).unwrap();
+        assert_eq!(
+            std::fs::metadata(&existing)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+
+        let fresh = dir.path().join("fresh.toml");
+        write_config(&fresh, "a = 1\n", None).unwrap();
+        assert_eq!(
+            std::fs::metadata(&fresh)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o644
+        );
+    }
+
+    #[test]
+    fn a_symlink_is_followed_not_replaced() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real.toml");
+        let link = dir.path().join("config.toml");
+        std::fs::write(&real, "a = 1\n").unwrap();
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        write_config(&link, "a = 2\n", None).unwrap();
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(std::fs::read_to_string(&real).unwrap(), "a = 2\n");
+    }
+
+    /// The ordering §4 specifies, and the part of it that is testable. An
+    /// implementation that re-reads BEFORE writing the temp file passes
+    /// `a_changed_file_aborts_the_write` — it only fails this one, because the
+    /// change lands after the point where it had already looked.
+    #[test]
+    fn the_reread_happens_after_the_temp_file_is_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "a = 1\n").unwrap();
+        let error = write_config_hooked(&path, "a = 2\n", Some("a = 1\n"), &|| {
+            std::fs::write(&path, "someone else got here first\n").unwrap();
+        })
+        .expect_err("the late change must be seen");
+        assert!(error.contains("changed"), "{error}");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "someone else got here first\n"
+        );
+    }
+
+    #[test]
+    fn a_changed_file_aborts_the_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "a = 1\n").unwrap();
+        let error =
+            write_config(&path, "a = 2\n", Some("something else")).expect_err("abort");
+        assert!(error.contains("changed"), "{error}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "a = 1\n");
     }
 }
