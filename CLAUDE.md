@@ -87,6 +87,20 @@ herdr plugin action invoke stop-daemon --plugin agent-watcher  # stop the runnin
 
 Live pane IDs, session IDs, and real filesystem paths **must never** be committed to fixtures. Sanitize with deterministic demo identifiers (see `tests/fixtures/README.md`). The verifier script (`tests/verify-live-agents.sh`) redacts pane titles automatically.
 
-## No CI or linter config
+## CI
 
-The repo has no CI configuration checked in and no formatter/linter config. Match the existing style (standard `rustfmt` defaults) and keep `cargo test` green.
+`.github/workflows/ci.yml` runs on every push: `cargo test --all-features`,
+`cargo clippy --all-targets --all-features` and `cargo fmt --check`, plus a `portable` job
+that runs `cargo check --no-default-features` for the host and for
+`x86_64-pc-windows-msvc`.
+
+Clippy is deliberately **not** run with `-D warnings` — the tree carries pre-existing
+warnings, and pinning a lint gate to whatever stable ships would re-break CI on every
+toolchain bump. It still fails on deny-by-default errors.
+
+`cargo fmt` is enforced, so run it before pushing. Note the local default differs from CI in
+two ways: CI passes `--all-features`, and it runs the Windows check.
+
+`.github/workflows/release.yml` runs on `v*` tags and fails if the tag disagrees with
+`Cargo.toml`. `herdr-plugin.toml` carries its own version and is checked against `Cargo.toml`
+by `tests/cli_keybinding.rs`.
