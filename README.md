@@ -116,7 +116,20 @@ interval_ms = 5000     # how often the daemon reconciles with Herdr; default 100
 
 [list]
 scope = "workspace"    # "all" (default) lists every pane; "workspace" lists only this one
+sort  = "position"     # default; "smart" and "group" below
 ```
+
+`sort` decides the order of the cards:
+
+| Value | Order |
+| --- | --- |
+| `position` *(default)* | herdr's own layout order, the same one its agent sidebar shows |
+| `smart` | most urgent first — errors, then attention, running, finished, idle |
+| `group` | by agent, then as `smart` within each |
+
+`position` is the default because it is the only one that does not move: under `smart` a card
+changes place whenever its agent starts or stops working, so the one you were reading is
+somewhere else by the time you look back.
 
 Apply a change with:
 
@@ -253,9 +266,15 @@ resolves itself on the main session's next turn.
 before the daemon started, so it cannot be bound. Close and reopen the pane.
 
 **A setting changed nothing.** `[daemon]` and `[list]` belong to **the plugin's**
-`config.toml`, not Herdr's. Herdr ignores tables it does not recognise, so a section in the
-wrong file is silent except in `herdr config check`. `herdr plugin list` prints the right
-directory.
+`config.toml`, not Herdr's — [`doctor`](#doctor) names them and prints the move if they are
+in the wrong one. Open the right file directly with:
+
+```sh
+$EDITOR "$(herdr plugin config-dir herdr-agent-watcher)/config.toml"
+```
+
+`[list]` is read when a sidebar opens, so an already-open one keeps the settings it started
+with. Close it and open it again.
 
 **`doctor` passes every check and metrics are still missing.** It says exactly that rather
 than reporting green: managed settings, workspace trust and launch flags are not visible

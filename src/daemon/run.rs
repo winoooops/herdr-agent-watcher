@@ -219,13 +219,17 @@ pub fn run() -> i32 {
                 }
                 bindings.apply(&applied);
 
-                for pane in &panes {
+                for (position, pane) in panes.iter().enumerate() {
                     let cwd = pane.foreground_cwd.clone().or_else(|| pane.cwd.clone());
                     store.set_pane_list_cwd(&pane.pane_id, cwd);
                     // Not at `set_agent`: that is inside `bind_pane`, which
                     // receives only pane_id/agent/session and never sees a
                     // `PaneInfo`. This loop does.
                     store.set_pane_workspace(&pane.pane_id, Some(pane.workspace_id.clone()));
+                    // The ORDER of this list is the information, not anything
+                    // in a `PaneInfo`: herdr returns panes in layout order, so
+                    // the index reproduces what its own sidebar shows.
+                    store.set_pane_position(&pane.pane_id, position as u32);
                 }
             }
             Err(HerdrClientError::Connect { .. }) => {

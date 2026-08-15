@@ -281,6 +281,7 @@ impl Loaded {
         for (k, val) in t {
             match k.as_str() {
                 "sort" => match val.as_str() {
+                    Some("position") => self.sort = Sort::Position,
                     Some("smart") => self.sort = Sort::Smart,
                     Some("group") => self.sort = Sort::Group,
                     _ => self.problem("invalid value for list.sort".into()),
@@ -410,7 +411,7 @@ mod tests {
     fn a_missing_file_is_all_defaults_and_no_problem() {
         let l = Loaded::from_missing();
         assert_eq!(l.status.problems, 0);
-        assert_eq!(l.sort, crate::sidebar::select::Sort::Smart);
+        assert_eq!(l.sort, crate::sidebar::select::Sort::Position);
         assert!(!l.hide_idle);
     }
 
@@ -425,7 +426,11 @@ mod tests {
     fn one_bad_value_defaults_only_that_key() {
         let l = load_str("[list]\nsort = \"Smart\"\nhide_idle = true\n");
         assert_eq!(l.status.problems, 1, "case-folding is not a guess");
-        assert_eq!(l.sort, crate::sidebar::select::Sort::Smart);
+        assert_eq!(
+            l.sort,
+            crate::sidebar::select::Sort::Position,
+            "a rejected value falls back to the default, which is no longer Smart"
+        );
         assert!(l.hide_idle, "the valid key still applies");
     }
 
@@ -470,6 +475,23 @@ mod tests {
             l.problem_details[0].contains("keys.nope"),
             "{:?}",
             l.problem_details
+        );
+    }
+
+    #[test]
+    fn sort_parses_position_and_defaults_to_it() {
+        assert_eq!(load_str("").sort, crate::sidebar::select::Sort::Position);
+        assert_eq!(
+            load_str("[list]\nsort = \"position\"\n").sort,
+            crate::sidebar::select::Sort::Position
+        );
+        assert_eq!(
+            load_str("[list]\nsort = \"smart\"\n").sort,
+            crate::sidebar::select::Sort::Smart
+        );
+        assert_eq!(
+            load_str("[list]\nsort = \"group\"\n").sort,
+            crate::sidebar::select::Sort::Group
         );
     }
 

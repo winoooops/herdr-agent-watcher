@@ -112,7 +112,19 @@ interval_ms = 5000     # daemon 与 Herdr 协调的间隔；默认 1000
 
 [list]
 scope = "workspace"    # "all"（默认）列出所有 pane；"workspace" 只列出当前 workspace
+sort  = "position"     # 默认值；另有 "smart" 与 "group"
 ```
+
+`sort` 决定卡片的顺序：
+
+| 取值 | 顺序 |
+| --- | --- |
+| `position`（默认） | herdr 自身的布局顺序，与它的 agent 侧边栏一致 |
+| `smart` | 最紧急的在前 —— 错误、需要注意、运行中、已完成、空闲 |
+| `group` | 先按 agent 分组，组内同 `smart` |
+
+`position` 之所以是默认，是因为只有它不会动：在 `smart` 下，一个 agent 一开始工作或一停下来，
+它的卡片就换位置 —— 你刚才在看的那张，等你回头时已经不在原处了。
 
 应用修改：
 
@@ -240,8 +252,13 @@ doctor 会指出原因并给出修复方式。**唯一它不能替你修的**是
 `agent_session`，因此无法绑定。关掉再重开这个 pane。
 
 **改了设置却没有任何变化。** `[daemon]` 和 `[list]` 属于**插件的** `config.toml`，不是 Herdr
-的那个。Herdr 会忽略它不认识的表，所以写错文件时除了 `herdr config check` 之外毫无提示。
-用 `herdr plugin list` 打印正确的目录。
+的那个 —— 写错地方时 [`doctor`](#doctor) 会指出来并给出搬运命令。直接打开正确的文件：
+
+```sh
+$EDITOR "$(herdr plugin config-dir herdr-agent-watcher)/config.toml"
+```
+
+`[list]` 在 sidebar 打开时读取一次，所以已经开着的那个仍保持它启动时的设置。关掉再开一次。
 
 **`doctor` 全部通过，指标却仍然缺失。** 它会如实这么说，而不是报绿：托管设置、workspace 信任
 状态和启动参数在这里都看不到，而它们中的任何一个都可能压过状态行。

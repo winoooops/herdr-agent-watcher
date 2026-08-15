@@ -9,7 +9,12 @@ use crate::sidebar::agent_ids;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Sort {
+    /// herdr's own layout order, which is what its agent sidebar shows. The
+    /// default because a card that moves when its agent starts working is a
+    /// card you have to find again -- and the list is read far more often
+    /// than it is triaged.
     #[default]
+    Position,
     Smart,
     Group,
 }
@@ -67,6 +72,14 @@ pub fn visible(
     }
 
     kept.sort_by(|(ida, a), (idb, b)| match sort {
+        // `None` last: a pane the reconcile loop has not placed yet would
+        // otherwise sort ahead of every placed one and jump when it lands,
+        // which is the behaviour this mode exists to avoid.
+        Sort::Position => a
+            .position
+            .unwrap_or(u32::MAX)
+            .cmp(&b.position.unwrap_or(u32::MAX))
+            .then(ida.cmp(idb)),
         Sort::Smart => rank(a.card_state)
             .cmp(&rank(b.card_state))
             .then(b.updated_seq.cmp(&a.updated_seq))
@@ -125,6 +138,53 @@ mod tests {
             ),
             ("unplaced".to_string(), placed(CardState::Running, 1, None)),
         ])
+    }
+
+    fn at(position: u32, state: CardState, seq: u64) -> PaneTelemetry {
+        let mut t = pane("claude", state, seq);
+        t.position = Some(position);
+        t
+    }
+
+    /// The reason this mode exists: `smart` re-ranks on state and recency, so
+    /// a card moves whenever its agent starts or stops working. Position
+    /// follows herdr's own layout order and does not move.
+    #[test]
+    fn position_follows_herdrs_list_and_ignores_state_and_recency() {
+        let m = HashMap::from([
+            ("bottom".to_string(), at(2, CardState::Error, 1)),
+            ("top".to_string(), at(0, CardState::Idle, 99)),
+            ("middle".to_string(), at(1, CardState::Running, 50)),
+        ]);
+        assert_eq!(
+            ids(&visible(&m, Sort::Position, false, None)),
+            vec!["top", "middle", "bottom"]
+        );
+        // The same panes under `smart` are ordered by state, which is what
+        // makes them jump.
+        assert_eq!(
+            ids(&visible(&m, Sort::Smart, false, None)),
+            vec!["bottom", "middle", "top"]
+        );
+    }
+
+    #[test]
+    fn a_pane_with_no_position_yet_sorts_last_not_first() {
+        let mut m = HashMap::from([("placed".to_string(), at(5, CardState::Running, 1))]);
+        m.insert(
+            "unplaced".to_string(),
+            pane("claude", CardState::Running, 2),
+        );
+        assert_eq!(
+            ids(&visible(&m, Sort::Position, false, None)),
+            vec!["placed", "unplaced"],
+            "a pane the daemon has not placed yet must not displace the others"
+        );
+    }
+
+    #[test]
+    fn position_is_the_default_sort() {
+        assert_eq!(Sort::default(), Sort::Position);
     }
 
     #[test]

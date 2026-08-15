@@ -47,6 +47,13 @@ pub struct PaneTelemetry {
     /// Not serialized: provenance is daemon-internal (§1.2a).
     #[serde(skip)]
     cwd_source: CwdSource,
+    /// Where this pane sits in herdr's own pane list, which is layout order --
+    /// verified: `pane list` for a workspace returns exactly the top-left to
+    /// bottom-right reading order of the rects `pane layout` reports. Keeping
+    /// the index rather than a tab id is enough, because panes of one tab are
+    /// adjacent in that list, so the grouping is already encoded.
+    #[serde(default)]
+    pub position: Option<u32>,
     /// The workspace herdr reports for this pane, from the reconcile loop.
     /// `None` means "not placed yet", which the sidebar shows rather than
     /// hides (§3.2).
@@ -134,6 +141,18 @@ impl TelemetryStore {
             }
             entry.cwd = Some(cwd);
             entry.cwd_source = CwdSource::PaneList;
+            true
+        });
+    }
+
+    /// Never creates an entry, for the same reason as the workspace below.
+    /// Updated rather than set once: closing a pane shifts everything under it.
+    pub fn set_pane_position(&self, pane_id: &str, position: u32) {
+        self.mutate_existing(pane_id, |entry| {
+            if entry.position == Some(position) {
+                return false;
+            }
+            entry.position = Some(position);
             true
         });
     }
@@ -468,6 +487,24 @@ pub(crate) fn normalise_event(event: &str, payload: &mut Value) {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_panes_position_is_recorded_and_updated() {
+        let store = TelemetryStore::default();
+        store.set_agent("w1:p1", "claude");
+        store.set_pane_position("w1:p1", 3);
+        assert_eq!(store.snapshot().1["w1:p1"].position, Some(3));
+
+        // herdr's list shifts when a pane is closed above this one.
+        store.set_pane_position("w1:p1", 2);
+        assert_eq!(store.snapshot().1["w1:p1"].position, Some(2));
+
+        store.set_pane_position("w1:p9", 0);
+        assert!(
+            !store.snapshot().1.contains_key("w1:p9"),
+            "a position alone does not create a card"
+        );
+    }
 
     #[test]
     fn a_workspace_is_recorded_and_an_empty_one_is_not() {

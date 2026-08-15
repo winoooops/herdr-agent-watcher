@@ -761,6 +761,16 @@ pub fn cli_doctor(_args: &[String]) -> i32 {
         })
         .collect();
     let config_problems = crate::daemon::config::DaemonConfig::load().problems;
+    // The settings this plugin owns, found in the file next door. Twice now
+    // that is where they were written first.
+    let misplaced = crate::agents::keybinding::herdr_config_path()
+        .ok()
+        .and_then(|herdr| {
+            let text = std::fs::read_to_string(&herdr).ok()?;
+            let tables = doctor::misplaced_plugin_tables(&text);
+            let ours = crate::sidebar::config::config_path()?;
+            (!tables.is_empty()).then_some((tables, herdr, ours))
+        });
     let report = doctor::run(
         &socket,
         &settings,
@@ -770,6 +780,7 @@ pub fn cli_doctor(_args: &[String]) -> i32 {
         &panes,
         &|pane, session| resolve_status_path(&socket, pane, session).ok(),
         &config_problems,
+        misplaced,
     );
     print!("{}", doctor::render(&report));
     0

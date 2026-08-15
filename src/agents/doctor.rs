@@ -20,6 +20,7 @@ pub(crate) enum CheckId {
     HooksEnabled,
     MetricsPresent,
     ConfigValid,
+    ConfigLocation,
 }
 
 #[derive(Debug, Clone)]
@@ -35,6 +36,12 @@ pub(crate) enum Remedy {
     /// enabled. Claude re-reads its settings while running, so waiting works.
     WaitOrInteract,
     ReopenPane,
+    /// The settings are real and valid, just in the file next door.
+    MoveTables {
+        tables: Vec<&'static str>,
+        from: PathBuf,
+        to: PathBuf,
+    },
     WriteSettingsBlock {
         path: PathBuf,
         block: String,
@@ -199,6 +206,26 @@ fn executable_and_names(path: &Path, binary: &Path) -> bool {
             .unwrap_or(false)
 }
 
+/// Tables that belong to THIS plugin's config.toml but were found in Herdr's.
+///
+/// Herdr ignores tables it does not recognise, so the only sign is a line in
+/// `herdr config check` that nobody runs. Parsed rather than grepped: a
+/// `[daemon]` inside a multi-line string is text, not a table, and telling
+/// someone to move it would be wrong.
+///
+/// `[keys]` is deliberately absent. Both files use that name, and in Herdr's
+/// it is Herdr's -- reporting it would send someone to move a binding that
+/// works.
+pub(crate) fn misplaced_plugin_tables(herdr_config: &str) -> Vec<&'static str> {
+    let Ok(parsed) = herdr_config.parse::<toml::Value>() else {
+        return Vec::new();
+    };
+    ["daemon", "list"]
+        .into_iter()
+        .filter(|table| parsed.get(table).is_some_and(toml::Value::is_table))
+        .collect()
+}
+
 /// Session ids are UUIDs; two of them in one line is unreadable at sidebar
 /// width, and the first segment is enough to see that they differ.
 fn short(session: &str) -> &str {
@@ -222,6 +249,7 @@ pub(crate) fn run(
     panes: &[PaneInput],
     resolve: &dyn Fn(&str, &str) -> Option<PathBuf>,
     config_problems: &[String],
+    misplaced: Option<(Vec<&'static str>, PathBuf, PathBuf)>,
 ) -> Report {
     let mut report = Report::default();
     report.checks.push(Check {
@@ -244,6 +272,23 @@ pub(crate) fn run(
             id: "restart-daemon",
         }),
     });
+    if let Some((tables, from, to)) = misplaced {
+        report.checks.push(Check {
+            id: CheckId::ConfigLocation,
+            level: Level::Warn,
+            summary: format!(
+                "{} in Herdr's own config.toml, where Herdr ignores {}",
+                tables
+                    .iter()
+                    .map(|table| format!("[{table}]"))
+                    .collect::<Vec<_>>()
+                    .join(" and "),
+                if tables.len() == 1 { "it" } else { "them" }
+            ),
+            evidence: Some(from.display().to_string()),
+            remedy: Some(Remedy::MoveTables { tables, from, to }),
+        });
+    }
     let state = daemon_state(socket);
     let refused = state
         .as_ref()
@@ -482,6 +527,16 @@ fn remedy_line(remedy: &Remedy) -> String {
             "wait for its next status-line render, or send it a prompt".to_string()
         }
         Remedy::ReopenPane => "close and reopen this pane".to_string(),
+        Remedy::MoveTables { tables, from, to } => format!(
+            "move {} from {} to {}",
+            tables
+                .iter()
+                .map(|table| format!("[{table}]"))
+                .collect::<Vec<_>>()
+                .join(" and "),
+            from.display(),
+            to.display()
+        ),
         Remedy::WriteSettingsBlock { path, block } => {
             format!("add to {}:\n{block}", path.display())
         }
@@ -562,8 +617,44 @@ mod tests {
             &[input("w1:p1", Some("s1"), dir.path())],
             &|_, _| Some(status.clone()),
             problems,
+            None,
         );
         (dir, report)
+    }
+
+    /// Twice now, the first thing someone does with these settings is put
+    /// them in Herdr's own config.toml, where Herdr ignores them and nothing
+    /// says so except `herdr config check`.
+    #[test]
+    fn plugin_tables_in_herdrs_own_config_are_named_and_relocated() {
+        for body in [
+            "[ui]\nx = 1\n\n[daemon]\ninterval_ms = 5000\n",
+            "[list]\nscope = \"workspace\"\n",
+            "[daemon]\ninterval_ms = 1\n[list]\nscope = \"all\"\n",
+        ] {
+            let found = misplaced_plugin_tables(body);
+            assert!(!found.is_empty(), "{body:?}");
+        }
+    }
+
+    #[test]
+    fn herdrs_own_tables_are_not_mistaken_for_ours() {
+        // `[keys]` is Herdr's AND ours -- but in Herdr's file it is Herdr's,
+        // and reporting it would send someone to move a binding that works.
+        for body in [
+            "[ui]\nx = 1\n",
+            "[keys]\nprefix = \"ctrl+b\"\n",
+            "[[keys.command]]\nkey = \"prefix+a\"\n",
+            "",
+        ] {
+            assert!(misplaced_plugin_tables(body).is_empty(), "{body:?}");
+        }
+    }
+
+    #[test]
+    fn a_table_named_inside_a_string_is_not_a_table() {
+        let body = "note = \"\"\"\n[daemon]\ninterval_ms = 5000\n\"\"\"\n";
+        assert!(misplaced_plugin_tables(body).is_empty(), "{body:?}");
     }
 
     #[test]
@@ -772,6 +863,7 @@ mod tests {
             &[input("w1:p1", Some("s1"), dir.path())],
             &|_, _| Some(status.clone()),
             &[],
+            None,
         );
         assert!(report.checks.iter().all(|check| check.level == Level::Ok));
         assert_eq!(report.panes[0].window_size, Some(200_000));
@@ -785,6 +877,7 @@ mod tests {
             &[input("w1:p1", None, dir.path())],
             &|_, _| None,
             &[],
+            None,
         );
         assert!(matches!(
             no_session.panes[0].remedy,
@@ -801,6 +894,7 @@ mod tests {
             &[input("w1:p1", Some("s1"), dir.path())],
             &|_, _| Some(status.clone()),
             &[],
+            None,
         );
         let verdict = unknown
             .checks
@@ -842,6 +936,7 @@ mod tests {
             )],
             &|_, _| None,
             &[],
+            None,
         );
         let pane = &report.panes[0];
         assert!(matches!(pane.remedy, Some(Remedy::ReopenPane)), "{pane:?}");
@@ -888,6 +983,7 @@ mod tests {
             )],
             &|_, _| Some(status.clone()),
             &[],
+            None,
         );
         let pane = &report.panes[0];
         assert!(
@@ -915,6 +1011,7 @@ mod tests {
             &[input("w1:p1", Some("s1"), dir.path())],
             &|_, _| None,
             &[],
+            None,
         );
         assert!(matches!(
             report.panes[0].remedy,
@@ -944,6 +1041,7 @@ mod tests {
             &[input("w1:p1", Some("s1"), &project)],
             &|_, _| None,
             &[],
+            None,
         );
         match &report.panes[0].remedy {
             Some(Remedy::WriteSettingsBlock { path, block }) => {
