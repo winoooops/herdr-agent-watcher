@@ -104,11 +104,31 @@ impl Loaded {
         Self::default()
     }
 
+    /// Binds `scope = "workspace"` to a concrete workspace, or degrades to
+    /// `All` saying why. Takes the id rather than reading the environment so
+    /// the decision is testable without mutating the process.
+    pub fn resolve_scope(&mut self, workspace: Option<String>) {
+        if self.scope != Scope::Workspace {
+            return;
+        }
+        match workspace.filter(|id| !id.is_empty()) {
+            Some(id) => self.workspace_id = Some(id),
+            None => {
+                self.scope = Scope::All;
+                self.problem(
+                    "list.scope = workspace needs HERDR_WORKSPACE_ID, which is not set; \
+                     listing all panes"
+                        .into(),
+                );
+            }
+        }
+    }
+
     pub fn load() -> Self {
         let Some(path) = config_path() else {
             return Self::from_missing();
         };
-        match std::fs::read_to_string(&path) {
+        let mut out = match std::fs::read_to_string(&path) {
             Ok(text) => Self::from_toml(&text),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Self::from_missing(),
             Err(e) => {
@@ -116,7 +136,9 @@ impl Loaded {
                 out.problem(format!("config.toml unreadable: {e}"));
                 out
             }
-        }
+        };
+        out.resolve_scope(std::env::var("HERDR_WORKSPACE_ID").ok());
+        out
     }
 
     fn problem(&mut self, detail: String) {
@@ -418,6 +440,61 @@ mod tests {
             assert_eq!(l.scope, Scope::All, "{text}");
             assert_eq!(l.status.problems, 1, "{text}");
         }
+    }
+
+    #[test]
+    fn resolving_workspace_scope_records_the_id() {
+        let mut l = load_str("[list]\nscope = \"workspace\"\n");
+        l.resolve_scope(Some("w4".into()));
+        assert_eq!(l.scope, Scope::Workspace);
+        assert_eq!(l.workspace_id.as_deref(), Some("w4"));
+        assert_eq!(l.status.problems, 0);
+    }
+
+    #[test]
+    fn workspace_scope_without_an_id_falls_back_to_all_and_says_why() {
+        for id in [None, Some(String::new())] {
+            let mut l = load_str("[list]\nscope = \"workspace\"\n");
+            l.resolve_scope(id.clone());
+            assert_eq!(l.scope, Scope::All, "{id:?}");
+            assert_eq!(l.workspace_id, None, "{id:?}");
+            assert_eq!(l.status.problems, 1, "{id:?}");
+            assert!(
+                l.problem_details[0].contains("HERDR_WORKSPACE_ID"),
+                "{:?}",
+                l.problem_details
+            );
+        }
+    }
+
+    #[test]
+    fn resolving_all_scope_reads_nothing_and_records_nothing() {
+        let mut l = load_str("[list]\nscope = \"all\"\n");
+        l.resolve_scope(Some("w4".into()));
+        assert_eq!(l.scope, Scope::All);
+        assert_eq!(l.workspace_id, None);
+        assert_eq!(l.status.problems, 0);
+    }
+
+    #[test]
+    fn load_resolves_scope_from_the_environment() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("config.toml"),
+            "[list]\nscope = \"workspace\"\n",
+        )
+        .expect("write");
+        with_env(
+            &[
+                ("HERDR_PLUGIN_CONFIG_DIR", Some(dir.path().into())),
+                ("HERDR_WORKSPACE_ID", Some("w9".into())),
+            ],
+            || {
+                let l = Loaded::load();
+                assert_eq!(l.scope, Scope::Workspace);
+                assert_eq!(l.workspace_id.as_deref(), Some("w9"));
+            },
+        );
     }
 
     #[test]
