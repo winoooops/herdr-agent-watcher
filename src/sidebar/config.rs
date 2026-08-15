@@ -152,6 +152,10 @@ impl Loaded {
                 "cards" => out.read_cards(value),
                 "list" => out.read_list(value),
                 "agent" => out.read_agents(value),
+                // The daemon's section, parsed by `daemon::config`. Reading it
+                // here would duplicate that parse; reporting it would make a
+                // correct file look broken.
+                "daemon" => {}
                 other => out.problem(format!("unknown table [{other}]")),
             }
         }
@@ -364,6 +368,12 @@ mod tests {
         let l = load_str("[list]\nsort = \"group\"\nnonsense = 1\n\n[bogus]\nx = 1\n");
         assert_eq!(l.status.problems, 2);
         assert_eq!(l.sort, crate::sidebar::select::Sort::Group);
+    }
+
+    #[test]
+    fn the_daemons_table_is_not_the_sidebars_problem() {
+        let l = load_str("[daemon]\ninterval_ms = 5000\n");
+        assert_eq!(l.status.problems, 0, "{:?}", l.problem_details);
     }
 
     #[test]
