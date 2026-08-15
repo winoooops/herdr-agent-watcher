@@ -7,9 +7,9 @@
 
 ![Agent Watcher サイドバー](docs/sidebar.png)
 
-1 つのペインに 4 つのエージェント。展開された Claude カードの CONTEXT、CACHE、COST は、
-Claude Code がステータスライン経由でしか報告しない 3 つの指標であり、下記のブリッジはまさに
-それを届けるために存在します。
+*1 つのペインに 4 種類のエージェント、5 セッション — working、finished、idle。展開された
+Claude のカードには CONTEXT、CACHE、COST も並びます。この 3 つは Claude Code が
+ステータスラインでしか報告しない値で、ここに届けているのがブリッジです。*
 
 この発想はもともと [Vimeflow](https://github.com/winoooops/vimeflow) の中にありました。
 コーディングエージェントの監視は、あの Electron アプリの 1 レイヤーに過ぎませんでした。

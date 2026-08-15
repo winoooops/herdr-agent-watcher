@@ -7,9 +7,9 @@ notifications, and a zero-config metrics bridge for Claude Code.
 
 ![The Agent Watcher sidebar](docs/sidebar.png)
 
-Four agents in one pane. The expanded Claude card shows CONTEXT, CACHE and COST — the
-three metrics Claude Code reports only through a status line, which is what the bridge
-below exists to deliver.
+*Five sessions across four agents in one pane — working, finished, idle. The expanded
+Claude card also carries CONTEXT, CACHE and COST: numbers Claude Code reports through a
+status line and nowhere else, which is what the bridge puts there.*
 
 The idea began inside [Vimeflow](https://github.com/winoooops/vimeflow), where watching
 coding agents was one layer of a much larger Electron app.

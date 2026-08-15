@@ -7,8 +7,9 @@
 
 ![Agent Watcher 侧边栏](docs/sidebar.png)
 
-一屏四个 agent。展开的 Claude 卡片上的 CONTEXT、CACHE、COST 这三项，是 Claude Code 只通过
-状态栏上报的指标 —— 也正是下面那个桥接存在的理由。
+*一个面板里五个会话、四种 agent —— 运行中、已完成、空闲。展开的 Claude 卡片还带着
+CONTEXT、CACHE 和 COST：这三个数字 Claude Code 只经由状态行上报，别无他途，把它们送到
+这里的正是那个桥接。*
 
 这个想法最初长在 [Vimeflow](https://github.com/winoooops/vimeflow) 里面：观测编码 agent 只是
 那个 Electron 应用中的一层。
