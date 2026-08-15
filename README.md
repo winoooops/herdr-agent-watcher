@@ -154,11 +154,18 @@ not the plugin's:
 key = "prefix+a"
 type = "plugin_action"
 command = "open-sidebar"
+description = "Open the Agent Watcher sidebar"
 ```
 
-Herdr has no command that dumps active bindings, so check the key is free before committing
-to it: apply the change, run `herdr config check`, and pick another key if `prefix+a` is
-already taken in your setup.
+```sh
+herdr config check          # validate it
+herdr server reload-config  # apply it, without restarting Herdr
+```
+
+The prefix is `ctrl+b` unless you changed it, so that binding is `ctrl+b` then `a`. Herdr
+0.8.0 leaves `prefix+a` unbound, but check for yourself before settling on a key:
+`herdr --default-config` prints every default binding, and your own `[keys]` section
+overrides them.
 
 If the daemon is unavailable or disconnects, the pane reports that state and waits for a
 key before closing. The sidebar's state socket is plugin-internal:

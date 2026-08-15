@@ -157,11 +157,18 @@ herdr plugin action invoke open-sidebar --plugin herdr-agent-watcher
 key = "prefix+a"
 type = "plugin_action"
 command = "open-sidebar"
+description = "Open the Agent Watcher sidebar"
 ```
 
-Herdr には有効なキーバインドを一覧表示するコマンドがないため、採用前にそのキーが空いている
-ことを確認してください。変更を適用して `herdr config check` を実行し、自分の環境で
-`prefix+a` が既に使われている場合は別のキーを選んでください。
+```sh
+herdr config check          # 検証する
+herdr server reload-config  # Herdr を再起動せずに反映する
+```
+
+変更していなければ prefix は `ctrl+b` なので、この割り当ては `ctrl+b` の次に `a` です。
+Herdr 0.8.0 は `prefix+a` を使っていませんが、キーを決める前に自分で確認してください。
+`herdr --default-config` がすべての既定バインドを表示し、自分の `[keys]` セクションが
+それらを上書きします。
 
 デーモンが利用できない、または切断された場合、ペインはその状態を表示し、キー入力を待ってから
 閉じます。サイドバーの state socket はプラグイン内部のものです:

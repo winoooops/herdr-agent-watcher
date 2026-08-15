@@ -147,10 +147,17 @@ workspace 各开一个 sidebar 真正有用。daemon 尚未确定 workspace 的 
 key = "prefix+a"
 type = "plugin_action"
 command = "open-sidebar"
+description = "Open the Agent Watcher sidebar"
 ```
 
-Herdr 没有列出当前生效快捷键的命令，因此采用这个按键前请先确认它空闲：应用修改，运行
-`herdr config check`；如果你的配置中已经占用了 `prefix+a`，请选择另一个按键。
+```sh
+herdr config check          # 校验
+herdr server reload-config  # 生效，无需重启 Herdr
+```
+
+除非你改过，prefix 默认是 `ctrl+b`，所以这个绑定是先按 `ctrl+b` 再按 `a`。Herdr 0.8.0
+没有占用 `prefix+a`，但选定按键前请自行确认：`herdr --default-config` 会打印全部默认
+绑定，而你自己的 `[keys]` 段会覆盖它们。
 
 daemon 不可用或断开时，面板会显示该状态并等待按键后再关闭。侧边栏的 state socket 属于插件
 内部实现：`$HERDR_PLUGIN_STATE_DIR/herdr-agent-watcher-state.sock`，其换行分隔的 JSON 协议
