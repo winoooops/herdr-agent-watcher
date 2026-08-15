@@ -9,13 +9,24 @@ use crate::herdr::client::{HerdrClient, HerdrClientError};
 use crate::runtime::EventSink;
 use crate::terminal::PtyState;
 
-fn interval() -> Duration {
-    std::env::var("AGENT_WATCHER_INTERVAL_MS")
+/// The interval to run at, and anything wrong with the config, from **one**
+/// read of the file (§2.3). Returning both keeps the diagnostics and the
+/// running value on the same snapshot, and keeps the whole chain testable: an
+/// implementation that never loads the file fails these tests rather than
+/// passing every parsing test in `daemon::config`.
+///
+/// Precedence, highest first (§2.2): `AGENT_WATCHER_INTERVAL_MS`, then
+/// `[daemon] interval_ms`, then 1000 ms. The variable outranks the file
+/// because an operator who exported it did so deliberately.
+fn startup_config() -> (Duration, Vec<String>) {
+    let config = crate::daemon::config::DaemonConfig::load();
+    let interval = std::env::var("AGENT_WATCHER_INTERVAL_MS")
         .ok()
         .and_then(|value| value.parse().ok())
         .filter(|value| *value > 0)
         .map(Duration::from_millis)
-        .unwrap_or(Duration::from_secs(1))
+        .unwrap_or(config.interval);
+    (interval, config.problems)
 }
 
 fn app_data_dir() -> std::path::PathBuf {
@@ -128,6 +139,18 @@ pub fn run() -> i32 {
     ))]);
     let mut bindings = Bindings::default();
     let mut skipped = HashSet::new();
+    let (interval, config_problems) = startup_config();
+    for problem in &config_problems {
+        // Not readable from `herdr plugin log list` while the daemon runs --
+        // that reports stderr only for finished actions. `doctor` is the
+        // channel that works; this is for running the binary by hand.
+        //
+        // error!, not warn!: env_logger defaults to the error level, so a
+        // warning here would be dropped unless RUST_LOG is set, and the
+        // inherited environment is what this change exists to stop depending
+        // on.
+        log::error!("[daemon] config.toml: {problem}");
+    }
 
     while !singleton
         .shutdown
@@ -211,10 +234,95 @@ pub fn run() -> i32 {
             }
             Err(error) => log::warn!("[daemon] pane.list failed: {error}"),
         }
-        crate::daemon::singleton::sleep_interruptible(&singleton.shutdown, interval());
+        crate::daemon::singleton::sleep_interruptible(&singleton.shutdown, interval);
     }
     log::info!("[daemon] shutdown requested; exiting");
     0
+}
+
+#[cfg(test)]
+mod startup_config_tests {
+    use super::*;
+    use crate::test_env::with_env;
+
+    fn config_dir(text: &str) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("config.toml"), text).expect("write");
+        dir
+    }
+
+    #[test]
+    fn the_config_file_sets_the_interval() {
+        let dir = config_dir("[daemon]\ninterval_ms = 5000\n");
+        with_env(
+            &[
+                ("HERDR_PLUGIN_CONFIG_DIR", Some(dir.path().into())),
+                ("AGENT_WATCHER_INTERVAL_MS", None),
+            ],
+            || {
+                let (interval, problems) = startup_config();
+                assert_eq!(interval, Duration::from_millis(5000));
+                assert!(problems.is_empty());
+            },
+        );
+    }
+
+    #[test]
+    fn the_environment_outranks_the_file() {
+        let dir = config_dir("[daemon]\ninterval_ms = 5000\n");
+        with_env(
+            &[
+                ("HERDR_PLUGIN_CONFIG_DIR", Some(dir.path().into())),
+                ("AGENT_WATCHER_INTERVAL_MS", Some("250".into())),
+            ],
+            || assert_eq!(startup_config().0, Duration::from_millis(250)),
+        );
+    }
+
+    #[test]
+    fn a_rejected_file_value_is_the_default_and_still_reported() {
+        let dir = config_dir("[daemon]\ninterval_ms = 0\n");
+        with_env(
+            &[
+                ("HERDR_PLUGIN_CONFIG_DIR", Some(dir.path().into())),
+                ("AGENT_WATCHER_INTERVAL_MS", None),
+            ],
+            || {
+                let (interval, problems) = startup_config();
+                assert_eq!(interval, Duration::from_secs(1));
+                assert_eq!(problems.len(), 1);
+                assert!(problems[0].contains("daemon.interval_ms"), "{problems:?}");
+            },
+        );
+    }
+
+    #[test]
+    fn a_rejected_file_value_is_reported_even_when_the_environment_wins() {
+        let dir = config_dir("[daemon]\ninterval_ms = 0\n");
+        with_env(
+            &[
+                ("HERDR_PLUGIN_CONFIG_DIR", Some(dir.path().into())),
+                ("AGENT_WATCHER_INTERVAL_MS", Some("250".into())),
+            ],
+            || {
+                let (interval, problems) = startup_config();
+                assert_eq!(interval, Duration::from_millis(250));
+                assert_eq!(problems.len(), 1, "a losing setting is still a mistake");
+            },
+        );
+    }
+
+    #[test]
+    fn a_rejected_environment_value_falls_through_to_the_file() {
+        let dir = config_dir("[daemon]\ninterval_ms = 5000\n");
+        with_env(
+            &[
+                ("HERDR_PLUGIN_CONFIG_DIR", Some(dir.path().into())),
+                ("AGENT_WATCHER_INTERVAL_MS", Some("0".into())),
+            ],
+            || assert_eq!(startup_config().0, Duration::from_millis(5000)),
+        );
+    }
 }
 
 #[cfg(test)]
