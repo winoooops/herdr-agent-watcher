@@ -1,5 +1,6 @@
-//! Which cards are shown, and in what order (§3.3, §3.4). Filter first, then
-//! sort, so the hidden count is known before the viewport is measured.
+//! Which cards are shown, and in what order (§3.3, §3.4). Scope first, then
+//! idle, then sort, so the hidden count is known before the viewport is
+//! measured and counts only panes this sidebar would have shown.
 
 use std::collections::HashMap;
 
@@ -37,10 +38,27 @@ fn group_key(t: &PaneTelemetry) -> &str {
         .unwrap_or("")
 }
 
-pub fn visible(panes: &HashMap<String, PaneTelemetry>, sort: Sort, hide_idle: bool) -> Visible {
+/// `scope` is `Some(workspace)` to list only that workspace, `None` to list
+/// everything. A pane with no workspace is kept either way: the daemon has not
+/// placed it yet, and a card that appears a second late beats one that never
+/// appears and cannot be explained.
+///
+/// The scope filter runs before the idle count, so `hidden_idle` counts only
+/// panes this sidebar would otherwise have shown.
+pub fn visible(
+    panes: &HashMap<String, PaneTelemetry>,
+    sort: Sort,
+    hide_idle: bool,
+    scope: Option<&str>,
+) -> Visible {
     let mut kept: Vec<(String, PaneTelemetry)> = Vec::new();
     let mut hidden_idle = 0;
     for (id, t) in panes {
+        if let (Some(scope), Some(workspace)) = (scope, t.workspace_id.as_deref()) {
+            if scope != workspace {
+                continue;
+            }
+        }
         if hide_idle && t.card_state == CardState::Idle {
             hidden_idle += 1;
             continue;
@@ -88,21 +106,76 @@ mod tests {
         ])
     }
 
+    /// Same shape as `pane` above, plus a workspace.
+    fn placed(state: CardState, seq: u64, workspace: Option<&str>) -> PaneTelemetry {
+        let mut t = pane("claude", state, seq);
+        t.workspace_id = workspace.map(str::to_string);
+        t
+    }
+
+    fn scoped_fixture() -> HashMap<String, PaneTelemetry> {
+        HashMap::from([
+            (
+                "mine".to_string(),
+                placed(CardState::Running, 3, Some("w4")),
+            ),
+            (
+                "theirs".to_string(),
+                placed(CardState::Running, 2, Some("w9")),
+            ),
+            (
+                "unplaced".to_string(),
+                placed(CardState::Running, 1, None),
+            ),
+        ])
+    }
+
+    #[test]
+    fn scope_none_lists_every_workspace() {
+        let out = visible(&scoped_fixture(), Sort::Smart, false, None);
+        assert_eq!(ids(&out), vec!["mine", "theirs", "unplaced"]);
+    }
+
+    #[test]
+    fn a_scoped_list_keeps_its_own_workspace_and_the_unplaced() {
+        let out = visible(&scoped_fixture(), Sort::Smart, false, Some("w4"));
+        assert_eq!(ids(&out), vec!["mine", "unplaced"]);
+    }
+
+    #[test]
+    fn the_hidden_idle_count_ignores_other_workspaces() {
+        let mut m = scoped_fixture();
+        m.insert(
+            "mine_idle".to_string(),
+            placed(CardState::Idle, 9, Some("w4")),
+        );
+        m.insert(
+            "their_idle".to_string(),
+            placed(CardState::Idle, 8, Some("w9")),
+        );
+        let out = visible(&m, Sort::Smart, true, Some("w4"));
+        assert_eq!(ids(&out), vec!["mine", "unplaced"]);
+        assert_eq!(
+            out.hidden_idle, 1,
+            "an idle pane in another workspace is out of scope, not hidden"
+        );
+    }
+
     #[test]
     fn smart_ranks_by_state_then_recency() {
-        let out = visible(&fixture(), Sort::Smart, false);
+        let out = visible(&fixture(), Sort::Smart, false, None);
         assert_eq!(ids(&out), vec!["p2", "p4", "p3", "p1"]);
     }
 
     #[test]
     fn group_gathers_agents_then_smart_within() {
-        let out = visible(&fixture(), Sort::Group, false);
+        let out = visible(&fixture(), Sort::Group, false, None);
         assert_eq!(ids(&out), vec!["p3", "p1", "p2", "p4"]);
     }
 
     #[test]
     fn hide_idle_filters_and_reports_the_count() {
-        let out = visible(&fixture(), Sort::Smart, true);
+        let out = visible(&fixture(), Sort::Smart, true, None);
         assert_eq!(out.hidden_idle, 1);
         assert!(!ids(&out).contains(&"p1"));
     }
@@ -112,7 +185,7 @@ mod tests {
         let mut m = HashMap::new();
         m.insert("b".to_string(), pane("claude", CardState::Idle, 5));
         m.insert("a".to_string(), pane("claude", CardState::Idle, 5));
-        assert_eq!(ids(&visible(&m, Sort::Smart, false)), vec!["a", "b"]);
+        assert_eq!(ids(&visible(&m, Sort::Smart, false, None)), vec!["a", "b"]);
     }
 
     fn ids(v: &Visible) -> Vec<&str> {

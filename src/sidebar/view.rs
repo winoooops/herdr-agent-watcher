@@ -816,7 +816,7 @@ pub fn render(
     use crate::sidebar::select;
 
     let width = width.max(MIN_WIDTH);
-    let visible = select::visible(&telemetry.panes, view.sort, view.hide_idle);
+    let visible = select::visible(&telemetry.panes, view.sort, view.hide_idle, None);
     let labels = cwd_labels(
         &visible
             .panes
