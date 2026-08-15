@@ -806,8 +806,7 @@ fn process_argv_for_pane(pane_id: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    use crate::test_env::with_env;
 
     fn fake_state_socket(dir: &std::path::Path, reply: Option<&str>) -> std::path::PathBuf {
         use std::io::{BufRead, BufReader, Write};
@@ -941,18 +940,10 @@ mod tests {
     }
 
     fn with_state_dir_env<T>(value: Option<&std::ffi::OsStr>, body: impl FnOnce() -> T) -> T {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
-        let saved = std::env::var_os("HERDR_PLUGIN_STATE_DIR");
-        match value {
-            Some(value) => std::env::set_var("HERDR_PLUGIN_STATE_DIR", value),
-            None => std::env::remove_var("HERDR_PLUGIN_STATE_DIR"),
-        }
-        let out = body();
-        match saved {
-            Some(value) => std::env::set_var("HERDR_PLUGIN_STATE_DIR", value),
-            None => std::env::remove_var("HERDR_PLUGIN_STATE_DIR"),
-        }
-        out
+        with_env(
+            &[("HERDR_PLUGIN_STATE_DIR", value.map(Into::into))],
+            body,
+        )
     }
 
     #[test]

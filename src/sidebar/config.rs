@@ -330,33 +330,10 @@ fn parse_hex(s: &str) -> Option<(u8, u8, u8)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_env::with_env;
 
     fn load_str(s: &str) -> Loaded {
         Loaded::from_toml(s)
-    }
-
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    fn with_env<T>(vars: &[(&str, Option<PathBuf>)], body: impl FnOnce() -> T) -> T {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let saved: Vec<(String, Option<std::ffi::OsString>)> = vars
-            .iter()
-            .map(|(key, _)| ((*key).to_string(), std::env::var_os(key)))
-            .collect();
-        for (key, value) in vars {
-            match value {
-                Some(path) => std::env::set_var(key, path),
-                None => std::env::remove_var(key),
-            }
-        }
-        let out = body();
-        for (key, value) in saved {
-            match value {
-                Some(value) => std::env::set_var(&key, value),
-                None => std::env::remove_var(&key),
-            }
-        }
-        out
     }
 
     #[test]
@@ -400,7 +377,7 @@ mod tests {
     fn the_problem_log_is_best_effort_and_reports_its_own_failure() {
         let dir = tempfile::tempdir().expect("tempdir");
         with_env(
-            &[("HERDR_PLUGIN_STATE_DIR", Some(dir.path().to_path_buf()))],
+            &[("HERDR_PLUGIN_STATE_DIR", Some(dir.path().into()))],
             || {
                 let mut l = load_str("[list]\nsort = \"Smart\"\n");
                 l.write_problem_log();
@@ -412,7 +389,7 @@ mod tests {
         with_env(
             &[(
                 "HERDR_PLUGIN_STATE_DIR",
-                Some(dir.path().join("nope/deeper")),
+                Some(dir.path().join("nope/deeper").into()),
             )],
             || {
                 let mut l = load_str("[list]\nsort = \"Smart\"\n");
@@ -431,7 +408,7 @@ mod tests {
     fn a_missing_file_and_an_unreadable_one_are_different_answers() {
         let dir = tempfile::tempdir().expect("tempdir");
         with_env(
-            &[("HERDR_PLUGIN_CONFIG_DIR", Some(dir.path().to_path_buf()))],
+            &[("HERDR_PLUGIN_CONFIG_DIR", Some(dir.path().into()))],
             || {
                 assert_eq!(Loaded::load().status.problems, 0);
                 std::fs::create_dir(dir.path().join("config.toml")).expect("mkdir");
@@ -448,7 +425,7 @@ mod tests {
     fn a_fixed_config_clears_the_previous_runs_log() {
         let dir = tempfile::tempdir().expect("tempdir");
         with_env(
-            &[("HERDR_PLUGIN_STATE_DIR", Some(dir.path().to_path_buf()))],
+            &[("HERDR_PLUGIN_STATE_DIR", Some(dir.path().into()))],
             || {
                 let log = dir.path().join("config-problems.log");
                 load_str("[list]\nsort = \"Smart\"\n").write_problem_log();

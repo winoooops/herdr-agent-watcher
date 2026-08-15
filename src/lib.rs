@@ -1,6 +1,9 @@
 pub mod daemon;
 pub mod sidebar;
 
+#[cfg(test)]
+pub(crate) mod test_env;
+
 #[cfg(all(feature = "runtime", unix))]
 pub mod agent;
 #[cfg(all(feature = "runtime", unix))]
