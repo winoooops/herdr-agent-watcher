@@ -165,15 +165,12 @@ herdr config check          # 検証する
 herdr server reload-config  # Herdr を再起動せずに反映する
 ```
 
-変更していなければ prefix は `ctrl+b` なので、この割り当ては `ctrl+b` の次に `a` です。
-Herdr 0.8.0 は `prefix+a` を使っていませんが、キーを決める前に自分で確認してください。
-`herdr --default-config` がすべての既定バインドを表示し、自分の `[keys]` セクションが
-それらを上書きします。
+prefix の既定は `ctrl+b` なので、この割り当ては `ctrl+b` の次に `a` です。別のキーに
+するときは `herdr --default-config` で空いているか確認してください。
 
-デーモンが利用できない、または切断された場合、ペインはその状態を表示し、キー入力を待ってから
-閉じます。サイドバーの state socket はプラグイン内部のものです:
-`$HERDR_PLUGIN_STATE_DIR/herdr-agent-watcher-state.sock`。改行区切りの JSON プロトコルは
-現在 `WIRE_VERSION = 2` で、公開された連携 API では**ありません**。
+デーモンが利用できない、または切断された場合、ペインはその旨を表示してキー入力を待ちます。
+state socket（`$HERDR_PLUGIN_STATE_DIR/herdr-agent-watcher-state.sock`、
+`WIRE_VERSION = 2`）はプラグイン内部のもので、公開 API ではありません。
 
 デーモンの停止:
 

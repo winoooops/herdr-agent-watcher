@@ -155,13 +155,12 @@ herdr config check          # 校验
 herdr server reload-config  # 生效，无需重启 Herdr
 ```
 
-除非你改过，prefix 默认是 `ctrl+b`，所以这个绑定是先按 `ctrl+b` 再按 `a`。Herdr 0.8.0
-没有占用 `prefix+a`，但选定按键前请自行确认：`herdr --default-config` 会打印全部默认
-绑定，而你自己的 `[keys]` 段会覆盖它们。
+prefix 默认是 `ctrl+b`，所以这个绑定是先按 `ctrl+b` 再按 `a`。想换别的键，先用
+`herdr --default-config` 确认它空闲。
 
-daemon 不可用或断开时，面板会显示该状态并等待按键后再关闭。侧边栏的 state socket 属于插件
-内部实现：`$HERDR_PLUGIN_STATE_DIR/herdr-agent-watcher-state.sock`，其换行分隔的 JSON 协议
-当前为 `WIRE_VERSION = 2`，**不是**公开的集成 API。
+daemon 不可用或断开时，面板会说明并等待按键。它的 state socket
+（`$HERDR_PLUGIN_STATE_DIR/herdr-agent-watcher-state.sock`，`WIRE_VERSION = 2`）
+属于插件内部实现，不是公开 API。
 
 停止 daemon：
 

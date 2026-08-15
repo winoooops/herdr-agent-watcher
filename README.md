@@ -162,15 +162,12 @@ herdr config check          # validate it
 herdr server reload-config  # apply it, without restarting Herdr
 ```
 
-The prefix is `ctrl+b` unless you changed it, so that binding is `ctrl+b` then `a`. Herdr
-0.8.0 leaves `prefix+a` unbound, but check for yourself before settling on a key:
-`herdr --default-config` prints every default binding, and your own `[keys]` section
-overrides them.
+The prefix defaults to `ctrl+b`, so that binding is `ctrl+b` then `a`. To pick a different
+key, check it is free in `herdr --default-config`.
 
-If the daemon is unavailable or disconnects, the pane reports that state and waits for a
-key before closing. The sidebar's state socket is plugin-internal:
-`$HERDR_PLUGIN_STATE_DIR/herdr-agent-watcher-state.sock`. Its newline-delimited JSON
-protocol is currently `WIRE_VERSION = 2` and is not a public integration API.
+If the daemon is unavailable or disconnects, the pane says so and waits for a key. Its
+state socket (`$HERDR_PLUGIN_STATE_DIR/herdr-agent-watcher-state.sock`,
+`WIRE_VERSION = 2`) is plugin-internal, not a public API.
 
 Stop the daemon with:
 
