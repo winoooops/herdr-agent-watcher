@@ -92,15 +92,31 @@ Output goes to the plugin log — read the last run with
 
 ## Configuration
 
-`AGENT_WATCHER_INTERVAL_MS` is how often the daemon reconciles with Herdr, in
-milliseconds. It must be positive and defaults to `1000`. To set it to 5 seconds:
+Settings live in the plugin's own config file, `config.toml` in
+`$HERDR_PLUGIN_CONFIG_DIR`. Every key is optional and every bad value falls back to its
+default, so a mistake costs one setting rather than the plugin.
 
-```sh
-echo 'export AGENT_WATCHER_INTERVAL_MS=5000' >> ~/.zshrc
+```toml
+[daemon]
+interval_ms = 5000     # how often the daemon reconciles with Herdr; default 1000
+
+[list]
+scope = "workspace"    # "all" (default) lists every pane; "workspace" lists only this one
 ```
 
-Then start a fresh Herdr session — the daemon inherits the server's environment, so
-`restart-daemon` on its own will not pick it up.
+Apply a change with:
+
+```sh
+herdr plugin action invoke restart-daemon --plugin herdr-agent-watcher
+```
+
+A sidebar picks up `[list]` when it next opens.
+
+`AGENT_WATCHER_INTERVAL_MS` still works and outranks the file. It is read from the **Herdr
+server's** environment, not your shell, so setting it means restarting Herdr — which is why
+the file exists.
+
+Run [`doctor`](#doctor) to see whether a setting was rejected and what was used instead.
 
 ## Sidebar
 
@@ -112,6 +128,25 @@ Each invocation intentionally opens another split. Cards show agent state, agent
 title, context use, cache hit rate, cost, tool count, and the three newest tool traces.
 Use `j`/`k` or PageUp/PageDown to scroll, `o`/`↵` to expand, `z` to hide idle agents, and
 `q`, Escape, or Ctrl-C to close.
+
+With `scope = "workspace"` each sidebar lists only the panes in its own workspace, which is
+what makes opening one per workspace useful. A pane the daemon has not placed yet is shown
+rather than hidden. Without `HERDR_WORKSPACE_ID` — running the sidebar outside a Herdr pane
+— the scope falls back to `all` and the sidebar says so above its footer.
+
+To bind opening one to a key, add this to **Herdr's** config (`~/.config/herdr/config.toml`),
+not the plugin's:
+
+```toml
+[[keys.command]]
+key = "prefix+a"
+type = "plugin_action"
+command = "open-sidebar"
+```
+
+Herdr has no command that dumps active bindings, so check the key is free before committing
+to it: apply the change, run `herdr config check`, and pick another key if `prefix+a` is
+already taken in your setup.
 
 If the daemon is unavailable or disconnects, the pane reports that state and waits for a
 key before closing. The sidebar's state socket is plugin-internal:
@@ -219,7 +254,7 @@ required to degrade to.
 
 ## Future work
 
-- [ ] Read settings from the plugin's own `config.toml` instead of
+- [x] Read settings from the plugin's own `config.toml` instead of
       `AGENT_WATCHER_INTERVAL_MS`, so configuration no longer depends on which environment
       the Herdr server was launched from
 - [ ] Reap dead bridge directories. Key the reaper on **liveness** — the pane id is absent

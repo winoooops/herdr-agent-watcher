@@ -94,15 +94,31 @@ herdr plugin action invoke <id> --plugin herdr-agent-watcher
 
 ## 設定
 
-`AGENT_WATCHER_INTERVAL_MS` は、デーモンが Herdr と調整（reconciliation）する間隔をミリ秒で
-指定します。正の値である必要があり、既定は `1000` です。5 秒に設定する場合:
+設定はプラグイン自身の設定ファイル、つまり `$HERDR_PLUGIN_CONFIG_DIR` 内の
+`config.toml` に置きます。すべてのキーは任意で、不正な値はそれぞれ既定値に
+フォールバックするため、1 つの誤りで失われるのはその設定だけで、プラグイン全体ではありません。
 
-```sh
-echo 'export AGENT_WATCHER_INTERVAL_MS=5000' >> ~/.zshrc
+```toml
+[daemon]
+interval_ms = 5000     # デーモンが Herdr と調整する間隔。既定値は 1000
+
+[list]
+scope = "workspace"    # "all"（既定）は全ペイン、"workspace" はこのワークスペースだけ
 ```
 
-その後、新しい Herdr セッションを開始します。デーモンはサーバーの環境を継承するため、
-`restart-daemon` だけでは新しい値を拾いません。
+変更の適用:
+
+```sh
+herdr plugin action invoke restart-daemon --plugin herdr-agent-watcher
+```
+
+サイドバーは次に開いたときに `[list]` を取り込みます。
+
+`AGENT_WATCHER_INTERVAL_MS` も引き続き使え、ファイルより優先されます。読み取られるのは
+シェルではなく **Herdr サーバーの**環境なので、設定するには Herdr の再起動が必要です。
+その不便を解消するために、このファイルがあります。
+
+設定が拒否されたか、代わりに何が使われたかは [`doctor`](#doctor) で確認できます。
 
 ## サイドバー
 
@@ -114,6 +130,26 @@ herdr plugin action invoke open-sidebar --plugin herdr-agent-watcher
 エージェント/モデル、タイトル、コンテキスト使用量、キャッシュヒット率、コスト、ツール呼び出し
 回数、最新 3 件のツールトレースが表示されます。`j`/`k` または PageUp/PageDown でスクロール、
 `o`/`↵` で展開、`z` でアイドル状態のエージェントを隠し、`q`、Escape、Ctrl-C で閉じます。
+
+`scope = "workspace"` にすると、各サイドバーは自身のワークスペースにあるペインだけを
+表示します。これにより、ワークスペースごとに 1 つずつ開くことに意味が生まれます。
+デーモンがまだ配置先を特定していないペインは、隠さず表示します。
+`HERDR_WORKSPACE_ID` が無い場合 — Herdr ペイン外でサイドバーを実行した場合 — scope は
+`all` にフォールバックし、サイドバーのフッター上部にその理由を表示します。
+
+開く操作をキーに割り当てるには、次をプラグインではなく **Herdr の**設定
+（`~/.config/herdr/config.toml`）へ追加します:
+
+```toml
+[[keys.command]]
+key = "prefix+a"
+type = "plugin_action"
+command = "open-sidebar"
+```
+
+Herdr には有効なキーバインドを一覧表示するコマンドがないため、採用前にそのキーが空いている
+ことを確認してください。変更を適用して `herdr config check` を実行し、自分の環境で
+`prefix+a` が既に使われている場合は別のキーを選んでください。
 
 デーモンが利用できない、または切断された場合、ペインはその状態を表示し、キー入力を待ってから
 閉じます。サイドバーの state socket はプラグイン内部のものです:
@@ -224,7 +260,7 @@ Kimi のプラン使用量取得は、設定された API キーを `/usages` �
 
 ## 今後の課題
 
-- [ ] `AGENT_WATCHER_INTERVAL_MS` の代わりに、プラグイン自身の `config.toml` から設定を
+- [x] `AGENT_WATCHER_INTERVAL_MS` の代わりに、プラグイン自身の `config.toml` から設定を
       読む。設定が「Herdr サーバーがどの環境から起動されたか」に依存しなくなる
 - [ ] 不要になったブリッジディレクトリの回収。判定は**生存性**で — pane id が Herdr の
       ペイン一覧に無く、**かつ**どのプロセスも保持していないこと。unbind では絶対に行わず

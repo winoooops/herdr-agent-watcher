@@ -88,15 +88,29 @@ herdr plugin action invoke <id> --plugin herdr-agent-watcher
 
 ## 配置
 
-`AGENT_WATCHER_INTERVAL_MS` 是 daemon 与 Herdr 协调（reconciliation）的间隔，单位毫秒，
-必须为正数，默认 `1000`。以设成 5 秒为例：
+设置放在插件自己的配置文件中，也就是 `$HERDR_PLUGIN_CONFIG_DIR` 下的 `config.toml`。
+每个键都是可选的，每个无效值都会回退到默认值，因此一个错误只会影响一项设置，而不会影响整个插件。
 
-```sh
-echo 'export AGENT_WATCHER_INTERVAL_MS=5000' >> ~/.zshrc
+```toml
+[daemon]
+interval_ms = 5000     # daemon 与 Herdr 协调的间隔；默认 1000
+
+[list]
+scope = "workspace"    # "all"（默认）列出所有 pane；"workspace" 只列出当前 workspace
 ```
 
-然后开一个全新的 Herdr 会话 —— daemon 继承的是 server 的环境，单独跑 `restart-daemon` 拿不到
-新值。
+应用修改：
+
+```sh
+herdr plugin action invoke restart-daemon --plugin herdr-agent-watcher
+```
+
+sidebar 会在下次打开时读取 `[list]`。
+
+`AGENT_WATCHER_INTERVAL_MS` 仍然有效，并且优先级高于配置文件。它读取的是 **Herdr server**
+的环境，而不是你的 shell；因此设置它意味着要重启 Herdr —— 这正是配置文件存在的原因。
+
+运行 [`doctor`](#doctor) 可查看某项设置是否被拒绝，以及实际改用了什么值。
 
 ## 侧边栏
 
@@ -107,6 +121,24 @@ herdr plugin action invoke open-sidebar --plugin herdr-agent-watcher
 每次调用都会**有意**新开一个分屏。卡片显示 agent 状态、agent/模型、标题、上下文用量、
 缓存命中率、成本、工具调用数，以及最近三条工具调用记录。`j`/`k` 或 PageUp/PageDown 滚动，
 `o`/`↵` 展开，`z` 隐藏空闲 agent，`q`、Escape 或 Ctrl-C 关闭。
+
+设置 `scope = "workspace"` 后，每个 sidebar 只列出自身 workspace 中的 pane，这使得为每个
+workspace 各开一个 sidebar 真正有用。daemon 尚未确定 workspace 的 pane 会显示出来，而不会
+被隐藏。在没有 `HERDR_WORKSPACE_ID` 时 —— 也就是在 Herdr pane 外运行 sidebar —— scope
+会回退到 `all`，sidebar 也会在 footer 上方说明原因。
+
+要绑定一个快捷键来打开 sidebar，请把下面内容加到 **Herdr 的**配置
+（`~/.config/herdr/config.toml`），而不是插件配置：
+
+```toml
+[[keys.command]]
+key = "prefix+a"
+type = "plugin_action"
+command = "open-sidebar"
+```
+
+Herdr 没有列出当前生效快捷键的命令，因此采用这个按键前请先确认它空闲：应用修改，运行
+`herdr config check`；如果你的配置中已经占用了 `prefix+a`，请选择另一个按键。
 
 daemon 不可用或断开时，面板会显示该状态并等待按键后再关闭。侧边栏的 state socket 属于插件
 内部实现：`$HERDR_PLUGIN_STATE_DIR/herdr-agent-watcher-state.sock`，其换行分隔的 JSON 协议
@@ -204,7 +236,7 @@ sidecar 树中，而那棵树是冻结的。
 
 ## 后续工作
 
-- [ ] 从插件自己的 `config.toml` 读配置，取代 `AGENT_WATCHER_INTERVAL_MS`，
+- [x] 从插件自己的 `config.toml` 读配置，取代 `AGENT_WATCHER_INTERVAL_MS`，
       这样配置就不再取决于 Herdr server 是从哪个环境启动的
 - [ ] 回收失效的 bridge 目录。判据用**存活性** —— pane id 不在 Herdr 的 pane 列表里
       **且**没有进程持有它 —— 绝不用 unbind（rebind 是常态），也绝不用 mtime
