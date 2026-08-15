@@ -3,6 +3,7 @@ pub(crate) mod bridge_settings;
 pub mod claude_bridge;
 pub mod consent;
 pub(crate) mod doctor;
+pub mod keybinding;
 pub(crate) mod keys;
 pub mod sidecar;
 
