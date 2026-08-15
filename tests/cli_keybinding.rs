@@ -218,3 +218,105 @@ fn a_record_for_another_config_is_refused_not_overwritten() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("/somewhere/else.toml"));
     assert_eq!(env.config(), "[ui]\nx = 1\n");
 }
+
+#[test]
+fn unbind_restores_the_file_byte_for_byte_and_reloads() {
+    let env = Env::new(Some("[ui]\nx = 1\n"), "", "config: ok");
+    let original = env.config();
+    assert!(env.run("bind-sidebar-key").status.success());
+    assert_ne!(env.config(), original, "bind must have changed something");
+
+    let out = env.run("unbind-sidebar-key");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(env.config(), original);
+    assert!(
+        env.fake.argv().matches("server reload-config").count() >= 2,
+        "unbind must reload too: {}",
+        env.fake.argv()
+    );
+    assert!(!env.state.join("keybinding-install.json").exists());
+}
+
+#[test]
+fn unbind_refuses_when_the_block_was_edited() {
+    let env = Env::new(Some("[ui]\nx = 1\n"), "", "config: ok");
+    assert!(env.run("bind-sidebar-key").status.success());
+
+    std::fs::write(
+        &env.herdr_config,
+        env.config().replace("prefix+a", "prefix+y"),
+    )
+    .expect("edit by hand");
+    let edited = env.config();
+
+    let out = env.run("unbind-sidebar-key");
+    assert!(!out.status.success());
+    assert_eq!(env.config(), edited, "an edited block is not ours to remove");
+}
+
+#[test]
+fn unbind_deletes_a_file_it_created() {
+    let env = Env::new(None, "", "config: ok");
+    assert!(!env.herdr_config.exists());
+    assert!(env.run("bind-sidebar-key").status.success());
+    assert!(env.herdr_config.exists());
+
+    let out = env.run("unbind-sidebar-key");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !env.herdr_config.exists(),
+        "a file this action created should not be left behind"
+    );
+}
+
+#[test]
+fn unbind_refuses_when_the_block_is_there_but_the_record_is_gone() {
+    let env = Env::new(Some("[ui]\nx = 1\n"), "", "config: ok");
+    assert!(env.run("bind-sidebar-key").status.success());
+    let installed = env.config();
+    std::fs::remove_file(env.state.join("keybinding-install.json")).unwrap();
+
+    let out = env.run("unbind-sidebar-key");
+    assert!(
+        !out.status.success(),
+        "reporting success would call a dirty config clean"
+    );
+    assert_eq!(env.config(), installed);
+}
+
+#[test]
+fn unbind_refuses_when_it_cannot_read_the_config() {
+    use std::os::unix::fs::PermissionsExt;
+    let env = Env::new(Some("[ui]\nx = 1\n"), "", "config: ok");
+    std::fs::set_permissions(
+        &env.herdr_config,
+        std::fs::Permissions::from_mode(0o000),
+    )
+    .unwrap();
+    let out = env.run("unbind-sidebar-key");
+    std::fs::set_permissions(
+        &env.herdr_config,
+        std::fs::Permissions::from_mode(0o644),
+    )
+    .unwrap();
+    assert!(
+        !out.status.success(),
+        "an unreadable config is not a clean one"
+    );
+}
+
+#[test]
+fn unbind_with_no_record_is_a_no_op() {
+    let env = Env::new(Some("[ui]\nx = 1\n"), "", "config: ok");
+    let out = env.run("unbind-sidebar-key");
+    assert!(out.status.success());
+    assert_eq!(env.config(), "[ui]\nx = 1\n");
+}

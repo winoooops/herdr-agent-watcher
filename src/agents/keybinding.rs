@@ -439,6 +439,98 @@ fn reload() -> Result<(), String> {
     Ok(())
 }
 
+pub fn cli_unbind(_args: &[String]) -> i32 {
+    match unbind() {
+        Ok(message) => {
+            println!("{message}");
+            0
+        }
+        Err(error) => {
+            eprintln!("{error}");
+            1
+        }
+    }
+}
+
+fn unbind() -> Result<String, String> {
+    let record = record_path()?;
+    let text = match std::fs::read_to_string(&record) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            // Silent success only when there is nothing to remove. A block
+            // with no record is exactly the case the bridge refuses to guess
+            // at, and reporting success here would tell the operator their
+            // config is clean when it is not.
+            let path = herdr_config_path()?;
+            // Not `unwrap_or_default()`: an unreadable config is not an empty
+            // one. Treating it as empty finds no marker and reports the config
+            // clean without ever having seen it.
+            match std::fs::read_to_string(&path) {
+                Ok(current) if current.contains(MARKER) => {
+                    return Err(format!(
+                        "{} still contains a managed block, but there is no install \
+                         record at {}; remove the block by hand",
+                        path.display(),
+                        record.display()
+                    ))
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(format!(
+                        "cannot read {} ({error}), so I cannot tell whether a managed \
+                         block is still in it",
+                        path.display()
+                    ))
+                }
+            }
+            return Ok("no managed keybinding is installed".into());
+        }
+        Err(error) => return Err(format!("cannot read {}: {error}", record.display())),
+    };
+    let installed: Record =
+        serde_json::from_str(&text).map_err(|error| format!("record unreadable: {error}"))?;
+
+    let current = match std::fs::read_to_string(&installed.config_path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let _ = std::fs::remove_file(&record);
+            return Ok("Herdr's config is gone; removed the stale record".into());
+        }
+        Err(error) => {
+            return Err(format!(
+                "cannot read {}: {error}",
+                installed.config_path.display()
+            ))
+        }
+    };
+
+    let remainder = remove_block(&current, &installed.appended)?;
+    // The removal is validated for the same reason the append is: this writes
+    // to a file the plugin does not own, and "I only took something away"
+    // is not a guarantee that what is left parses the way Herdr expects.
+    validate(&remainder)?;
+    if installed.created_file && remainder.trim().is_empty() {
+        std::fs::remove_file(&installed.config_path).map_err(|error| {
+            format!(
+                "remove {}: {error}",
+                installed.config_path.display()
+            )
+        })?;
+    } else {
+        write_config(&installed.config_path, &remainder, Some(&current))?;
+    }
+    std::fs::remove_file(&record)
+        .map_err(|error| format!("remove {}: {error}", record.display()))?;
+
+    reload()?;
+    Ok(format!(
+        "removed {} from {}",
+        installed.key,
+        installed.config_path.display()
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

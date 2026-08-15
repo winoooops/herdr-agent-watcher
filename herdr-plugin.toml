@@ -58,6 +58,11 @@ title = "Bind a key to open the sidebar (writes to Herdr's config)"
 command = ["target/release/herdr-agent-watcher", "bind-sidebar-key"]
 
 [[actions]]
+id = "unbind-sidebar-key"
+title = "Remove the sidebar keybinding from Herdr's config"
+command = ["target/release/herdr-agent-watcher", "unbind-sidebar-key"]
+
+[[actions]]
 id = "kimi-consent-on"
 title = "Enable Kimi usage reporting consent"
 command = ["target/release/herdr-agent-watcher", "kimi-consent", "on"]
