@@ -219,7 +219,10 @@ fn the_writer_is_invoked_with_exactly_the_arguments_it_expects() {
     let fake = dir.path().join("fake-aw");
     std::fs::write(
         &fake,
-        format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> {}\nexit 0\n", log.display()),
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {}\nexit 0\n",
+            log.display()
+        ),
     )
     .unwrap();
     std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -250,7 +253,10 @@ fn the_attention_hook_is_invoked_with_exactly_its_arguments() {
     let fake = dir.path().join("fake-aw");
     std::fs::write(
         &fake,
-        format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> {}\nexit 0\n", log.display()),
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {}\nexit 0\n",
+            log.display()
+        ),
     )
     .unwrap();
     std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();

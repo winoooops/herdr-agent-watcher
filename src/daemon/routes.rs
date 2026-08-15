@@ -57,13 +57,16 @@ impl BridgeRoutes {
             // watcher yet, also resolves to nothing, but neither means the
             // session was replaced -- and the remedy for this one is to
             // reopen the pane, which is the wrong advice for those.
-            self.refusals.lock().expect("bridge routes poisoned").insert(
-                pane_id.to_string(),
-                crate::daemon::state_wire::Refusal {
-                    offered: agent_session.to_string(),
-                    bound,
-                },
-            );
+            self.refusals
+                .lock()
+                .expect("bridge routes poisoned")
+                .insert(
+                    pane_id.to_string(),
+                    crate::daemon::state_wire::Refusal {
+                        offered: agent_session.to_string(),
+                        bound,
+                    },
+                );
             return None;
         }
         let path = self.watchers.current_status_path(pane_id);
