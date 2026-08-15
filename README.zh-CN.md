@@ -224,10 +224,17 @@ doctor 会指出原因并给出修复方式。**唯一它不能替你修的**是
 
 ## 疑难排查
 
-**Claude 卡片上 CONTEXT、CACHE、COST 显示为 `—`。** 这三项只经由状态行送达，所以桥接必须是
-开着的 —— 用 [`doctor`](#doctor) 确认。如果已经开着，那么要么这个 pane 自启用以来还没渲染过
-状态行（给它发一条提示词），要么它正在跑子 agent：此时状态行描述的是子 agent，卡片上会显示
-子 agent 的模型名，用量从零开始。主会话的数字会在它下一次 turn 时回来。
+**Claude 卡片上 CONTEXT、CACHE、COST 显示为 `—`。** 这三项只经由状态行送达。跑一次
+[`doctor`](#doctor) —— 它会区分三种原因并给出各自的处方：
+
+- *桥接没启用* —— `enable-claude-bridge`；
+- *herdr reports no agent session for this pane* —— 这个 pane 里的会话被换掉了，而 session
+  与绑定对不上的状态行写入会被拒绝。关掉再重开这个 pane；
+- *no metrics yet* —— 没出问题；这个 pane 自你启用桥接以来还没渲染过状态行。给它发一条
+  提示词。
+
+还有第四种、临时的情况：会话正在跑子 agent，此时状态行描述的是子 agent，卡片会显示它的模型名、
+用量从零开始。这种会在主会话下一次 turn 时自行恢复。
 
 **某个 pane 根本没有卡片。** 对于 daemon 启动之前就已打开的 pane，Herdr 不会报告
 `agent_session`，因此无法绑定。关掉再重开这个 pane。

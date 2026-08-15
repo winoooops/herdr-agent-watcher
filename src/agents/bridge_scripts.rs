@@ -30,7 +30,8 @@ pub(crate) fn generate(
              set +e +u\n\
              payload=$(cat)\n\
              if [ -n \"${{HERDR_PANE_ID:-}}\" ]; then\n\
-             \x20 printf '%s' \"$payload\" | {aw} claude-bridge --write \\\n+             \x20   --pane \"$HERDR_PANE_ID\" --socket {socket} >/dev/null 2>&1\n\
+             \x20 printf '%s' \"$payload\" | {aw} claude-bridge --write \\\n\
+             \x20   --pane \"$HERDR_PANE_ID\" --socket {socket} >/dev/null 2>&1\n\
              fi\n\
              downstream={baked}\n\
              if [ \"${{1:-}}\" = '--' ]; then downstream=${{2-}}; fi\n\
@@ -51,7 +52,9 @@ pub(crate) fn generate(
              set +e +u\n\
              payload=$(cat)\n\
              if [ -n \"${{HERDR_PANE_ID:-}}\" ]; then\n\
-             \x20 printf '%s' \"$payload\" | {aw} claude-bridge --write-attention \\\n+             \x20   --pane \"$HERDR_PANE_ID\" --socket {socket} \\\n+             \x20   --event \"${{1:-Unknown}}\" --mode \"${{2:-append}}\" >/dev/null 2>&1\n\
+             \x20 printf '%s' \"$payload\" | {aw} claude-bridge --write-attention \\\n\
+             \x20   --pane \"$HERDR_PANE_ID\" --socket {socket} \\\n\
+             \x20   --event \"${{1:-Unknown}}\" --mode \"${{2:-append}}\" >/dev/null 2>&1\n\
              fi\n\
              exit 0\n",
             aw = shell_quote(&agent_watcher.to_string_lossy()),

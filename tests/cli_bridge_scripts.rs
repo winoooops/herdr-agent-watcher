@@ -206,3 +206,69 @@ fn attention_script_exits_zero_when_writer_fails() {
     );
     assert!(ok);
 }
+
+/// The generated script's continuation lines carried a stray `+` for two
+/// milestones, which arrived at the writer as an extra positional argument.
+/// It happened to be tolerated, so nothing ever failed — assert on the argv
+/// the writer actually receives rather than on the text of the script.
+#[test]
+fn the_writer_is_invoked_with_exactly_the_arguments_it_expects() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("argv.log");
+    let fake = dir.path().join("fake-aw");
+    std::fs::write(
+        &fake,
+        format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> {}\nexit 0\n", log.display()),
+    )
+    .unwrap();
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let script = generate(
+        dir.path(),
+        &fake.to_string_lossy(),
+        "/tmp/probe.sock",
+        "printf DOWNSTREAM",
+    );
+    chmod_755(&script);
+    let (stdout, _, ok) = run(&script.to_string_lossy(), Some("w1:p1"), &[]);
+    assert!(ok);
+    assert_eq!(stdout, "DOWNSTREAM", "the downstream must still run");
+
+    let argv = std::fs::read_to_string(&log).expect("the writer ran");
+    assert_eq!(
+        argv.trim(),
+        "claude-bridge --write --pane w1:p1 --socket /tmp/probe.sock"
+    );
+}
+
+#[test]
+fn the_attention_hook_is_invoked_with_exactly_its_arguments() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("argv.log");
+    let fake = dir.path().join("fake-aw");
+    std::fs::write(
+        &fake,
+        format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> {}\nexit 0\n", log.display()),
+    )
+    .unwrap();
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    generate(dir.path(), &fake.to_string_lossy(), "/tmp/probe.sock", "");
+    let attention = dir.path().join("attention.sh");
+    chmod_755(&attention);
+    let (_, _, ok) = run(
+        &format!("{} Stop append", attention.to_string_lossy()),
+        Some("w1:p1"),
+        &[],
+    );
+    assert!(ok);
+
+    let argv = std::fs::read_to_string(&log).expect("the hook ran");
+    assert_eq!(
+        argv.trim(),
+        "claude-bridge --write-attention --pane w1:p1 --socket /tmp/probe.sock \
+         --event Stop --mode append"
+    );
+}

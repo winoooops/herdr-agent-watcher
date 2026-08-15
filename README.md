@@ -235,11 +235,19 @@ from here, so if every check passes and metrics are still missing, it says exact
 ## Troubleshooting
 
 **A Claude card shows `—` for CONTEXT, CACHE and COST.** Those three arrive only through the
-status line, so the bridge has to be on — [`doctor`](#doctor) says whether it is. If it is,
-the pane has either not rendered a status line since you enabled it (send it a prompt), or
-it is running a subagent: the status line then describes the subagent, whose model name
-appears on the card and whose usage starts at zero. The main session's numbers return on its
-next turn.
+status line. Run [`doctor`](#doctor) — it distinguishes the three causes and prints the fix
+for each:
+
+- *the bridge is not enabled* — `enable-claude-bridge`;
+- *herdr reports no agent session for this pane* — the session in it was replaced, and a
+  status line whose session no longer matches the binding is refused. Close and reopen the
+  pane;
+- *no metrics yet* — nothing is wrong; the pane has not rendered a status line since you
+  enabled the bridge. Send it a prompt.
+
+A session that has delegated to a subagent is a fourth, temporary case: the status line then
+describes the subagent, so the card shows its model and its usage starts at zero. That one
+resolves itself on the main session's next turn.
 
 **A pane has no card at all.** Herdr reports no `agent_session` for a pane that was open
 before the daemon started, so it cannot be bound. Close and reopen the pane.
