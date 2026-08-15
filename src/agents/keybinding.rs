@@ -59,6 +59,80 @@ pub(crate) fn append_block(existing: &str, key: &str) -> (String, String) {
     (format!("{existing}{appended}"), appended)
 }
 
+/// Removes exactly `appended`, or explains why it will not.
+///
+/// Byte equality identifies content, not the position it occupies: the same
+/// bytes could sit inside a multi-line string, and if the real block had been
+/// deleted by hand that string would be the only match. So the textual
+/// removal is checked semantically before it is returned — the caller writes
+/// text, but only text whose meaning is "one `keys.command` entry fewer".
+pub(crate) fn remove_block(current: &str, appended: &str) -> Result<String, String> {
+    let mut matches = current.match_indices(appended);
+    let Some((at, _)) = matches.next() else {
+        return Err(format!(
+            "the managed block is not in this file exactly as it was written; \
+             it was edited or already removed. Delete it by hand:\n{appended}"
+        ));
+    };
+    if matches.next().is_some() {
+        return Err("the managed block appears more than once; refusing to guess".into());
+    }
+
+    let mut out = String::with_capacity(current.len() - appended.len());
+    out.push_str(&current[..at]);
+    out.push_str(&current[at + appended.len()..]);
+
+    // What the block itself says it is. `appended` is self-describing: it
+    // parses to exactly one `keys.command` entry, and that entry is the one
+    // whose disappearance we require.
+    let ours = match command_entries(appended)?.as_slice() {
+        [one] => one.clone(),
+        other => {
+            return Err(format!(
+                "the recorded block describes {} keys.command entries, not one; \
+                 the record is corrupt",
+                other.len()
+            ))
+        }
+    };
+
+    let before = command_entries(current)?;
+    let after = command_entries(&out)?;
+    let mut gone = before.clone();
+    for entry in &after {
+        if let Some(index) = gone.iter().position(|e| e == entry) {
+            gone.remove(index);
+        }
+    }
+    match gone.as_slice() {
+        [only] if *only == ours => Ok(out),
+        [] => Err(
+            "removing those bytes would not remove any keys.command entry — they are \
+             inside a string or a comment, not the block; refusing"
+                .into(),
+        ),
+        other => Err(format!(
+            "removing those bytes would remove {} keys.command entries, or not the one \
+             that was installed; refusing",
+            other.len()
+        )),
+    }
+}
+
+/// Every `[[keys.command]]` entry, whole, in order. Whole rather than just the
+/// `key`: an entry with our key but someone else's command is not ours.
+fn command_entries(text: &str) -> Result<Vec<toml::Value>, String> {
+    let parsed: toml::Value = text
+        .parse()
+        .map_err(|error| format!("not valid TOML: {error}"))?;
+    Ok(parsed
+        .get("keys")
+        .and_then(|k| k.get("command"))
+        .and_then(toml::Value::as_array)
+        .cloned()
+        .unwrap_or_default())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -101,5 +175,72 @@ mod tests {
         let (text, appended) = append_block("", "prefix+a");
         assert_eq!(text, appended);
         assert_eq!(text.replace(&appended, ""), "");
+    }
+
+    fn bound(original: &str) -> (String, String) {
+        append_block(original, "prefix+a")
+    }
+
+    #[test]
+    fn removal_restores_the_file_byte_for_byte() {
+        for original in ["a = 1\n", "a = 1", "a = 1\r\n", ""] {
+            let (text, appended) = bound(original);
+            assert_eq!(
+                remove_block(&text, &appended).unwrap(),
+                original,
+                "{original:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_copied_marker_that_is_not_our_bytes_is_refused() {
+        let (_, appended) = bound("");
+        // Same marker, same key, different description — an operator's own copy.
+        let theirs = appended.replace("Open the Agent Watcher sidebar", "mine");
+        assert!(remove_block(&theirs, &appended).is_err());
+    }
+
+    #[test]
+    fn two_identical_blocks_are_refused() {
+        let (text, appended) = bound("a = 1\n");
+        let doubled = format!("{text}{appended}");
+        assert!(remove_block(&doubled, &appended).is_err());
+    }
+
+    /// The reason the semantic check exists: the textual search finds exactly
+    /// one match here, and it is inside a string the operator owns.
+    #[test]
+    fn a_match_inside_a_multiline_string_is_not_our_block() {
+        let (_, appended) = bound("");
+        let config = format!("note = \"\"\"\n{appended}\"\"\"\n");
+        let error = remove_block(&config, &appended).expect_err("must refuse");
+        assert!(error.contains("keys.command"), "{error}");
+    }
+
+    #[test]
+    fn a_neighbouring_entry_survives() {
+        let (text, appended) = bound("a = 1\n");
+        let other =
+            "\n[[keys.command]]\nkey = \"prefix+z\"\ntype = \"shell\"\ncommand = \"ls\"\n";
+        let with_other = format!("{text}{other}");
+        assert_eq!(
+            remove_block(&with_other, &appended).unwrap(),
+            format!("a = 1\n{other}"),
+            "only ours comes out"
+        );
+    }
+
+    /// A record whose block describes two entries is not something this ever
+    /// wrote. Counting "one entry disappeared" would accept it and delete both.
+    #[test]
+    fn a_record_describing_two_entries_is_refused() {
+        let (_, ours) = bound("");
+        let theirs =
+            "[[keys.command]]\nkey = \"prefix+z\"\ntype = \"shell\"\ncommand = \"ls\"\n";
+        let two = format!("{ours}{theirs}");
+        let config = format!("a = 1\n{two}");
+        let error = remove_block(&config, &two).expect_err("must refuse");
+        assert!(error.contains("record is corrupt"), "{error}");
     }
 }
