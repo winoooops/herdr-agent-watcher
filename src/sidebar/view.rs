@@ -793,6 +793,9 @@ pub struct ViewInput<'a> {
     /// Pane ids whose expansion is FLIPPED from the auto_expand default (§3.2).
     pub toggled: &'a std::collections::HashSet<String>,
     pub hide_idle: bool,
+    /// `Some(workspace)` lists only that workspace; `None` lists everything.
+    /// Already resolved by `config::Loaded::resolve_scope`.
+    pub scope: Option<&'a str>,
     pub sort: crate::sidebar::select::Sort,
     pub auto_expand: crate::sidebar::config::AutoExpand,
     pub agent_mark: crate::sidebar::config::AgentMark,
@@ -816,7 +819,7 @@ pub fn render(
     use crate::sidebar::select;
 
     let width = width.max(MIN_WIDTH);
-    let visible = select::visible(&telemetry.panes, view.sort, view.hide_idle, None);
+    let visible = select::visible(&telemetry.panes, view.sort, view.hide_idle, view.scope);
     let labels = cwd_labels(
         &visible
             .panes
@@ -1872,6 +1875,7 @@ mod tests {
             cursor,
             toggled,
             hide_idle: false,
+            scope: None,
             sort: crate::sidebar::select::Sort::default(),
             auto_expand: crate::sidebar::config::AutoExpand::default(),
             agent_mark: AgentMark::default(),
@@ -1908,6 +1912,48 @@ mod tests {
             .expect("footer")
             .iter()
             .any(|s| s.text.contains("expand")));
+    }
+
+    #[test]
+    fn a_scoped_render_drops_other_workspaces_including_the_selected_card() {
+        fn placed(workspace: &str, state: CardState) -> PaneTelemetry {
+            let mut t = claude();
+            t.workspace_id = Some(workspace.to_string());
+            t.card_state = state;
+            t
+        }
+
+        let mut panes = std::collections::HashMap::new();
+        panes.insert("w4:p1".to_string(), placed("w4", CardState::Running));
+        panes.insert("w4:p2".to_string(), placed("w4", CardState::Idle));
+        panes.insert("w9:p1".to_string(), placed("w9", CardState::Running));
+        panes.insert("w9:p2".to_string(), placed("w9", CardState::Idle));
+        let state = crate::sidebar::reducer::State { panes, last_seq: 4 };
+
+        let app = appearances();
+        let toggled = std::collections::HashSet::new();
+        let mut v = view_input(Some("w9:p1"), &toggled, &app);
+        v.hide_idle = true;
+        v.scope = Some("w4");
+        let out = render(&state, &v, W, 0);
+
+        let rendered: Vec<&str> = out.spans.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(
+            rendered,
+            vec!["w4:p1"],
+            "only this workspace's non-idle pane is drawn"
+        );
+        assert!(
+            out.span_for("w9:p1").is_none(),
+            "a filtered pane cannot be the selected row"
+        );
+        assert!(
+            out.pinned
+                .iter()
+                .any(|l| l.iter().any(|s| s.text.contains("+1 idle"))),
+            "only w4's idle pane is hidden — w9's is out of scope, not hidden: {:?}",
+            out.plain()
+        );
     }
 
     #[test]

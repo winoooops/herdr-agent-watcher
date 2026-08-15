@@ -673,6 +673,7 @@ fn non_default_config_reaches_what_is_drawn() {
         cursor: None,
         toggled: &toggled,
         hide_idle: cfg.hide_idle,
+        scope: None,
         sort: cfg.sort,
         auto_expand: cfg.auto_expand,
         agent_mark: cfg.agent_mark,

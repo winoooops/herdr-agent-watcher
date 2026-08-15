@@ -110,6 +110,7 @@ fn view_input<'a>(
         cursor,
         toggled,
         hide_idle,
+        scope: cfg.workspace_id.as_deref(),
         sort: cfg.sort,
         auto_expand: cfg.auto_expand,
         agent_mark: cfg.agent_mark,
