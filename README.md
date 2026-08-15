@@ -92,9 +92,21 @@ Output goes to the plugin log — read the last run with
 
 ## Configuration
 
-Settings live in the plugin's own config file, `config.toml` in
-`$HERDR_PLUGIN_CONFIG_DIR`. Every key is optional and every bad value falls back to its
-default, so a mistake costs one setting rather than the plugin.
+Settings live in **the plugin's own** `config.toml` — not Herdr's. Herdr ignores tables it
+does not recognise, so `[daemon]` placed in `~/.config/herdr/config.toml` does nothing
+except make `herdr config check` report an unknown section.
+
+The plugin's config directory is printed by:
+
+```sh
+herdr plugin list
+```
+
+By default that is `${XDG_CONFIG_HOME:-~/.config}/herdr/plugins/config/herdr-agent-watcher/`.
+Create `config.toml` there if it does not exist.
+
+Every key is optional and every bad value falls back to its default, so a mistake costs one
+setting rather than the plugin.
 
 ```toml
 [daemon]

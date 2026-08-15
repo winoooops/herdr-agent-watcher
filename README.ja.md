@@ -94,9 +94,21 @@ herdr plugin action invoke <id> --plugin herdr-agent-watcher
 
 ## 設定
 
-設定はプラグイン自身の設定ファイル、つまり `$HERDR_PLUGIN_CONFIG_DIR` 内の
-`config.toml` に置きます。すべてのキーは任意で、不正な値はそれぞれ既定値に
-フォールバックするため、1 つの誤りで失われるのはその設定だけで、プラグイン全体ではありません。
+設定は **プラグイン自身の** `config.toml` に置きます。Herdr のものではありません。
+Herdr は認識できないテーブルを無視するため、`~/.config/herdr/config.toml` に `[daemon]` を
+書いても何も起こらず、`herdr config check` が未知のセクションを報告するだけです。
+
+プラグインの設定ディレクトリは次のコマンドで表示できます:
+
+```sh
+herdr plugin list
+```
+
+既定では `${XDG_CONFIG_HOME:-~/.config}/herdr/plugins/config/herdr-agent-watcher/` です。
+`config.toml` が無ければ作成してください。
+
+すべてのキーは任意で、不正な値はそれぞれ既定値にフォールバックするため、
+1 つの誤りで失われるのはその設定だけで、プラグイン全体ではありません。
 
 ```toml
 [daemon]

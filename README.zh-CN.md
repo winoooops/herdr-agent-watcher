@@ -88,7 +88,19 @@ herdr plugin action invoke <id> --plugin herdr-agent-watcher
 
 ## 配置
 
-设置放在插件自己的配置文件中，也就是 `$HERDR_PLUGIN_CONFIG_DIR` 下的 `config.toml`。
+设置放在**插件自己的** `config.toml` 里，不是 Herdr 的那个。Herdr 会忽略它不认识的表，
+所以把 `[daemon]` 写进 `~/.config/herdr/config.toml` 不会有任何效果，只会让
+`herdr config check` 报告一个未知小节。
+
+插件的配置目录可以用这条命令打印出来：
+
+```sh
+herdr plugin list
+```
+
+默认是 `${XDG_CONFIG_HOME:-~/.config}/herdr/plugins/config/herdr-agent-watcher/`。
+如果 `config.toml` 不存在，自行创建。
+
 每个键都是可选的，每个无效值都会回退到默认值，因此一个错误只会影响一项设置，而不会影响整个插件。
 
 ```toml
