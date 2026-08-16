@@ -192,6 +192,11 @@ pub(crate) enum Dialog {
         path: Option<std::path::PathBuf>,
         source: Result<Option<String>, String>,
     },
+    Doctor {
+        cursor: usize,
+        report: Result<crate::agents::doctor::Report, String>,
+        taken_at: u64,
+    },
 }
 
 impl Dialog {
@@ -203,7 +208,8 @@ impl Dialog {
         match self {
             Dialog::Menu { cursor }
             | Dialog::Keys { cursor }
-            | Dialog::Settings { cursor, .. } => cursor,
+            | Dialog::Settings { cursor, .. }
+            | Dialog::Doctor { cursor, .. } => cursor,
         }
     }
 
@@ -212,7 +218,26 @@ impl Dialog {
             Dialog::Menu { .. } => MENU.len(),
             Dialog::Keys { .. } => KEYS.len(),
             Dialog::Settings { .. } => crate::sidebar::live::SETTINGS.len(),
+            Dialog::Doctor { report, .. } => report
+                .as_ref()
+                .map(|report| doctor_rows(report).len())
+                .unwrap_or(1),
         }
+    }
+}
+
+fn doctor_dialog() -> Dialog {
+    Dialog::Doctor {
+        cursor: 0,
+        report: crate::agents::claude_bridge::doctor_report(),
+        taken_at: now_unix_ms(),
+    }
+}
+
+fn doctor_taken_at(dialog: &Option<Dialog>) -> Option<u64> {
+    match dialog {
+        Some(Dialog::Doctor { taken_at, .. }) => Some(*taken_at),
+        _ => None,
     }
 }
 
@@ -266,6 +291,83 @@ fn save_settings(
     Ok(format!("saved {}", path.display()))
 }
 
+fn doctor_glyph(level: crate::agents::doctor::Level) -> &'static str {
+    match level {
+        crate::agents::doctor::Level::Ok => "✓",
+        crate::agents::doctor::Level::Warn => "!",
+        crate::agents::doctor::Level::Fail => "✗",
+    }
+}
+
+fn doctor_remedy(remedy: &crate::agents::doctor::Remedy) -> String {
+    use crate::agents::doctor::Remedy;
+    match remedy {
+        Remedy::PluginAction { id } => {
+            format!("herdr plugin action invoke {id} --plugin herdr-agent-watcher")
+        }
+        Remedy::RestartSession => "recreate this Claude session".into(),
+        Remedy::WaitOrInteract => "wait for its next status-line render, or send it a prompt".into(),
+        Remedy::ReopenPane => "close and reopen this pane".into(),
+        Remedy::MoveTables { tables, from, to } => format!(
+            "move {} from {} to {}",
+            tables
+                .iter()
+                .map(|table| format!("[{table}]"))
+                .collect::<Vec<_>>()
+                .join(" and "),
+            from.display(),
+            to.display()
+        ),
+        Remedy::WriteSettingsBlock { path, block } => {
+            format!("add to {}: {block}", path.display())
+        }
+    }
+}
+
+fn doctor_rows(
+    report: &crate::agents::doctor::Report,
+) -> Vec<crate::sidebar::dialog::Row> {
+    use crate::sidebar::dialog::Row;
+    let mut rows = Vec::new();
+    for check in &report.checks {
+        rows.push(Row::Entry {
+            label: doctor_glyph(check.level).into(),
+            value: check.summary.clone(),
+            enabled: false,
+        });
+        if let Some(evidence) = &check.evidence {
+            rows.push(Row::Note(evidence.clone()));
+        }
+        if let Some(remedy) = &check.remedy {
+            rows.push(Row::Note(format!("→ {}", doctor_remedy(remedy))));
+        }
+    }
+    if !report.panes.is_empty() {
+        rows.push(Row::Rule);
+    }
+    for pane in &report.panes {
+        let window = pane
+            .window_size
+            .map(|size| format!(" · {size} window"))
+            .unwrap_or_default();
+        rows.push(Row::Entry {
+            label: format!("{} {}", doctor_glyph(pane.level), pane.pane_id),
+            value: format!("{}{}", pane.summary, window),
+            enabled: false,
+        });
+        if let Some(session) = &pane.agent_session {
+            rows.push(Row::Note(format!("session {session}")));
+        }
+        if let Some(path) = &pane.shadowed_by {
+            rows.push(Row::Note(format!("shadowed by {}", path.display())));
+        }
+        if let Some(remedy) = &pane.remedy {
+            rows.push(Row::Note(format!("→ {}", doctor_remedy(remedy))));
+        }
+    }
+    rows
+}
+
 const MENU: [(&str, &str); 2] = [("Settings", "s"), ("Doctor", "d")];
 
 /// One inventory. The sheet is built from it, and the test presses every entry
@@ -295,7 +397,7 @@ const KEYS: [(&str, &str); 12] = [
 /// `r` only means something with the doctor panel open and `↵` only inside
 /// settings, so those arrive with the panels that give them meaning.
 #[cfg(test)]
-const ROUTED: [(&str, KeyCode, KeyModifiers, &str, Option<Dialog>); 10] = [
+const ROUTED: [(&str, KeyCode, KeyModifiers, &str, Option<Dialog>); 12] = [
     ("j / ↓", KeyCode::Char('j'), KeyModifiers::NONE, "a", None),
     ("k / ↑", KeyCode::Char('k'), KeyModifiers::NONE, "b", None),
     ("o / ↵", KeyCode::Char('o'), KeyModifiers::NONE, "a", None),
@@ -310,6 +412,21 @@ const ROUTED: [(&str, KeyCode, KeyModifiers, &str, Option<Dialog>); 10] = [
     ("x", KeyCode::Char('x'), KeyModifiers::NONE, "a", None),
     ("?", KeyCode::Char('?'), KeyModifiers::NONE, "a", None),
     ("s", KeyCode::Char('s'), KeyModifiers::NONE, "a", None),
+    ("d", KeyCode::Char('d'), KeyModifiers::NONE, "a", None),
+    (
+        "r",
+        KeyCode::Char('r'),
+        KeyModifiers::NONE,
+        "a",
+        Some(Dialog::Doctor {
+            cursor: 0,
+            report: Ok(crate::agents::doctor::Report {
+                checks: Vec::new(),
+                panes: Vec::new(),
+            }),
+            taken_at: 0,
+        }),
+    ),
     ("q / esc", KeyCode::Esc, KeyModifiers::NONE, "a", None),
     (
         "ctrl-c",
@@ -368,6 +485,15 @@ fn route(
                     );
                 }
             }
+            (KeyCode::Char('r'), _) => {
+                if let Dialog::Doctor {
+                    report, taken_at, ..
+                } = dialog
+                {
+                    *report = crate::agents::claude_bridge::doctor_report();
+                    *taken_at = now_unix_ms();
+                }
+            }
             (KeyCode::Enter, _) | (KeyCode::Char('o'), _) => {
                 if let Dialog::Settings { cursor, dirty, .. } = dialog {
                     if let Some(setting) = crate::sidebar::live::SETTINGS.get(*cursor) {
@@ -380,8 +506,11 @@ fn route(
                         }
                     }
                 }
-                if let Dialog::Menu { cursor: 0 } = dialog {
-                    *open = Some(settings_dialog());
+                if let Dialog::Menu { cursor } = dialog {
+                    *open = Some(match *cursor {
+                        0 => settings_dialog(),
+                        _ => doctor_dialog(),
+                    });
                 }
             }
             _ => {}
@@ -390,7 +519,10 @@ fn route(
     }
 
     match (key.code, key.modifiers) {
-        (KeyCode::Char('x'), _) | (KeyCode::Char('?'), _) | (KeyCode::Char('s'), _) => {
+        (KeyCode::Char('x'), _)
+        | (KeyCode::Char('?'), _)
+        | (KeyCode::Char('s'), _)
+        | (KeyCode::Char('d'), _) => {
             if width < MIN_DIALOG_WIDTH || height < MIN_DIALOG_HEIGHT {
                 it.notice = Some(format!(
                     "the frame is too small for a panel ({width}x{height}; \
@@ -401,6 +533,7 @@ fn route(
             *open = Some(match key.code {
                 KeyCode::Char('?') => Dialog::Keys { cursor: 0 },
                 KeyCode::Char('s') => settings_dialog(),
+                KeyCode::Char('d') => doctor_dialog(),
                 _ => Dialog::menu(),
             });
             KeyOutcome::Handled
@@ -468,6 +601,19 @@ fn panel_for(
                 cursor: *cursor,
             }
         }
+        Dialog::Doctor {
+            cursor,
+            report,
+            taken_at,
+        } => Panel {
+            title: "Doctor".into(),
+            rows: match report {
+                Ok(report) => doctor_rows(report),
+                Err(error) => vec![Row::Note(error.clone())],
+            },
+            footer: format!("taken {taken_at} · r rebuild · esc close"),
+            cursor: *cursor,
+        },
     }
 }
 
@@ -1056,6 +1202,7 @@ mod tests {
                 live.hide_idle,
                 open.is_some(),
                 std::mem::discriminant(&open),
+                doctor_taken_at(&open),
             );
             let outcome = route(
                 crossterm::event::KeyEvent::new(code, modifiers),
@@ -1075,6 +1222,7 @@ mod tests {
                 live.hide_idle,
                 open.is_some(),
                 std::mem::discriminant(&open),
+                doctor_taken_at(&open),
             );
             assert!(
                 matches!(outcome, KeyOutcome::Quit) || before != after,
@@ -1091,8 +1239,7 @@ mod tests {
             KEYS.iter().map(|(key, _)| *key).collect();
         let driven: std::collections::BTreeSet<&str> =
             ROUTED.iter().map(|(key, ..)| *key).collect();
-        // `d` and `r` arrive with the doctor panel in Task 8.
-        let pending: std::collections::BTreeSet<&str> = ["d", "r"].into_iter().collect();
+        let pending: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
         assert_eq!(
             sheet
                 .difference(&driven)
@@ -1185,6 +1332,67 @@ mod tests {
             !config_dir.path().join("config.toml").exists(),
             "cycling a setting must not write anything"
         );
+    }
+
+    fn rows_text(rows: &[crate::sidebar::dialog::Row]) -> String {
+        use crate::sidebar::dialog::Row;
+        rows.iter()
+            .map(|row| match row {
+                Row::Entry { label, value, .. } => format!("{label} {value}"),
+                Row::Note(note) => note.clone(),
+                Row::Rule => String::new(),
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// A mapper that drops pane findings passes every other test here.
+    #[test]
+    fn every_part_of_a_report_survives_flattening() {
+        use crate::agents::doctor::{Check, CheckId, Level, PaneFinding, Remedy, Report};
+        let report = Report {
+            checks: vec![
+                Check {
+                    id: CheckId::ConfigValid,
+                    level: Level::Ok,
+                    summary: "config.toml accepted".into(),
+                    evidence: None,
+                    remedy: None,
+                },
+                Check {
+                    id: CheckId::DaemonReachable,
+                    level: Level::Fail,
+                    summary: "daemon is not answering".into(),
+                    evidence: Some("/tmp/state.sock".into()),
+                    remedy: Some(Remedy::PluginAction {
+                        id: "restart-daemon",
+                    }),
+                },
+            ],
+            panes: vec![PaneFinding {
+                pane_id: "w1:p1".into(),
+                agent_session: Some("s1".into()),
+                level: Level::Warn,
+                summary: "no metrics yet".into(),
+                window_size: Some(200_000),
+                shadowed_by: None,
+                remedy: Some(Remedy::ReopenPane),
+            }],
+        };
+        let rows = doctor_rows(&report);
+        let text = rows_text(&rows);
+        for needle in [
+            "config.toml accepted",
+            "daemon is not answering",
+            "/tmp/state.sock",
+            "restart-daemon",
+            "w1:p1",
+            "no metrics yet",
+            "200000",
+            "reopen",
+        ] {
+            assert!(text.contains(needle), "{needle} was dropped:\n{text}");
+        }
     }
 
     #[test]
