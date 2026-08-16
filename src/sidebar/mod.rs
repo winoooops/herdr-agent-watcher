@@ -12,5 +12,8 @@ pub(crate) mod metrics;
 pub(crate) mod select;
 pub(crate) mod style;
 
+#[cfg(unix)]
+pub mod settings_file;
+
 #[cfg(all(feature = "runtime", unix))]
 pub mod tui;

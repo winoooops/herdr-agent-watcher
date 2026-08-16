@@ -186,7 +186,12 @@ enum KeyOutcome {
 pub(crate) enum Dialog {
     Menu { cursor: usize },
     Keys { cursor: usize },
-    Settings { cursor: usize },
+    Settings {
+        cursor: usize,
+        dirty: Vec<crate::sidebar::live::Setting>,
+        path: Option<std::path::PathBuf>,
+        source: Result<Option<String>, String>,
+    },
 }
 
 impl Dialog {
@@ -198,7 +203,7 @@ impl Dialog {
         match self {
             Dialog::Menu { cursor }
             | Dialog::Keys { cursor }
-            | Dialog::Settings { cursor } => cursor,
+            | Dialog::Settings { cursor, .. } => cursor,
         }
     }
 
@@ -209,6 +214,56 @@ impl Dialog {
             Dialog::Settings { .. } => crate::sidebar::live::SETTINGS.len(),
         }
     }
+}
+
+fn settings_dialog() -> Dialog {
+    let path = crate::sidebar::config::config_path();
+    let source = match path.as_ref() {
+        Some(path) => match std::fs::read_to_string(path) {
+            Ok(text) => Ok(Some(text)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(format!("read {}: {error}", path.display())),
+        },
+        None => Err("HERDR_PLUGIN_CONFIG_DIR is not set".into()),
+    };
+    Dialog::Settings {
+        cursor: 0,
+        dirty: Vec::new(),
+        path,
+        source,
+    }
+}
+
+fn save_settings(
+    dialog: &mut Dialog,
+    live: &crate::sidebar::live::Live,
+) -> Result<String, String> {
+    let Dialog::Settings {
+        dirty,
+        path,
+        source,
+        ..
+    } = dialog
+    else {
+        return Err("settings panel is not open".into());
+    };
+    let path = path
+        .as_ref()
+        .ok_or_else(|| "HERDR_PLUGIN_CONFIG_DIR is not set".to_string())?;
+    let current = source.as_ref().map_err(Clone::clone)?;
+    let body = crate::sidebar::settings_file::edit(
+        current.as_deref().unwrap_or_default(),
+        live,
+        dirty,
+    )?;
+    let expected = match current {
+        Some(text) => crate::sidebar::settings_file::Expected::Contents(text.clone()),
+        None => crate::sidebar::settings_file::Expected::Missing,
+    };
+    crate::sidebar::settings_file::save(path, expected, &body)?;
+    *source = Ok(Some(body));
+    dirty.clear();
+    Ok(format!("saved {}", path.display()))
 }
 
 const MENU: [(&str, &str); 2] = [("Settings", "s"), ("Doctor", "d")];
@@ -305,17 +360,28 @@ fn route(
                 let cursor = dialog.cursor_mut();
                 *cursor = cursor.saturating_sub(1);
             }
+            (KeyCode::Char('s'), _) => {
+                if matches!(dialog, Dialog::Settings { .. }) {
+                    it.notice = Some(
+                        save_settings(dialog, live)
+                            .unwrap_or_else(|error| format!("save failed: {error}")),
+                    );
+                }
+            }
             (KeyCode::Enter, _) | (KeyCode::Char('o'), _) => {
-                if let Dialog::Settings { cursor } = dialog {
+                if let Dialog::Settings { cursor, dirty, .. } = dialog {
                     if let Some(setting) = crate::sidebar::live::SETTINGS.get(*cursor) {
                         // Read here, not in `live.rs`, which stays pure and
                         // takes the workspace as an argument.
                         let workspace = std::env::var("HERDR_WORKSPACE_ID").ok();
                         live.cycle(*setting, workspace.as_deref());
+                        if !dirty.contains(setting) {
+                            dirty.push(*setting);
+                        }
                     }
                 }
                 if let Dialog::Menu { cursor: 0 } = dialog {
-                    *open = Some(Dialog::Settings { cursor: 0 });
+                    *open = Some(settings_dialog());
                 }
             }
             _ => {}
@@ -334,7 +400,7 @@ fn route(
             }
             *open = Some(match key.code {
                 KeyCode::Char('?') => Dialog::Keys { cursor: 0 },
-                KeyCode::Char('s') => Dialog::Settings { cursor: 0 },
+                KeyCode::Char('s') => settings_dialog(),
                 _ => Dialog::menu(),
             });
             KeyOutcome::Handled
@@ -376,7 +442,7 @@ fn panel_for(
             footer: "esc close".into(),
             cursor: *cursor,
         },
-        Dialog::Settings { cursor } => {
+        Dialog::Settings { cursor, .. } => {
             let mut rows: Vec<Row> = crate::sidebar::live::SETTINGS
                 .iter()
                 .map(|setting| Row::Entry {
@@ -1076,7 +1142,12 @@ mod tests {
 
         // The panel's ↵ on the sort row, through the router.
         let mut it = Interaction::default();
-        let mut open = Some(Dialog::Settings { cursor: 0 });
+        let mut open = Some(Dialog::Settings {
+            cursor: 0,
+            dirty: Vec::new(),
+            path: None,
+            source: Ok(None),
+        });
         let r = two_cards();
         crate::test_env::with_env(
             &[
