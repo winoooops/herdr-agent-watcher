@@ -21,10 +21,57 @@ pub struct Live {
     pub trace_lines: u8,
     pub theme: Theme,
     pub agent_mark: AgentMark,
+    /// The daemon's, not the sidebar's. Editable and saveable, but it cannot
+    /// take effect here -- the daemon reads it once at startup, so the row
+    /// carries a warning rather than pretending the change is live.
+    pub interval_ms: u32,
+}
+
+/// Move one rung, clamped. A value not on the ladder -- hand-written in the
+/// file -- snaps to the nearest rung in the direction asked for.
+fn step_ladder(current: u32, direction: i32) -> u32 {
+    // The strictly-next rung in the direction asked for. Written this way
+    // rather than as an index step because a value hand-written into the file
+    // need not be on the ladder at all -- and "the rung at or above 1500" is
+    // 2000, which is the wrong answer for a decrease.
+    if direction > 0 {
+        INTERVALS_MS
+            .iter()
+            .find(|value| **value > current)
+            .copied()
+            .unwrap_or(INTERVALS_MS[INTERVALS_MS.len() - 1])
+    } else {
+        INTERVALS_MS
+            .iter()
+            .rev()
+            .find(|value| **value < current)
+            .copied()
+            .unwrap_or(INTERVALS_MS[0])
+    }
+}
+
+/// The intervals the panel offers. A ladder rather than free entry: `h`/`l`
+/// step a value, and a list of sensible reconciliation periods is what
+/// someone is choosing between.
+pub const INTERVALS_MS: [u32; 7] = [250, 500, 1000, 2000, 3000, 5000, 10_000];
+
+pub const DEFAULT_INTERVAL_MS: u32 = 1000;
+
+impl Live {
+    /// `Loaded` does not model `[daemon]`, so the interval arrives separately.
+    pub fn from_config(cfg: &Loaded, daemon_interval_ms: u32) -> Self {
+        Self::build(cfg, daemon_interval_ms)
+    }
 }
 
 impl From<&Loaded> for Live {
     fn from(cfg: &Loaded) -> Self {
+        Self::build(cfg, DEFAULT_INTERVAL_MS)
+    }
+}
+
+impl Live {
+    fn build(cfg: &Loaded, daemon_interval_ms: u32) -> Self {
         Self {
             sort: cfg.sort,
             scope: cfg.scope,
@@ -35,6 +82,7 @@ impl From<&Loaded> for Live {
             trace_lines: cfg.trace_lines,
             theme: cfg.theme,
             agent_mark: cfg.agent_mark,
+            interval_ms: daemon_interval_ms,
         }
     }
 }
@@ -62,9 +110,10 @@ pub enum Setting {
     TraceLines,
     Theme,
     AgentMark,
+    IntervalMs,
 }
 
-pub const SETTINGS: [Setting; 8] = [
+pub const SETTINGS: [Setting; 9] = [
     Setting::Sort,
     Setting::Scope,
     Setting::HideIdle,
@@ -73,6 +122,7 @@ pub const SETTINGS: [Setting; 8] = [
     Setting::TraceLines,
     Setting::Theme,
     Setting::AgentMark,
+    Setting::IntervalMs,
 ];
 
 impl Setting {
@@ -86,6 +136,7 @@ impl Setting {
             Setting::TraceLines => "trace lines",
             Setting::Theme => "theme",
             Setting::AgentMark => "agent mark",
+            Setting::IntervalMs => "interval ms",
         }
     }
 }
@@ -121,6 +172,7 @@ impl Live {
                 Theme::Lumon => "lumon",
             }
             .into(),
+            Setting::IntervalMs => self.interval_ms.to_string(),
             Setting::AgentMark => match self.agent_mark {
                 AgentMark::Dot => "dot",
                 AgentMark::Initial => "initial",
@@ -170,6 +222,7 @@ impl Live {
             }
             // Clamped, not wrapped: a held key must not jump 20 → 1.
             Setting::TraceLines => self.trace_lines = (self.trace_lines + 1).min(20),
+            Setting::IntervalMs => self.interval_ms = step_ladder(self.interval_ms, 1),
             Setting::Theme => {
                 self.theme = match self.theme {
                     Theme::Inherit => Theme::Lumon,
@@ -191,6 +244,7 @@ impl Live {
     pub fn cycle_back(&mut self, setting: Setting, workspace: Option<&str>) {
         match setting {
             Setting::TraceLines => self.trace_lines = self.trace_lines.saturating_sub(1).max(1),
+            Setting::IntervalMs => self.interval_ms = step_ladder(self.interval_ms, -1),
             other => self.cycle(other, workspace),
         }
     }
@@ -269,6 +323,37 @@ mod tests {
     /// config says nothing: `Loaded` holds no workspace while the scope is
     /// `All`, so cycling into workspace scope has to resolve one or the filter
     /// silently stays off.
+    #[test]
+    fn the_interval_steps_a_ladder_and_clamps_at_both_ends() {
+        let mut live = Live::from_config(&Loaded::from_missing(), 1000);
+        live.cycle(Setting::IntervalMs, None);
+        assert_eq!(live.interval_ms, 2000);
+        live.cycle_back(Setting::IntervalMs, None);
+        assert_eq!(live.interval_ms, 1000);
+
+        live.interval_ms = 10_000;
+        live.cycle(Setting::IntervalMs, None);
+        assert_eq!(live.interval_ms, 10_000, "clamped at the top");
+        live.interval_ms = 250;
+        live.cycle_back(Setting::IntervalMs, None);
+        assert_eq!(live.interval_ms, 250, "and at the bottom");
+    }
+
+    /// A value hand-written into the file need not be on the ladder.
+    #[test]
+    fn an_off_ladder_interval_snaps_toward_the_step_asked_for() {
+        let mut live = Live::from_config(&Loaded::from_missing(), 1500);
+        live.cycle_back(Setting::IntervalMs, None);
+        assert_eq!(live.interval_ms, 1000);
+
+        let mut live = Live::from_config(&Loaded::from_missing(), 1500);
+        live.cycle(Setting::IntervalMs, None);
+        assert_eq!(
+            live.interval_ms, 2000,
+            "the next rung up, not the one after"
+        );
+    }
+
     #[test]
     fn cycling_into_workspace_scope_resolves_the_workspace() {
         let mut live = Live::from(&Loaded::from_missing());

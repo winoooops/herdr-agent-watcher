@@ -196,6 +196,14 @@ pub(crate) enum Dialog {
         dirty: Vec<crate::sidebar::live::Setting>,
         path: Option<std::path::PathBuf>,
         source: Result<Option<String>, String>,
+        /// What the daemon is actually running. The panel can change the
+        /// value and save it, but only a restart makes it true -- so leaving
+        /// with these apart is the one exit that asks a question.
+        interval_at_open: u32,
+        /// The mandatory prompt, when it is up. A sub-state of the settings
+        /// panel rather than a dialog of its own, because answering it may
+        /// have to write the file, and the file is here.
+        confirm: Option<usize>,
     },
     Doctor {
         offset: usize,
@@ -304,7 +312,7 @@ fn doctor_taken_at(dialog: &Option<Dialog>) -> Option<u64> {
     }
 }
 
-fn settings_dialog(from_menu: bool) -> Dialog {
+fn settings_dialog(from_menu: bool, interval_at_open: u32) -> Dialog {
     let path = crate::sidebar::config::config_path();
     let source = match path.as_ref() {
         Some(path) => match std::fs::read_to_string(path) {
@@ -317,9 +325,66 @@ fn settings_dialog(from_menu: bool) -> Dialog {
     Dialog::Settings {
         cursor: 0,
         from_menu,
+        interval_at_open,
+        confirm: None,
         dirty: Vec::new(),
         path,
         source,
+    }
+}
+
+/// Answer the mandatory prompt. `restart` saves the new interval and reloads
+/// the daemon; otherwise the value goes back to what the daemon is running,
+/// and if it had already been saved the file goes back with it -- cancelling
+/// means the setting was never changed, not that it was changed and ignored.
+fn resolve_interval(
+    dialog: &mut Dialog,
+    live: &mut crate::sidebar::live::Live,
+    restart: bool,
+) -> String {
+    let Dialog::Settings {
+        interval_at_open, ..
+    } = dialog
+    else {
+        return String::new();
+    };
+    let previous = *interval_at_open;
+
+    if !restart {
+        live.interval_ms = previous;
+        // Only writes if the interval is among the keys this session changed;
+        // `edit` touches nothing else either way.
+        let _ = save_settings(dialog, live);
+        return format!("interval ms put back to {previous}");
+    }
+
+    if let Err(error) = save_settings(dialog, live) {
+        return format!("save failed: {error}");
+    }
+    match restart_daemon() {
+        Ok(()) => format!("daemon reloaded at {} ms", live.interval_ms),
+        Err(error) => format!("saved, but the reload failed: {error}"),
+    }
+}
+
+/// The same action the plugin exposes, invoked through the herdr binary the
+/// sidebar was handed. Not the daemon binary directly: restarting is herdr's
+/// to sequence, including the singleton takeover.
+fn restart_daemon() -> Result<(), String> {
+    let herdr = std::env::var_os("HERDR_BIN_PATH")
+        .map(std::path::PathBuf::from)
+        .ok_or_else(|| "HERDR_BIN_PATH is not set".to_string())?;
+    let plugin =
+        std::env::var("HERDR_PLUGIN_ID").unwrap_or_else(|_| "herdr-agent-watcher".to_string());
+    let out = std::process::Command::new(herdr)
+        .args(["plugin", "action", "invoke", "restart-daemon", "--plugin"])
+        .arg(&plugin)
+        .output()
+        .map_err(|error| format!("cannot run herdr: {error}"))?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
     }
 }
 
@@ -522,6 +587,28 @@ fn route(
     it.notice = None;
 
     if let Some(dialog) = open.as_mut() {
+        // The prompt is mandatory: while it is up nothing else in the panel
+        // answers, because every other key would be a way of not deciding.
+        if let Dialog::Settings {
+            confirm: Some(choice),
+            ..
+        } = dialog
+        {
+            match (key.code, key.modifiers) {
+                (KeyCode::Char('c'), m) if m.contains(KeyModifiers::CONTROL) => {
+                    return KeyOutcome::Quit
+                }
+                (KeyCode::Char('j'), _) | (KeyCode::Down, _) => *choice = 1,
+                (KeyCode::Char('k'), _) | (KeyCode::Up, _) => *choice = 0,
+                (KeyCode::Enter, _) | (KeyCode::Char('o'), _) => {
+                    let restart = *choice == 0;
+                    it.notice = Some(resolve_interval(dialog, live, restart));
+                    *open = dialog.from_menu().then(Dialog::menu);
+                }
+                _ => {}
+            }
+            return KeyOutcome::Handled;
+        }
         match (key.code, key.modifiers) {
             (KeyCode::Char('c'), m) if m.contains(KeyModifiers::CONTROL) => {
                 return KeyOutcome::Quit
@@ -530,6 +617,24 @@ fn route(
             // returns to it. One reached with `s` or `d` was never under a
             // menu, and dropping into one you did not open is not going back.
             (KeyCode::Esc, _) | (KeyCode::Char('q'), _) => {
+                if let Dialog::Settings {
+                    interval_at_open,
+                    confirm,
+                    ..
+                } = dialog
+                {
+                    // Mandatory: the value and the running daemon disagree,
+                    // and leaving without saying which one wins would leave a
+                    // setting that looks applied and is not.
+                    if confirm.is_none() && live.interval_ms != *interval_at_open {
+                        *confirm = Some(0);
+                        return KeyOutcome::Handled;
+                    }
+                    // Already up. esc does not dismiss it.
+                    if confirm.is_some() {
+                        return KeyOutcome::Handled;
+                    }
+                }
                 *open = dialog.from_menu().then(Dialog::menu);
             }
             (KeyCode::Char('j'), _) | (KeyCode::Down, _) => {
@@ -560,7 +665,10 @@ fn route(
             // was reached THROUGH the menu, so esc goes back to it. Losing
             // that is why esc closed everything from a panel the menu opened.
             (KeyCode::Char('s'), _) if !matches!(dialog, Dialog::Settings { .. }) => {
-                *open = Some(settings_dialog(dialog.leads_back_to_menu()));
+                *open = Some(settings_dialog(
+                    dialog.leads_back_to_menu(),
+                    live.interval_ms,
+                ));
             }
             (KeyCode::Char('d'), _) if !matches!(dialog, Dialog::Doctor { .. }) => {
                 *open = Some(doctor_dialog(dialog.leads_back_to_menu()));
@@ -584,7 +692,7 @@ fn route(
                 cycle_selected(dialog, live, false);
                 if let Dialog::Menu { cursor } = dialog {
                     *open = Some(match *cursor {
-                        0 => settings_dialog(true),
+                        0 => settings_dialog(true, live.interval_ms),
                         _ => doctor_dialog(true),
                     });
                 }
@@ -608,7 +716,7 @@ fn route(
             }
             *open = Some(match key.code {
                 KeyCode::Char('?') => Dialog::Keys { cursor: 0 },
-                KeyCode::Char('s') => settings_dialog(false),
+                KeyCode::Char('s') => settings_dialog(false, live.interval_ms),
                 KeyCode::Char('d') => doctor_dialog(false),
                 _ => Dialog::menu(),
             });
@@ -631,7 +739,7 @@ fn taken_ago(taken_at: u64, now: u64) -> String {
 
 fn panel_for(
     dialog: &Dialog,
-    _live: &crate::sidebar::live::Live,
+    live: &crate::sidebar::live::Live,
     _cfg: &crate::sidebar::config::Loaded,
     now: u64,
 ) -> crate::sidebar::dialog::Panel {
@@ -665,25 +773,52 @@ fn panel_for(
             cursor: Some(*cursor),
             offset: 0,
         },
-        Dialog::Settings { cursor, .. } => {
+        Dialog::Settings {
+            cursor,
+            confirm,
+            interval_at_open,
+            ..
+        } => {
             let mut rows: Vec<Row> = crate::sidebar::live::SETTINGS
                 .iter()
                 .map(|setting| Row::Entry {
                     label: setting.label().into(),
-                    value: _live.value(*setting),
+                    value: live.value(*setting),
                     enabled: true,
                 })
                 .collect();
-            rows.push(Row::Rule);
-            rows.push(Row::Entry {
-                label: "interval_ms".into(),
-                value: crate::daemon::config::DaemonConfig::load()
-                    .interval
-                    .as_millis()
-                    .to_string(),
-                enabled: false,
-            });
-            rows.push(Row::Note("needs restart-daemon; not changed here".into()));
+            // No standing warning: `interval ms` only needs explaining at the
+            // moment it matters, which is when you try to leave with it
+            // changed. Until then it is three lines of the panel spent on
+            // something that has not happened.
+            if let Some(choice) = confirm {
+                return Panel {
+                    title: "Restart the daemon?".into(),
+                    rows: vec![
+                        Row::Warn(format!(
+                            "interval ms is {} but the daemon is running {}. It reads the \
+                             file once at startup, so this only takes effect when it \
+                             restarts.",
+                            live.interval_ms, interval_at_open
+                        )),
+                        Row::Rule,
+                        Row::Entry {
+                            label: "restart now".into(),
+                            value: "save and reload the daemon".into(),
+                            enabled: true,
+                        },
+                        Row::Entry {
+                            label: "cancel".into(),
+                            value: format!("put it back to {interval_at_open}"),
+                            enabled: true,
+                        },
+                    ],
+                    footer: "j/k choose · ↵ confirm".into(),
+                    // Offset by the warning and the rule above the choices.
+                    cursor: Some(choice + 2),
+                    offset: 0,
+                };
+            }
             Panel {
                 title: "Settings".into(),
                 rows,
@@ -850,7 +985,14 @@ pub fn run() -> i32 {
     cfg.write_problem_log();
 
     let mut state = State::default();
-    let mut live = crate::sidebar::live::Live::from(&cfg);
+    // The daemon's interval is not in `Loaded` -- it deliberately skips
+    // [daemon] -- so the panel reads it from the same place the daemon does.
+    let mut live = crate::sidebar::live::Live::from_config(
+        &cfg,
+        crate::daemon::config::DaemonConfig::load()
+            .interval
+            .as_millis() as u32,
+    );
     let mut open: Option<Dialog> = None;
     let mut it = Interaction {
         follow: true,
@@ -1278,6 +1420,8 @@ mod tests {
         let mut dialog = Dialog::Settings {
             cursor: 0,
             from_menu: false,
+            interval_at_open: crate::sidebar::live::DEFAULT_INTERVAL_MS,
+            confirm: None,
             dirty: vec![crate::sidebar::live::Setting::Sort],
             path: Some(path.clone()),
             source: Ok(Some(broken.to_string())),
@@ -1298,12 +1442,149 @@ mod tests {
         let mut dialog = Dialog::Settings {
             cursor: 0,
             from_menu: false,
+            interval_at_open: crate::sidebar::live::DEFAULT_INTERVAL_MS,
+            confirm: None,
             dirty: vec![crate::sidebar::live::Setting::Sort],
             path: Some("/nowhere/config.toml".into()),
             source: Err("read /nowhere/config.toml: no such file".into()),
         };
         let error = save_settings(&mut dialog, &live).expect_err("must refuse");
         assert!(error.contains("no such file"), "{error}");
+    }
+
+    fn settings_with_interval(at_open: u32, confirm: Option<usize>) -> Dialog {
+        Dialog::Settings {
+            cursor: 0,
+            from_menu: false,
+            dirty: Vec::new(),
+            path: None,
+            source: Ok(None),
+            interval_at_open: at_open,
+            confirm,
+        }
+    }
+
+    /// Leaving with the value and the running daemon apart would leave a
+    /// setting that looks applied and is not.
+    #[test]
+    fn esc_with_a_changed_interval_raises_a_prompt_instead_of_closing() {
+        let r = two_cards();
+        let mut it = Interaction::default();
+        let mut live = live_default();
+        live.interval_ms = 5000;
+        let mut open = Some(settings_with_interval(1000, None));
+
+        route(
+            press(KeyCode::Esc),
+            &mut open,
+            &mut it,
+            &mut live,
+            &r,
+            10,
+            40,
+            60,
+            24,
+        );
+        assert!(
+            matches!(
+                open,
+                Some(Dialog::Settings {
+                    confirm: Some(_),
+                    ..
+                })
+            ),
+            "esc should ask, not close"
+        );
+    }
+
+    #[test]
+    fn an_unchanged_interval_leaves_esc_alone() {
+        let r = two_cards();
+        let mut it = Interaction::default();
+        let mut live = live_default();
+        let interval = live.interval_ms;
+        let mut open = Some(settings_with_interval(interval, None));
+
+        route(
+            press(KeyCode::Esc),
+            &mut open,
+            &mut it,
+            &mut live,
+            &r,
+            10,
+            40,
+            60,
+            24,
+        );
+        assert!(open.is_none(), "nothing to ask about");
+    }
+
+    /// Mandatory means mandatory: every key that is not a choice is a way of
+    /// not deciding.
+    #[test]
+    fn the_prompt_cannot_be_dismissed() {
+        let r = two_cards();
+        for code in [
+            KeyCode::Esc,
+            KeyCode::Char('q'),
+            KeyCode::Char('s'),
+            KeyCode::Char('d'),
+            KeyCode::Char('x'),
+            KeyCode::Char('h'),
+        ] {
+            let mut it = Interaction::default();
+            let mut live = live_default();
+            live.interval_ms = 5000;
+            let mut open = Some(settings_with_interval(1000, Some(0)));
+            route(
+                press(code),
+                &mut open,
+                &mut it,
+                &mut live,
+                &r,
+                10,
+                40,
+                60,
+                24,
+            );
+            assert!(
+                matches!(
+                    open,
+                    Some(Dialog::Settings {
+                        confirm: Some(_),
+                        ..
+                    })
+                ),
+                "{code:?} dismissed a mandatory prompt"
+            );
+        }
+    }
+
+    #[test]
+    fn cancelling_puts_the_interval_back() {
+        let r = two_cards();
+        let mut it = Interaction::default();
+        let mut live = live_default();
+        live.interval_ms = 5000;
+        let mut open = Some(settings_with_interval(1000, Some(1)));
+        route(
+            press(KeyCode::Enter),
+            &mut open,
+            &mut it,
+            &mut live,
+            &r,
+            10,
+            40,
+            60,
+            24,
+        );
+        assert_eq!(live.interval_ms, 1000, "cancel means it was never changed");
+        assert!(open.is_none());
+        assert!(
+            it.notice.as_deref().is_some_and(|n| n.contains("1000")),
+            "{:?}",
+            it.notice
+        );
     }
 
     #[test]
@@ -1511,6 +1792,8 @@ mod tests {
         let mut open = Some(Dialog::Settings {
             cursor: 0,
             from_menu: false,
+            interval_at_open: crate::sidebar::live::DEFAULT_INTERVAL_MS,
+            confirm: None,
             dirty: Vec::new(),
             path: None,
             source: Ok(None),
@@ -1556,7 +1839,7 @@ mod tests {
         rows.iter()
             .map(|row| match row {
                 Row::Entry { label, value, .. } => format!("{label} {value}"),
-                Row::Note(note) => note.clone(),
+                Row::Note(note) | Row::Warn(note) => note.clone(),
                 Row::Rule => String::new(),
             })
             .collect::<Vec<_>>()

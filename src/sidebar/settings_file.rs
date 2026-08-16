@@ -19,6 +19,9 @@ fn table_and_key(setting: Setting) -> (&'static str, &'static str) {
         Setting::TraceLines => ("cards", "trace_lines"),
         Setting::Theme => ("appearance", "theme"),
         Setting::AgentMark => ("appearance", "agent_mark"),
+        // The daemon's table. The sidebar's loader skips it entirely, which is
+        // exactly why saving edits keys instead of rewriting the file.
+        Setting::IntervalMs => ("daemon", "interval_ms"),
     }
 }
 
@@ -26,6 +29,7 @@ fn item_for(live: &Live, setting: Setting) -> Item {
     match setting {
         Setting::HideIdle => value(live.hide_idle),
         Setting::TraceLines => value(i64::from(live.trace_lines)),
+        Setting::IntervalMs => value(i64::from(live.interval_ms)),
         other => value(live.value(other)),
     }
 }

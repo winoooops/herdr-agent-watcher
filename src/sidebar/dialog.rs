@@ -6,7 +6,7 @@
 //! `doctor` does not.
 
 use crate::sidebar::format;
-use crate::sidebar::style::{Line, Role, Span, Style};
+use crate::sidebar::style::{Line, Role, Semantic, Span, Style};
 
 pub struct Panel {
     pub title: String,
@@ -21,18 +21,98 @@ pub struct Panel {
 }
 
 pub enum Row {
-    /// `enabled: false` is shown but cannot be acted on -- the daemon's
-    /// interval, which belongs to another process.
+    /// `enabled: false` is shown but cannot be acted on.
     Entry {
         label: String,
         value: String,
         enabled: bool,
     },
+    /// Evidence, a path, a remedy. Wrapped rather than truncated: a path cut
+    /// off at the panel edge tells the reader a file is involved and not
+    /// which one.
     Note(String),
+    /// A note that has to be read. Same wrapping, `Semantic::Warn` styling --
+    /// the daemon's interval needs a restart to take effect, and saying so in
+    /// body text is saying it invisibly.
+    Warn(String),
     Rule,
 }
 
 const VALUE_COLUMN: usize = 18;
+
+/// Split `text` to fit `width` cells, breaking at spaces where it can.
+fn wrap(text: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![String::new()];
+    }
+    let mut out = Vec::new();
+    let mut line = String::new();
+    for word in text.split(' ') {
+        let candidate = if line.is_empty() {
+            word.to_string()
+        } else {
+            format!("{line} {word}")
+        };
+        if format::width(&candidate) <= width {
+            line = candidate;
+            continue;
+        }
+        if !line.is_empty() {
+            out.push(std::mem::take(&mut line));
+        }
+        // A single word longer than the line -- a path with no spaces -- is
+        // broken across lines. NOT `format::truncate`, which appends an
+        // ellipsis: that is for text being cut off, and this is text being
+        // continued on the next line.
+        let mut rest = word.to_string();
+        while format::width(&rest) > width {
+            let mut head = String::new();
+            let mut taken = 0;
+            for ch in rest.chars() {
+                let next = format::width(&format!("{head}{ch}"));
+                if next > width {
+                    break;
+                }
+                head.push(ch);
+                taken += 1;
+            }
+            if taken == 0 {
+                break;
+            }
+            out.push(head);
+            rest = rest.chars().skip(taken).collect();
+        }
+        line = rest;
+    }
+    if !line.is_empty() || out.is_empty() {
+        out.push(line);
+    }
+    out
+}
+
+/// How many lines the panel's body will draw, which is what a scroll offset
+/// has to be bounded by once notes wrap.
+pub fn line_count(panel: &Panel, width: u16) -> usize {
+    let inner = (width as usize).saturating_sub(4);
+    panel
+        .rows
+        .iter()
+        .map(|row| match row {
+            Row::Note(note) | Row::Warn(note) => wrap(note, inner).len(),
+            _ => 1,
+        })
+        .sum()
+}
+
+fn framed_styled(inner: &str, style: Style, width: usize) -> Line {
+    let inner = format::truncate(inner, width.saturating_sub(2));
+    let pad = width.saturating_sub(2 + format::width(&inner));
+    vec![
+        Span::new("│", Style::role(Role::Rule)),
+        Span::new(format!("{inner}{}", " ".repeat(pad)), style),
+        Span::new("│", Style::role(Role::Rule)),
+    ]
+}
 
 fn framed(inner: String, width: usize) -> Line {
     let inner = format::truncate(&inner, width.saturating_sub(2));
@@ -73,24 +153,20 @@ pub fn render(panel: &Panel, width: u16, height: u16) -> Vec<Line> {
 
     // Two for the borders, two for the footer and its rule.
     let body_rows = height.saturating_sub(4);
-    let first = if panel.cursor.is_some() {
-        0
-    } else {
-        panel.offset
-    };
-    for (offset, row) in panel.rows.iter().skip(first).take(body_rows).enumerate() {
-        let index = first + offset;
-        let text = match row {
+    let inner = width.saturating_sub(2);
+
+    // Rows become lines first, because a wrapped note is more than one line
+    // and the offset has to count what is drawn, not what it came from.
+    let mut lines: Vec<(String, Style)> = Vec::new();
+    for (index, row) in panel.rows.iter().enumerate() {
+        let selected = panel.cursor == Some(index);
+        match row {
             Row::Entry {
                 label,
                 value,
                 enabled,
             } => {
-                let mark = if panel.cursor == Some(index) {
-                    "▸"
-                } else {
-                    " "
-                };
+                let mark = if selected { "▸" } else { " " };
                 let label = format::truncate(label, VALUE_COLUMN.saturating_sub(3));
                 let pad = VALUE_COLUMN.saturating_sub(2 + format::width(&label));
                 let dim = if *enabled || !mark_read_only {
@@ -98,17 +174,48 @@ pub fn render(panel: &Panel, width: u16, height: u16) -> Vec<Line> {
                 } else {
                     "  (read-only)"
                 };
-                format!("{mark} {label}{}{value}{dim}", " ".repeat(pad))
+                // Reverse video, the same way the selected card's header is
+                // marked -- it follows whatever theme is in force instead of
+                // naming a colour.
+                let style = if selected {
+                    Style {
+                        role: Role::Emphasis,
+                        reverse: true,
+                        ..Style::default()
+                    }
+                } else {
+                    Style::role(Role::Body)
+                };
+                lines.push((
+                    format!("{mark} {label}{}{value}{dim}", " ".repeat(pad)),
+                    style,
+                ));
             }
-            Row::Note(note) => format!("  {note}"),
-            Row::Rule => "─".repeat(width.saturating_sub(2)),
-        };
-        out.push(framed(text, width));
+            Row::Note(note) => {
+                for piece in wrap(note, inner.saturating_sub(2)) {
+                    lines.push((format!("  {piece}"), Style::role(Role::Label)));
+                }
+            }
+            Row::Warn(note) => {
+                for piece in wrap(note, inner.saturating_sub(2)) {
+                    lines.push((
+                        format!("  {piece}"),
+                        Style::semantic(Role::Emphasis, Semantic::Warn),
+                    ));
+                }
+            }
+            Row::Rule => lines.push(("─".repeat(inner), Style::role(Role::Rule))),
+        }
     }
-    // Fill to three short of the height: the rule, the footer and the bottom
-    // border are still to come. Filling to `height - 2` and then pushing three
-    // makes the truncate below eat the bottom border, and the two tests that
-    // assert the last line starts with `└` fail.
+
+    let first = if panel.cursor.is_some() {
+        0
+    } else {
+        panel.offset.min(lines.len().saturating_sub(1))
+    };
+    for (text, style) in lines.iter().skip(first).take(body_rows) {
+        out.push(framed_styled(text, *style, width));
+    }
     while out.len() + 3 < height {
         out.push(framed(String::new(), width));
     }
@@ -294,6 +401,66 @@ mod tests {
             "starts at the offset: {text:?}"
         );
         assert!(!text.iter().any(|l| l.contains("line 11")), "{text:?}");
+    }
+
+    /// A path cut off at the panel edge says a file is involved and not which
+    /// one. The doctor report is mostly paths and remedies.
+    #[test]
+    fn a_long_note_wraps_instead_of_being_cut_off() {
+        let long =
+            "/Users/winoooops/.local/state/herdr/plugins/herdr-agent-watcher/bin/statusline.sh";
+        let p = Panel {
+            title: "Doctor".into(),
+            rows: vec![Row::Note(long.into())],
+            footer: "esc".into(),
+            cursor: None,
+            offset: 0,
+        };
+        let text = plain(&render(&p, 40, 12));
+        let joined: String = text
+            .iter()
+            .map(|l| l.trim_matches(['│', ' ']).to_string())
+            .collect();
+        assert!(
+            joined.contains("statusline.sh"),
+            "the end of the path survived: {text:?}"
+        );
+        assert!(!joined.contains('…'), "wrapped, not truncated: {text:?}");
+    }
+
+    /// `▸` alone is easy to lose. Reverse video is how the selected card's
+    /// header is already marked, so it follows the theme in force.
+    #[test]
+    fn the_selected_row_is_reversed_not_only_marked() {
+        let lines = render(&panel(), 40, 12);
+        let reversed: Vec<_> = lines
+            .iter()
+            .filter(|line| line.iter().any(|span| span.style.reverse))
+            .collect();
+        assert_eq!(reversed.len(), 1, "exactly the cursor row");
+        let text: String = reversed[0].iter().map(|s| s.text.as_str()).collect();
+        assert!(
+            text.contains("scope"),
+            "and it is the row the cursor is on: {text}"
+        );
+    }
+
+    #[test]
+    fn a_warning_is_styled_as_one() {
+        let p = Panel {
+            title: "Settings".into(),
+            rows: vec![Row::Warn("takes effect after restart-daemon".into())],
+            footer: "esc".into(),
+            cursor: None,
+            offset: 0,
+        };
+        let lines = render(&p, 40, 12);
+        assert!(
+            lines.iter().any(|line| line
+                .iter()
+                .any(|span| span.style.semantic == Some(crate::sidebar::style::Semantic::Warn))),
+            "a warning in body text is a warning said invisibly"
+        );
     }
 
     #[test]
