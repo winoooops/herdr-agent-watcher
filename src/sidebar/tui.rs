@@ -184,8 +184,12 @@ enum KeyOutcome {
 
 /// Which panel is open. `None` is the card list.
 pub(crate) enum Dialog {
-    Menu { cursor: usize },
-    Keys { cursor: usize },
+    Menu {
+        cursor: usize,
+    },
+    Keys {
+        cursor: usize,
+    },
     Settings {
         cursor: usize,
         dirty: Vec<crate::sidebar::live::Setting>,
@@ -259,10 +263,7 @@ fn settings_dialog() -> Dialog {
     }
 }
 
-fn save_settings(
-    dialog: &mut Dialog,
-    live: &crate::sidebar::live::Live,
-) -> Result<String, String> {
+fn save_settings(dialog: &mut Dialog, live: &crate::sidebar::live::Live) -> Result<String, String> {
     let Dialog::Settings {
         dirty,
         path,
@@ -276,11 +277,8 @@ fn save_settings(
         .as_ref()
         .ok_or_else(|| "HERDR_PLUGIN_CONFIG_DIR is not set".to_string())?;
     let current = source.as_ref().map_err(Clone::clone)?;
-    let body = crate::sidebar::settings_file::edit(
-        current.as_deref().unwrap_or_default(),
-        live,
-        dirty,
-    )?;
+    let body =
+        crate::sidebar::settings_file::edit(current.as_deref().unwrap_or_default(), live, dirty)?;
     let expected = match current {
         Some(text) => crate::sidebar::settings_file::Expected::Contents(text.clone()),
         None => crate::sidebar::settings_file::Expected::Missing,
@@ -306,7 +304,9 @@ fn doctor_remedy(remedy: &crate::agents::doctor::Remedy) -> String {
             format!("herdr plugin action invoke {id} --plugin herdr-agent-watcher")
         }
         Remedy::RestartSession => "recreate this Claude session".into(),
-        Remedy::WaitOrInteract => "wait for its next status-line render, or send it a prompt".into(),
+        Remedy::WaitOrInteract => {
+            "wait for its next status-line render, or send it a prompt".into()
+        }
         Remedy::ReopenPane => "close and reopen this pane".into(),
         Remedy::MoveTables { tables, from, to } => format!(
             "move {} from {} to {}",
@@ -324,9 +324,7 @@ fn doctor_remedy(remedy: &crate::agents::doctor::Remedy) -> String {
     }
 }
 
-fn doctor_rows(
-    report: &crate::agents::doctor::Report,
-) -> Vec<crate::sidebar::dialog::Row> {
+fn doctor_rows(report: &crate::agents::doctor::Report) -> Vec<crate::sidebar::dialog::Row> {
     use crate::sidebar::dialog::Row;
     let mut rows = Vec::new();
     for check in &report.checks {
@@ -1235,8 +1233,7 @@ mod tests {
     /// renaming a key in KEYS -- the array the reader actually sees -- passes.
     #[test]
     fn the_sheet_and_the_driven_table_describe_the_same_keys() {
-        let sheet: std::collections::BTreeSet<&str> =
-            KEYS.iter().map(|(key, _)| *key).collect();
+        let sheet: std::collections::BTreeSet<&str> = KEYS.iter().map(|(key, _)| *key).collect();
         let driven: std::collections::BTreeSet<&str> =
             ROUTED.iter().map(|(key, ..)| *key).collect();
         let pending: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
@@ -1274,16 +1271,11 @@ mod tests {
         let mut live = crate::sidebar::live::Live::from(&cfg);
 
         let order = |live: &crate::sidebar::live::Live| {
-            crate::sidebar::view::render(
-                &state,
-                &view_input(&cfg, live, &toggled, None),
-                60,
-                0,
-            )
-            .spans
-            .iter()
-            .map(|(id, _)| id.clone())
-            .collect::<Vec<_>>()
+            crate::sidebar::view::render(&state, &view_input(&cfg, live, &toggled, None), 60, 0)
+                .spans
+                .iter()
+                .map(|(id, _)| id.clone())
+                .collect::<Vec<_>>()
         };
         assert_eq!(order(&live), vec!["first", "second"], "position order");
 
@@ -1298,10 +1290,7 @@ mod tests {
         let r = two_cards();
         crate::test_env::with_env(
             &[
-                (
-                    "HERDR_PLUGIN_CONFIG_DIR",
-                    Some(config_dir.path().into()),
-                ),
+                ("HERDR_PLUGIN_CONFIG_DIR", Some(config_dir.path().into())),
                 ("HERDR_WORKSPACE_ID", Some("w4".into())),
             ],
             || {

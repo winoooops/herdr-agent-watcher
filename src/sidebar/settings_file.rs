@@ -132,10 +132,7 @@ label = \"CC\"
 sort = \"position\"
 ";
 
-    fn live_with(
-        sort: crate::sidebar::select::Sort,
-        scope: crate::sidebar::config::Scope,
-    ) -> Live {
+    fn live_with(sort: crate::sidebar::select::Sort, scope: crate::sidebar::config::Scope) -> Live {
         let mut live = Live::from(&crate::sidebar::config::Loaded::from_missing());
         live.sort = sort;
         live.scope = scope;
@@ -195,12 +192,7 @@ scope = \"workspace\"
     fn a_missing_table_is_created_as_a_section_not_an_inline_table() {
         use crate::sidebar::select::Sort;
         let live = live_with(Sort::Smart, crate::sidebar::config::Scope::All);
-        let out = edit(
-            "[daemon]\ninterval_ms = 1\n",
-            &live,
-            &[Setting::TraceLines],
-        )
-        .expect("edit");
+        let out = edit("[daemon]\ninterval_ms = 1\n", &live, &[Setting::TraceLines]).expect("edit");
         assert!(out.contains("[cards]"), "{out}");
         assert!(
             !out.contains("cards = {"),
@@ -253,10 +245,7 @@ scope = \"workspace\"
             crate::sidebar::select::Sort::Smart,
             crate::sidebar::config::Scope::All,
         );
-        for document in [
-            "list.hide_idle = true\n",
-            "list = { hide_idle = true }\n",
-        ] {
+        for document in ["list.hide_idle = true\n", "list = { hide_idle = true }\n"] {
             let out = edit(document, &live, &[Setting::Sort]).expect(document);
             assert_eq!(
                 crate::sidebar::config::Loaded::from_toml(&out).sort,
@@ -273,12 +262,7 @@ scope = \"workspace\"
     fn writing_creates_an_absent_file() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        save(
-            &path,
-            Expected::Missing,
-            "[list]\nsort = \"smart\"\n",
-        )
-        .expect("create");
+        save(&path, Expected::Missing, "[list]\nsort = \"smart\"\n").expect("create");
         assert!(path.exists());
     }
 
@@ -340,12 +324,7 @@ scope = \"workspace\"
         let path = dir.path().join("config.toml");
         std::fs::write(&path, "a = 1\n").unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
-        save(
-            &path,
-            Expected::Contents("a = 1\n".into()),
-            "a = 2\n",
-        )
-        .expect("save");
+        save(&path, Expected::Contents("a = 1\n".into()), "a = 2\n").expect("save");
         assert_eq!(
             std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
             0o600

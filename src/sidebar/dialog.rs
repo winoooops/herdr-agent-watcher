@@ -204,8 +204,7 @@ mod tests {
         p.footer = "j/k move · ↵ change · s save · r refresh · esc close · q close".into();
         let text = plain(&render(&p, 24, 12));
         assert!(
-            text.iter()
-                .all(|l| crate::sidebar::format::width(l) == 24),
+            text.iter().all(|l| crate::sidebar::format::width(l) == 24),
             "{text:?}"
         );
     }

@@ -190,9 +190,7 @@ impl Live {
     /// stepping back is stepping forward.
     pub fn cycle_back(&mut self, setting: Setting, workspace: Option<&str>) {
         match setting {
-            Setting::TraceLines => {
-                self.trace_lines = self.trace_lines.saturating_sub(1).max(1)
-            }
+            Setting::TraceLines => self.trace_lines = self.trace_lines.saturating_sub(1).max(1),
             other => self.cycle(other, workspace),
         }
     }
