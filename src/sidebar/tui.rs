@@ -202,14 +202,63 @@ impl Dialog {
     fn len(&self) -> usize {
         match self {
             Dialog::Menu { .. } => MENU.len(),
-            // The sheet's contents arrive in Task 4; naming KEYS here would
-            // make this task's commit fail to compile on its own.
-            Dialog::Keys { .. } => 0,
+            Dialog::Keys { .. } => KEYS.len(),
         }
     }
 }
 
 const MENU: [(&str, &str); 2] = [("Settings", "s"), ("Doctor", "d")];
+
+/// One inventory. The sheet is built from it, and the test presses every entry
+/// through the router. Descriptions say where a key means something, because
+/// `s` and `r` mean different things inside a panel and outside one.
+const KEYS: [(&str, &str); 12] = [
+    ("j / ↓", "move down"),
+    ("k / ↑", "move up"),
+    ("o / ↵", "expand a card · change a setting"),
+    ("z", "hide idle agents"),
+    ("PageUp / PageDown", "scroll"),
+    ("x", "menu"),
+    ("?", "this sheet"),
+    ("s", "settings · save, in the settings panel"),
+    ("d", "doctor"),
+    ("r", "rebuild the report, in the doctor panel"),
+    ("q / esc", "close a panel, or the sidebar"),
+    ("ctrl-c", "close the sidebar"),
+];
+
+/// Each key, and the state it needs in order to do anything.
+///
+/// The starting cursor is per key and not a constant: with two cards, `j`
+/// from the last one correctly does nothing and `k` from the first correctly
+/// does nothing. A single start makes one of them look like an ignored key.
+///
+/// `r` only means something with the doctor panel open and `↵` only inside
+/// settings, so those arrive with the panels that give them meaning.
+#[cfg(test)]
+const ROUTED: [(&str, KeyCode, KeyModifiers, &str, Option<Dialog>); 9] = [
+    ("j / ↓", KeyCode::Char('j'), KeyModifiers::NONE, "a", None),
+    ("k / ↑", KeyCode::Char('k'), KeyModifiers::NONE, "b", None),
+    ("o / ↵", KeyCode::Char('o'), KeyModifiers::NONE, "a", None),
+    ("z", KeyCode::Char('z'), KeyModifiers::NONE, "a", None),
+    (
+        "PageUp / PageDown",
+        KeyCode::PageDown,
+        KeyModifiers::NONE,
+        "a",
+        None,
+    ),
+    ("x", KeyCode::Char('x'), KeyModifiers::NONE, "a", None),
+    ("?", KeyCode::Char('?'), KeyModifiers::NONE, "a", None),
+    ("q / esc", KeyCode::Esc, KeyModifiers::NONE, "a", None),
+    (
+        "ctrl-c",
+        KeyCode::Char('c'),
+        KeyModifiers::CONTROL,
+        "a",
+        None,
+    ),
+];
 
 /// The panel needs a frame it can be legible in. Below this it does not open:
 /// four broken characters are worse than a refusal that says why.
@@ -297,7 +346,14 @@ fn panel_for(
         },
         Dialog::Keys { cursor } => Panel {
             title: "Keys".into(),
-            rows: Vec::new(),
+            rows: KEYS
+                .iter()
+                .map(|(key, what)| Row::Entry {
+                    label: (*key).into(),
+                    value: (*what).into(),
+                    enabled: false,
+                })
+                .collect(),
             footer: "esc close".into(),
             cursor: *cursor,
         },
@@ -864,6 +920,82 @@ mod tests {
                 it.notice
             );
         }
+    }
+
+    /// Comparing two hard-coded arrays proves nothing: deleting a route
+    /// changes neither. This presses every key the sheet describes, through
+    /// the real router, and asserts it did something. A key documented but not
+    /// routed falls to the router's `_ => {}` and changes nothing.
+    #[test]
+    fn every_key_the_sheet_describes_does_something() {
+        let r = two_cards();
+        for (key, code, modifiers, start, context) in ROUTED {
+            let mut it = Interaction {
+                follow: true,
+                offset: 5,
+                cursor: Some(start.into()),
+                ..Default::default()
+            };
+            let mut live = live_default();
+            let mut open = context;
+            let before = (
+                it.offset,
+                it.cursor.clone(),
+                it.toggled.clone(),
+                live.hide_idle,
+                open.is_some(),
+                std::mem::discriminant(&open),
+            );
+            let outcome = route(
+                crossterm::event::KeyEvent::new(code, modifiers),
+                &mut open,
+                &mut it,
+                &mut live,
+                &r,
+                10,
+                40,
+                60,
+                24,
+            );
+            let after = (
+                it.offset,
+                it.cursor.clone(),
+                it.toggled.clone(),
+                live.hide_idle,
+                open.is_some(),
+                std::mem::discriminant(&open),
+            );
+            assert!(
+                matches!(outcome, KeyOutcome::Quit) || before != after,
+                "{key} is in the sheet but the router ignores it"
+            );
+        }
+    }
+
+    /// The test above drives ROUTED; the panel renders KEYS. Without this,
+    /// renaming a key in KEYS -- the array the reader actually sees -- passes.
+    #[test]
+    fn the_sheet_and_the_driven_table_describe_the_same_keys() {
+        let sheet: std::collections::BTreeSet<&str> =
+            KEYS.iter().map(|(key, _)| *key).collect();
+        let driven: std::collections::BTreeSet<&str> =
+            ROUTED.iter().map(|(key, ..)| *key).collect();
+        // `s`, `d` and `r` only mean something with a panel open; Tasks 5 and 8
+        // move them from this exception into ROUTED with their contexts.
+        let pending: std::collections::BTreeSet<&str> =
+            ["s", "d", "r"].into_iter().collect();
+        assert_eq!(
+            sheet
+                .difference(&driven)
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>(),
+            pending,
+            "a key in the sheet that nothing presses"
+        );
+        assert!(
+            driven.difference(&sheet).next().is_none(),
+            "a key pressed by the table but missing from the sheet"
+        );
     }
 
     #[test]
