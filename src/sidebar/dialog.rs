@@ -57,6 +57,12 @@ fn edge(left: char, right: char, title: &str, width: usize) -> Line {
 /// leaves the cards showing through.
 pub fn render(panel: &Panel, width: u16, height: u16) -> Vec<Line> {
     let width = width as usize;
+    // Only worth saying when some rows ARE editable; otherwise it is on every
+    // line and distinguishes nothing.
+    let mark_read_only = panel
+        .rows
+        .iter()
+        .any(|row| matches!(row, Row::Entry { enabled: true, .. }));
     let height = (height as usize).max(3);
     let mut out = vec![edge('┌', '┐', &panel.title, width)];
 
@@ -72,7 +78,11 @@ pub fn render(panel: &Panel, width: u16, height: u16) -> Vec<Line> {
                 let mark = if index == panel.cursor { "▸" } else { " " };
                 let label = format::truncate(label, VALUE_COLUMN.saturating_sub(3));
                 let pad = VALUE_COLUMN.saturating_sub(2 + format::width(&label));
-                let dim = if *enabled { "" } else { "  (read-only)" };
+                let dim = if *enabled || !mark_read_only {
+                    ""
+                } else {
+                    "  (read-only)"
+                };
                 format!("{mark} {label}{}{value}{dim}", " ".repeat(pad))
             }
             Row::Note(note) => format!("  {note}"),
@@ -196,6 +206,41 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The marker distinguishes an editable row from one that is not. In a
+    /// panel where nothing is editable there is nothing to distinguish, and it
+    /// becomes thirteen columns of noise on every line.
+    #[test]
+    fn read_only_is_marked_only_where_something_else_is_editable() {
+        let mixed = plain(&render(&panel(), 60, 12));
+        assert!(
+            mixed.iter().any(|l| l.contains("(read-only)")),
+            "the daemon interval sits beside editable rows: {mixed:?}"
+        );
+
+        let all_locked = Panel {
+            title: "Doctor".into(),
+            rows: vec![
+                Row::Entry {
+                    label: "✓".into(),
+                    value: "daemon answering".into(),
+                    enabled: false,
+                },
+                Row::Entry {
+                    label: "✗".into(),
+                    value: "a script is missing".into(),
+                    enabled: false,
+                },
+            ],
+            footer: "esc close".into(),
+            cursor: 0,
+        };
+        let text = plain(&render(&all_locked, 60, 12));
+        assert!(
+            !text.iter().any(|l| l.contains("(read-only)")),
+            "nothing here is editable, so the marker says nothing: {text:?}"
+        );
     }
 
     #[test]

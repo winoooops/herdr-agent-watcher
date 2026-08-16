@@ -540,10 +540,22 @@ fn route(
     }
 }
 
+/// "now" already reads as a time; everything else needs "ago". `format::age`
+/// returns the bare quantity, so appending unconditionally gives "now ago".
+fn taken_ago(taken_at: u64, now: u64) -> String {
+    let age = crate::sidebar::format::age(taken_at, now);
+    if age == "now" {
+        age
+    } else {
+        format!("{age} ago")
+    }
+}
+
 fn panel_for(
     dialog: &Dialog,
     _live: &crate::sidebar::live::Live,
     _cfg: &crate::sidebar::config::Loaded,
+    now: u64,
 ) -> crate::sidebar::dialog::Panel {
     use crate::sidebar::dialog::{Panel, Row};
     match dialog {
@@ -609,7 +621,12 @@ fn panel_for(
                 Ok(report) => doctor_rows(report),
                 Err(error) => vec![Row::Note(error.clone())],
             },
-            footer: format!("taken {taken_at} · r rebuild · esc close"),
+            // `format::age`, the same relative form the cards use for their
+            // traces. A raw epoch in milliseconds is not a time anyone reads.
+            footer: format!(
+                "taken {} · r rebuild · esc close",
+                taken_ago(*taken_at, now)
+            ),
             cursor: *cursor,
         },
     }
@@ -880,7 +897,7 @@ pub fn run() -> i32 {
                     );
                     frame.render_widget(Paragraph::new(foot.clone()), split[1]);
                     if let Some(dialog) = open.as_ref() {
-                        let panel = panel_for(dialog, &live, &cfg);
+                        let panel = panel_for(dialog, &live, &cfg, now);
                         let w = area.width.min(60);
                         let h = area.height.saturating_sub(2).min(20);
                         let rect = ratatui::layout::Rect {
@@ -1112,6 +1129,12 @@ mod tests {
                 KeyOutcome::Quit
             ));
         }
+    }
+
+    #[test]
+    fn a_fresh_report_is_not_taken_now_ago() {
+        assert_eq!(taken_ago(1_000, 1_000), "now");
+        assert_eq!(taken_ago(1_000, 1_000 + 120_000), "2m ago");
     }
 
     #[test]
