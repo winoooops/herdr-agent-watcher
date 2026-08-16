@@ -102,21 +102,21 @@ fn now_unix_ms() -> u64 {
 
 fn view_input<'a>(
     cfg: &'a crate::sidebar::config::Loaded,
+    live: &'a crate::sidebar::live::Live,
     toggled: &'a std::collections::HashSet<String>,
-    hide_idle: bool,
     cursor: Option<&'a str>,
 ) -> ViewInput<'a> {
     ViewInput {
         cursor,
         toggled,
-        hide_idle,
-        scope: cfg.workspace_id.as_deref(),
-        sort: cfg.sort,
-        auto_expand: cfg.auto_expand,
-        agent_mark: cfg.agent_mark,
-        tool_calls: cfg.tool_calls,
-        theme: cfg.theme,
-        trace_lines: cfg.trace_lines,
+        hide_idle: live.hide_idle,
+        scope: live.workspace_filter(),
+        sort: live.sort,
+        auto_expand: live.auto_expand,
+        agent_mark: live.agent_mark,
+        tool_calls: live.tool_calls,
+        theme: live.theme,
+        trace_lines: live.trace_lines,
         agents: &cfg.appearances,
         config: cfg.status,
     }
@@ -172,7 +172,6 @@ fn to_line(line: &Line, theme: Theme, truecolor: bool) -> ratatui::text::Line<'s
 struct Interaction {
     cursor: Option<String>,
     toggled: std::collections::HashSet<String>,
-    hide_idle: bool,
     offset: u16,
     follow: bool,
 }
@@ -185,6 +184,7 @@ enum KeyOutcome {
 fn apply_key(
     key: crossterm::event::KeyEvent,
     it: &mut Interaction,
+    live: &mut crate::sidebar::live::Live,
     rendered: &Rendered,
     viewport: u16,
     total: usize,
@@ -209,7 +209,7 @@ fn apply_key(
             it.follow = true;
         }
         (KeyCode::Char('z'), _) => {
-            it.hide_idle = !it.hide_idle;
+            live.hide_idle = !live.hide_idle;
             it.follow = true;
         }
         (KeyCode::Up, _) | (KeyCode::Down, _) | (KeyCode::PageUp, _) | (KeyCode::PageDown, _) => {
@@ -316,8 +316,8 @@ pub fn run() -> i32 {
     cfg.write_problem_log();
 
     let mut state = State::default();
+    let mut live = crate::sidebar::live::Live::from(&cfg);
     let mut it = Interaction {
-        hide_idle: cfg.hide_idle,
         follow: true,
         ..Default::default()
     };
@@ -377,7 +377,7 @@ pub fn run() -> i32 {
 
             let mut out = crate::sidebar::view::render(
                 &state,
-                &view_input(&cfg, &it.toggled, it.hide_idle, it.cursor.as_deref()),
+                &view_input(&cfg, &live, &it.toggled, it.cursor.as_deref()),
                 size.width,
                 now,
             );
@@ -385,7 +385,7 @@ pub fn run() -> i32 {
             if recovered {
                 out = crate::sidebar::view::render(
                     &state,
-                    &view_input(&cfg, &it.toggled, it.hide_idle, it.cursor.as_deref()),
+                    &view_input(&cfg, &live, &it.toggled, it.cursor.as_deref()),
                     size.width,
                     now,
                 );
@@ -406,16 +406,16 @@ pub fn run() -> i32 {
             let body: Vec<_> = out
                 .scrollable
                 .iter()
-                .map(|line| to_line(line, cfg.theme, color))
+                .map(|line| to_line(line, live.theme, color))
                 .collect();
             let foot: Vec<_> = out.pinned[out.pinned.len() - pinned_keep..]
                 .iter()
-                .map(|line| to_line(line, cfg.theme, color))
+                .map(|line| to_line(line, live.theme, color))
                 .collect();
             terminal
                 .draw(|frame| {
                     let area = frame.area();
-                    if matches!(cfg.theme, Theme::Lumon) {
+                    if matches!(live.theme, Theme::Lumon) {
                         frame.render_widget(
                             ratatui::widgets::Block::default().style(
                                 ratatui::style::Style::default()
@@ -445,7 +445,7 @@ pub fn run() -> i32 {
                 Ok(Event::Key(key)) => {
                     dirty = true;
                     if let KeyOutcome::Quit =
-                        apply_key(key, &mut it, &last_rendered, viewport, total)
+                        apply_key(key, &mut it, &mut live, &last_rendered, viewport, total)
                     {
                         return 0;
                     }
@@ -490,6 +490,10 @@ mod tests {
         crossterm::event::KeyEvent::new(code, KeyModifiers::NONE)
     }
 
+    fn live_default() -> crate::sidebar::live::Live {
+        crate::sidebar::live::Live::from(&crate::sidebar::config::Loaded::from_missing())
+    }
+
     #[test]
     fn the_age_tick_fires_once_a_minute_and_not_before() {
         assert!(!age_tick_due(0, 59_999));
@@ -501,41 +505,44 @@ mod tests {
     #[test]
     fn cursor_keys_move_the_selection_and_resume_following() {
         let r = two_cards();
+        let mut live = live_default();
         let mut it = Interaction {
             cursor: Some("a".into()),
             follow: false,
             ..Default::default()
         };
-        apply_key(press(KeyCode::Char('j')), &mut it, &r, 10, 40);
+        apply_key(press(KeyCode::Char('j')), &mut it, &mut live, &r, 10, 40);
         assert_eq!(it.cursor.as_deref(), Some("b"));
         assert!(it.follow, "moving the cursor re-attaches (§3.5)");
-        apply_key(press(KeyCode::Char('j')), &mut it, &r, 10, 40);
+        apply_key(press(KeyCode::Char('j')), &mut it, &mut live, &r, 10, 40);
         assert_eq!(it.cursor.as_deref(), Some("b"), "no wrapping (§3.2)");
     }
 
     #[test]
     fn o_toggles_the_selected_card_and_z_flips_the_idle_filter() {
         let r = two_cards();
+        let mut live = live_default();
         let mut it = Interaction {
             cursor: Some("b".into()),
             ..Default::default()
         };
-        apply_key(press(KeyCode::Char('o')), &mut it, &r, 10, 40);
+        apply_key(press(KeyCode::Char('o')), &mut it, &mut live, &r, 10, 40);
         assert!(it.toggled.contains("b"));
-        apply_key(press(KeyCode::Enter), &mut it, &r, 10, 40);
+        apply_key(press(KeyCode::Enter), &mut it, &mut live, &r, 10, 40);
         assert!(it.toggled.is_empty(), "the same key closes it again");
-        apply_key(press(KeyCode::Char('z')), &mut it, &r, 10, 40);
-        assert!(it.hide_idle);
+        apply_key(press(KeyCode::Char('z')), &mut it, &mut live, &r, 10, 40);
+        assert!(live.hide_idle);
     }
 
     #[test]
     fn paging_detaches_following_only_when_the_offset_actually_moves() {
         let r = two_cards();
+        let mut live = live_default();
         let mut it = Interaction {
             follow: true,
             ..Default::default()
         };
-        apply_key(press(KeyCode::PageDown), &mut it, &r, 10, 40);
+        apply_key(press(KeyCode::PageDown), &mut it, &mut live, &r, 10, 40);
         assert_eq!(it.offset, 10, "one viewport");
         assert!(!it.follow, "the user took the wheel");
 
@@ -543,7 +550,7 @@ mod tests {
             follow: true,
             ..Default::default()
         };
-        apply_key(press(KeyCode::PageUp), &mut it, &r, 10, 40);
+        apply_key(press(KeyCode::PageUp), &mut it, &mut live, &r, 10, 40);
         assert_eq!(it.offset, 0);
         assert!(
             it.follow,
@@ -554,7 +561,7 @@ mod tests {
             follow: true,
             ..Default::default()
         };
-        apply_key(press(KeyCode::PageDown), &mut it, &r, 0, 40);
+        apply_key(press(KeyCode::PageDown), &mut it, &mut live, &r, 0, 40);
         assert!(it.follow);
     }
 
@@ -568,7 +575,8 @@ mod tests {
         assert_eq!(cfg.status.problems, 0, "the fixture itself must be valid");
 
         let toggled = std::collections::HashSet::new();
-        let v = view_input(&cfg, &toggled, cfg.hide_idle, Some("p1"));
+        let live = crate::sidebar::live::Live::from(&cfg);
+        let v = view_input(&cfg, &live, &toggled, Some("p1"));
         assert_eq!(v.theme, Theme::Lumon);
         assert_eq!(v.agent_mark, crate::sidebar::config::AgentMark::Initial);
         assert_eq!(v.auto_expand, crate::sidebar::config::AutoExpand::All);
@@ -617,22 +625,23 @@ mod tests {
     fn quit_keys_quit_and_nothing_else_does() {
         let r = two_cards();
         let mut it = Interaction::default();
+        let mut live = live_default();
         assert!(matches!(
-            apply_key(press(KeyCode::Char('q')), &mut it, &r, 10, 40),
+            apply_key(press(KeyCode::Char('q')), &mut it, &mut live, &r, 10, 40),
             KeyOutcome::Quit
         ));
         assert!(matches!(
-            apply_key(press(KeyCode::Esc), &mut it, &r, 10, 40),
+            apply_key(press(KeyCode::Esc), &mut it, &mut live, &r, 10, 40),
             KeyOutcome::Quit
         ));
         let ctrl_c = crossterm::event::KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
         assert!(matches!(
-            apply_key(ctrl_c, &mut it, &r, 10, 40),
+            apply_key(ctrl_c, &mut it, &mut live, &r, 10, 40),
             KeyOutcome::Quit
         ));
         let plain_c = press(KeyCode::Char('c'));
         assert!(matches!(
-            apply_key(plain_c, &mut it, &r, 10, 40),
+            apply_key(plain_c, &mut it, &mut live, &r, 10, 40),
             KeyOutcome::Handled
         ));
     }
