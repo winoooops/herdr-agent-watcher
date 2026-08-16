@@ -153,8 +153,18 @@ herdr plugin action invoke open-sidebar --plugin herdr-agent-watcher
 
 Each invocation intentionally opens another split. Cards show agent state, agent/model,
 title, context use, cache hit rate, cost, tool count, and the three newest tool traces.
-Use `j`/`k` or PageUp/PageDown to scroll, `o`/`↵` to expand, `z` to hide idle agents, and
-`q`, Escape, or Ctrl-C to close.
+Use `j`/`k` or PageUp/PageDown to scroll, `o`/`↵` to expand, `z` to hide idle agents,
+`x` to open the menu, `?` to list every key, `s` for settings, `d` for doctor, and
+`q`/`Esc` or Ctrl-C to close.
+
+`x` opens a menu, `?` lists every key. From the menu — or directly with `s` and `d` — a
+settings panel and a doctor panel.
+
+Settings change what you are looking at as you cycle them, and nothing is written until you
+press `s`. Saving edits only the keys you changed and leaves the rest of `config.toml`,
+including `[daemon]`, `[agent.*]` and your comments, exactly as you wrote it.
+
+The doctor panel shows what `doctor` prints, without leaving the sidebar. `r` rebuilds it.
 
 With `scope = "workspace"` each sidebar lists only the panes in its own workspace, which is
 what makes opening one per workspace useful. A pane the daemon has not placed yet is shown

@@ -147,7 +147,17 @@ herdr plugin action invoke open-sidebar --plugin herdr-agent-watcher
 
 每次调用都会**有意**新开一个分屏。卡片显示 agent 状态、agent/模型、标题、上下文用量、
 缓存命中率、成本、工具调用数，以及最近三条工具调用记录。`j`/`k` 或 PageUp/PageDown 滚动，
-`o`/`↵` 展开，`z` 隐藏空闲 agent，`q`、Escape 或 Ctrl-C 关闭。
+`o`/`↵` 展开，`z` 隐藏空闲 agent，`x` 打开菜单，`?` 列出所有按键，`s` 打开设置，
+`d` 打开 doctor，`q`/`Esc` 或 Ctrl-C 关闭。
+
+`x` 打开菜单，`?` 列出所有按键。可以从菜单打开设置面板和 doctor 面板，也可以直接按
+`s` 和 `d` 打开。
+
+循环切换设置时，你正在查看的内容会立即变化；按下 `s` 之前不会写入任何内容。保存只会
+编辑你更改过的键，并让 `config.toml` 的其余部分（包括 `[daemon]`、`[agent.*]` 和你的
+注释）完全保持原样。
+
+doctor 面板会在不离开 sidebar 的情况下显示 `doctor` 打印的内容。按 `r` 重新生成报告。
 
 设置 `scope = "workspace"` 后，每个 sidebar 只列出自身 workspace 中的 pane，这使得为每个
 workspace 各开一个 sidebar 真正有用。daemon 尚未确定 workspace 的 pane 会显示出来，而不会
