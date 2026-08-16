@@ -1,5 +1,6 @@
 pub mod agent_ids;
 pub mod config;
+pub mod dialog;
 pub mod layout;
 pub mod live;
 pub mod reducer;
