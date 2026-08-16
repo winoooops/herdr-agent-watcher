@@ -192,12 +192,14 @@ pub(crate) enum Dialog {
     },
     Settings {
         cursor: usize,
+        from_menu: bool,
         dirty: Vec<crate::sidebar::live::Setting>,
         path: Option<std::path::PathBuf>,
         source: Result<Option<String>, String>,
     },
     Doctor {
-        cursor: usize,
+        offset: usize,
+        from_menu: bool,
         report: Result<crate::agents::doctor::Report, String>,
         taken_at: u64,
     },
@@ -208,12 +210,29 @@ impl Dialog {
         Dialog::Menu { cursor: 0 }
     }
 
-    fn cursor_mut(&mut self) -> &mut usize {
+    /// `None` for a panel that scrolls instead of selecting.
+    fn cursor_mut(&mut self) -> Option<&mut usize> {
         match self {
-            Dialog::Menu { cursor }
-            | Dialog::Keys { cursor }
-            | Dialog::Settings { cursor, .. }
-            | Dialog::Doctor { cursor, .. } => cursor,
+            Dialog::Menu { cursor } | Dialog::Keys { cursor } => Some(cursor),
+            Dialog::Settings { cursor, .. } => Some(cursor),
+            Dialog::Doctor { .. } => None,
+        }
+    }
+
+    fn offset_mut(&mut self) -> Option<&mut usize> {
+        match self {
+            Dialog::Doctor { offset, .. } => Some(offset),
+            _ => None,
+        }
+    }
+
+    /// Whether `esc` steps back to the menu or closes the sidebar's overlay
+    /// entirely. Opening settings with `s` and being dropped into a menu you
+    /// never saw is not going back.
+    fn from_menu(&self) -> bool {
+        match self {
+            Dialog::Settings { from_menu, .. } | Dialog::Doctor { from_menu, .. } => *from_menu,
+            Dialog::Menu { .. } | Dialog::Keys { .. } => false,
         }
     }
 
@@ -222,17 +241,51 @@ impl Dialog {
             Dialog::Menu { .. } => MENU.len(),
             Dialog::Keys { .. } => KEYS.len(),
             Dialog::Settings { .. } => crate::sidebar::live::SETTINGS.len(),
+            // Doctor scrolls; it has no selectable rows, so it has no cursor
+            // to bound.
+            Dialog::Doctor { .. } => 0,
+        }
+    }
+
+    /// How many rows the panel will draw, which is what a scroll offset is
+    /// bounded by.
+    fn row_count(&self) -> usize {
+        match self {
             Dialog::Doctor { report, .. } => report
                 .as_ref()
                 .map(|report| doctor_rows(report).len())
                 .unwrap_or(1),
+            other => other.len(),
         }
     }
 }
 
-fn doctor_dialog() -> Dialog {
+/// Cycling the selected setting, forward or back. Only the settings panel has
+/// anything to cycle.
+fn cycle_selected(dialog: &mut Dialog, live: &mut crate::sidebar::live::Live, back: bool) {
+    let Dialog::Settings { cursor, dirty, .. } = dialog else {
+        return;
+    };
+    let Some(setting) = crate::sidebar::live::SETTINGS.get(*cursor).copied() else {
+        return;
+    };
+    // Read here, not in `live.rs`, which stays pure and takes the workspace as
+    // an argument.
+    let workspace = std::env::var("HERDR_WORKSPACE_ID").ok();
+    if back {
+        live.cycle_back(setting, workspace.as_deref());
+    } else {
+        live.cycle(setting, workspace.as_deref());
+    }
+    if !dirty.contains(&setting) {
+        dirty.push(setting);
+    }
+}
+
+fn doctor_dialog(from_menu: bool) -> Dialog {
     Dialog::Doctor {
-        cursor: 0,
+        offset: 0,
+        from_menu,
         report: crate::agents::claude_bridge::doctor_report(),
         taken_at: now_unix_ms(),
     }
@@ -245,7 +298,7 @@ fn doctor_taken_at(dialog: &Option<Dialog>) -> Option<u64> {
     }
 }
 
-fn settings_dialog() -> Dialog {
+fn settings_dialog(from_menu: bool) -> Dialog {
     let path = crate::sidebar::config::config_path();
     let source = match path.as_ref() {
         Some(path) => match std::fs::read_to_string(path) {
@@ -257,6 +310,7 @@ fn settings_dialog() -> Dialog {
     };
     Dialog::Settings {
         cursor: 0,
+        from_menu,
         dirty: Vec::new(),
         path,
         source,
@@ -417,7 +471,8 @@ const ROUTED: [(&str, KeyCode, KeyModifiers, &str, Option<Dialog>); 12] = [
         KeyModifiers::NONE,
         "a",
         Some(Dialog::Doctor {
-            cursor: 0,
+            offset: 0,
+            from_menu: false,
             report: Ok(crate::agents::doctor::Report {
                 checks: Vec::new(),
                 panes: Vec::new(),
@@ -465,23 +520,46 @@ fn route(
             (KeyCode::Char('c'), m) if m.contains(KeyModifiers::CONTROL) => {
                 return KeyOutcome::Quit
             }
-            (KeyCode::Esc, _) | (KeyCode::Char('q'), _) => *open = None,
+            // Back one level, not out: a panel reached through the menu
+            // returns to it. One reached with `s` or `d` was never under a
+            // menu, and dropping into one you did not open is not going back.
+            (KeyCode::Esc, _) | (KeyCode::Char('q'), _) => {
+                *open = dialog.from_menu().then(Dialog::menu);
+            }
             (KeyCode::Char('j'), _) | (KeyCode::Down, _) => {
                 let last = dialog.len().saturating_sub(1);
-                let cursor = dialog.cursor_mut();
-                *cursor = (*cursor + 1).min(last);
+                let rows = dialog.row_count();
+                if let Some(cursor) = dialog.cursor_mut() {
+                    *cursor = (*cursor + 1).min(last);
+                } else if let Some(offset) = dialog.offset_mut() {
+                    *offset = (*offset + 1).min(rows.saturating_sub(1));
+                }
             }
             (KeyCode::Char('k'), _) | (KeyCode::Up, _) => {
-                let cursor = dialog.cursor_mut();
-                *cursor = cursor.saturating_sub(1);
+                if let Some(cursor) = dialog.cursor_mut() {
+                    *cursor = cursor.saturating_sub(1);
+                } else if let Some(offset) = dialog.offset_mut() {
+                    *offset = offset.saturating_sub(1);
+                }
+            }
+            // The value keys. Without a way back, `trace_lines` clamps at 20
+            // and there is no key that will ever bring it down again.
+            (KeyCode::Char('l'), _) | (KeyCode::Right, _) => cycle_selected(dialog, live, false),
+            (KeyCode::Char('h'), _) | (KeyCode::Left, _) => cycle_selected(dialog, live, true),
+            // `s` and `d` reach their panels from anywhere, including from
+            // inside another one -- the menu lists them, so they have to work
+            // there or the menu is lying.
+            (KeyCode::Char('s'), _) if !matches!(dialog, Dialog::Settings { .. }) => {
+                *open = Some(settings_dialog(false));
+            }
+            (KeyCode::Char('d'), _) if !matches!(dialog, Dialog::Doctor { .. }) => {
+                *open = Some(doctor_dialog(false));
             }
             (KeyCode::Char('s'), _) => {
-                if matches!(dialog, Dialog::Settings { .. }) {
-                    it.notice = Some(
-                        save_settings(dialog, live)
-                            .unwrap_or_else(|error| format!("save failed: {error}")),
-                    );
-                }
+                it.notice = Some(
+                    save_settings(dialog, live)
+                        .unwrap_or_else(|error| format!("save failed: {error}")),
+                );
             }
             (KeyCode::Char('r'), _) => {
                 if let Dialog::Doctor {
@@ -493,21 +571,11 @@ fn route(
                 }
             }
             (KeyCode::Enter, _) | (KeyCode::Char('o'), _) => {
-                if let Dialog::Settings { cursor, dirty, .. } = dialog {
-                    if let Some(setting) = crate::sidebar::live::SETTINGS.get(*cursor) {
-                        // Read here, not in `live.rs`, which stays pure and
-                        // takes the workspace as an argument.
-                        let workspace = std::env::var("HERDR_WORKSPACE_ID").ok();
-                        live.cycle(*setting, workspace.as_deref());
-                        if !dirty.contains(setting) {
-                            dirty.push(*setting);
-                        }
-                    }
-                }
+                cycle_selected(dialog, live, false);
                 if let Dialog::Menu { cursor } = dialog {
                     *open = Some(match *cursor {
-                        0 => settings_dialog(),
-                        _ => doctor_dialog(),
+                        0 => settings_dialog(true),
+                        _ => doctor_dialog(true),
                     });
                 }
             }
@@ -530,8 +598,8 @@ fn route(
             }
             *open = Some(match key.code {
                 KeyCode::Char('?') => Dialog::Keys { cursor: 0 },
-                KeyCode::Char('s') => settings_dialog(),
-                KeyCode::Char('d') => doctor_dialog(),
+                KeyCode::Char('s') => settings_dialog(false),
+                KeyCode::Char('d') => doctor_dialog(false),
                 _ => Dialog::menu(),
             });
             KeyOutcome::Handled
@@ -560,7 +628,7 @@ fn panel_for(
     use crate::sidebar::dialog::{Panel, Row};
     match dialog {
         Dialog::Menu { cursor } => Panel {
-            title: "Agent Watcher".into(),
+            title: "Menu".into(),
             rows: MENU
                 .iter()
                 .map(|(label, key)| Row::Entry {
@@ -569,8 +637,9 @@ fn panel_for(
                     enabled: true,
                 })
                 .collect(),
-            footer: "j/k move · ↵ open · esc close".into(),
-            cursor: *cursor,
+            footer: "j/k move · ↵ open · s settings · d doctor · esc close".into(),
+            cursor: Some(*cursor),
+            offset: 0,
         },
         Dialog::Keys { cursor } => Panel {
             title: "Keys".into(),
@@ -582,8 +651,9 @@ fn panel_for(
                     enabled: false,
                 })
                 .collect(),
-            footer: "esc close".into(),
-            cursor: *cursor,
+            footer: "j/k move · esc close".into(),
+            cursor: Some(*cursor),
+            offset: 0,
         },
         Dialog::Settings { cursor, .. } => {
             let mut rows: Vec<Row> = crate::sidebar::live::SETTINGS
@@ -607,14 +677,16 @@ fn panel_for(
             Panel {
                 title: "Settings".into(),
                 rows,
-                footer: "j/k move · ↵ change · s save · esc close".into(),
-                cursor: *cursor,
+                footer: "j/k row · h/l value · s save · esc back".into(),
+                cursor: Some(*cursor),
+                offset: 0,
             }
         }
         Dialog::Doctor {
-            cursor,
+            offset,
             report,
             taken_at,
+            ..
         } => Panel {
             title: "Doctor".into(),
             rows: match report {
@@ -624,10 +696,11 @@ fn panel_for(
             // `format::age`, the same relative form the cards use for their
             // traces. A raw epoch in milliseconds is not a time anyone reads.
             footer: format!(
-                "taken {} · r rebuild · esc close",
+                "taken {} · j/k scroll · r rebuild · esc back",
                 taken_ago(*taken_at, now)
             ),
-            cursor: *cursor,
+            cursor: None,
+            offset: *offset,
         },
     }
 }
@@ -1306,6 +1379,7 @@ mod tests {
         let mut it = Interaction::default();
         let mut open = Some(Dialog::Settings {
             cursor: 0,
+            from_menu: false,
             dirty: Vec::new(),
             path: None,
             source: Ok(None),

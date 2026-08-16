@@ -12,7 +12,12 @@ pub struct Panel {
     pub title: String,
     pub rows: Vec<Row>,
     pub footer: String,
-    pub cursor: usize,
+    /// `None` in a panel with nothing to select, which then scrolls instead.
+    /// The doctor report is mostly evidence and remedies; a cursor that can
+    /// land on those looks like a key that did nothing.
+    pub cursor: Option<usize>,
+    /// First row drawn. Only meaningful without a cursor.
+    pub offset: usize,
 }
 
 pub enum Row {
@@ -68,14 +73,24 @@ pub fn render(panel: &Panel, width: u16, height: u16) -> Vec<Line> {
 
     // Two for the borders, two for the footer and its rule.
     let body_rows = height.saturating_sub(4);
-    for (index, row) in panel.rows.iter().take(body_rows).enumerate() {
+    let first = if panel.cursor.is_some() {
+        0
+    } else {
+        panel.offset
+    };
+    for (offset, row) in panel.rows.iter().skip(first).take(body_rows).enumerate() {
+        let index = first + offset;
         let text = match row {
             Row::Entry {
                 label,
                 value,
                 enabled,
             } => {
-                let mark = if index == panel.cursor { "▸" } else { " " };
+                let mark = if panel.cursor == Some(index) {
+                    "▸"
+                } else {
+                    " "
+                };
                 let label = format::truncate(label, VALUE_COLUMN.saturating_sub(3));
                 let pad = VALUE_COLUMN.saturating_sub(2 + format::width(&label));
                 let dim = if *enabled || !mark_read_only {
@@ -138,7 +153,8 @@ mod tests {
                 Row::Note("needs restart-daemon".into()),
             ],
             footer: "j/k move · ↵ change · esc".into(),
-            cursor: 1,
+            cursor: Some(1),
+            offset: 0,
         }
     }
 
@@ -158,7 +174,7 @@ mod tests {
     fn the_cursor_marks_exactly_one_row() {
         for cursor in 0..2 {
             let mut p = panel();
-            p.cursor = cursor;
+            p.cursor = Some(cursor);
             let marked: Vec<usize> = plain(&render(&p, 40, 12))
                 .iter()
                 .enumerate()
@@ -234,7 +250,8 @@ mod tests {
                 },
             ],
             footer: "esc close".into(),
-            cursor: 0,
+            cursor: Some(0),
+            offset: 0,
         };
         let text = plain(&render(&all_locked, 60, 12));
         assert!(
@@ -252,6 +269,31 @@ mod tests {
             text.iter().all(|l| crate::sidebar::format::width(l) == 24),
             "{text:?}"
         );
+    }
+
+    /// The doctor report is longer than any panel, and none of it is
+    /// selectable. Without this the reader sees the first screenful and no way
+    /// to the rest, while j/k appear to do nothing on the note rows.
+    #[test]
+    fn a_panel_with_no_cursor_scrolls_and_marks_nothing() {
+        let rows: Vec<Row> = (0..30).map(|n| Row::Note(format!("line {n}"))).collect();
+        let scrolled = Panel {
+            title: "Doctor".into(),
+            rows,
+            footer: "esc close".into(),
+            cursor: None,
+            offset: 12,
+        };
+        let text = plain(&render(&scrolled, 40, 10));
+        assert!(
+            text.iter().all(|l| !l.contains('▸')),
+            "nothing to select: {text:?}"
+        );
+        assert!(
+            text.iter().any(|l| l.contains("line 12")),
+            "starts at the offset: {text:?}"
+        );
+        assert!(!text.iter().any(|l| l.contains("line 11")), "{text:?}");
     }
 
     #[test]
