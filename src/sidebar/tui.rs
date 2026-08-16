@@ -174,11 +174,134 @@ struct Interaction {
     toggled: std::collections::HashSet<String>,
     offset: u16,
     follow: bool,
+    notice: Option<String>,
 }
 
 enum KeyOutcome {
     Quit,
     Handled,
+}
+
+/// Which panel is open. `None` is the card list.
+pub(crate) enum Dialog {
+    Menu { cursor: usize },
+    Keys { cursor: usize },
+}
+
+impl Dialog {
+    fn menu() -> Self {
+        Dialog::Menu { cursor: 0 }
+    }
+
+    fn cursor_mut(&mut self) -> &mut usize {
+        match self {
+            Dialog::Menu { cursor } | Dialog::Keys { cursor } => cursor,
+        }
+    }
+
+    fn len(&self) -> usize {
+        match self {
+            Dialog::Menu { .. } => MENU.len(),
+            // The sheet's contents arrive in Task 4; naming KEYS here would
+            // make this task's commit fail to compile on its own.
+            Dialog::Keys { .. } => 0,
+        }
+    }
+}
+
+const MENU: [(&str, &str); 2] = [("Settings", "s"), ("Doctor", "d")];
+
+/// The panel needs a frame it can be legible in. Below this it does not open:
+/// four broken characters are worse than a refusal that says why.
+const MIN_DIALOG_WIDTH: u16 = 20;
+const MIN_DIALOG_HEIGHT: u16 = 8;
+
+/// Every key press belongs to exactly one of the two layers. With a panel
+/// open the card list gets nothing -- a `j` that scrolls the list under an
+/// open dialog is a bug that looks like a redraw.
+#[allow(clippy::too_many_arguments)]
+fn route(
+    key: crossterm::event::KeyEvent,
+    open: &mut Option<Dialog>,
+    it: &mut Interaction,
+    live: &mut crate::sidebar::live::Live,
+    rendered: &Rendered,
+    viewport: u16,
+    total: usize,
+    width: u16,
+    height: u16,
+) -> KeyOutcome {
+    // Transient, so it lasts exactly until the next key -- clearing it only
+    // when a later `x` succeeds leaves it on screen through every `j` and `z`
+    // in between.
+    it.notice = None;
+
+    if let Some(dialog) = open.as_mut() {
+        match (key.code, key.modifiers) {
+            (KeyCode::Char('c'), m) if m.contains(KeyModifiers::CONTROL) => {
+                return KeyOutcome::Quit
+            }
+            (KeyCode::Esc, _) | (KeyCode::Char('q'), _) => *open = None,
+            (KeyCode::Char('j'), _) | (KeyCode::Down, _) => {
+                let last = dialog.len().saturating_sub(1);
+                let cursor = dialog.cursor_mut();
+                *cursor = (*cursor + 1).min(last);
+            }
+            (KeyCode::Char('k'), _) | (KeyCode::Up, _) => {
+                let cursor = dialog.cursor_mut();
+                *cursor = cursor.saturating_sub(1);
+            }
+            _ => {}
+        }
+        return KeyOutcome::Handled;
+    }
+
+    match (key.code, key.modifiers) {
+        (KeyCode::Char('x'), _) | (KeyCode::Char('?'), _) => {
+            if width < MIN_DIALOG_WIDTH || height < MIN_DIALOG_HEIGHT {
+                it.notice = Some(format!(
+                    "the frame is too small for a panel ({width}x{height}; \
+                     needs {MIN_DIALOG_WIDTH}x{MIN_DIALOG_HEIGHT})"
+                ));
+                return KeyOutcome::Handled;
+            }
+            *open = Some(match key.code {
+                KeyCode::Char('?') => Dialog::Keys { cursor: 0 },
+                _ => Dialog::menu(),
+            });
+            KeyOutcome::Handled
+        }
+        _ => apply_key(key, it, live, rendered, viewport, total),
+    }
+}
+
+fn panel_for(
+    dialog: &Dialog,
+    _live: &crate::sidebar::live::Live,
+    _cfg: &crate::sidebar::config::Loaded,
+) -> crate::sidebar::dialog::Panel {
+    use crate::sidebar::dialog::{Panel, Row};
+    match dialog {
+        Dialog::Menu { cursor } => Panel {
+            title: "Agent Watcher".into(),
+            rows: MENU
+                .iter()
+                .map(|(label, key)| Row::Entry {
+                    label: (*label).into(),
+                    value: (*key).into(),
+                    enabled: true,
+                })
+                .collect(),
+            footer: "j/k move · ↵ open · esc close".into(),
+            cursor: *cursor,
+        },
+        Dialog::Keys { cursor } => Panel {
+            title: "Keys".into(),
+            rows: Vec::new(),
+            footer: "esc close".into(),
+            cursor: *cursor,
+        },
+    }
 }
 
 fn apply_key(
@@ -317,12 +440,17 @@ pub fn run() -> i32 {
 
     let mut state = State::default();
     let mut live = crate::sidebar::live::Live::from(&cfg);
+    let mut open: Option<Dialog> = None;
     let mut it = Interaction {
         follow: true,
         ..Default::default()
     };
     let mut viewport: u16 = 0;
     let mut total: usize = 0;
+    let mut frame_size = ratatui::layout::Size {
+        width: crate::sidebar::view::MIN_WIDTH,
+        height: 1,
+    };
     let mut last_rendered = Rendered {
         scrollable: Vec::new(),
         pinned: Vec::new(),
@@ -363,10 +491,11 @@ pub fn run() -> i32 {
         }
 
         if dirty {
-            let size = terminal.size().unwrap_or(ratatui::layout::Size {
+            frame_size = terminal.size().unwrap_or(ratatui::layout::Size {
                 width: crate::sidebar::view::MIN_WIDTH,
                 height: 1,
             });
+            let size = frame_size;
             it.toggled.retain(|id| state.panes.contains_key(id));
 
             let prev_index = index_of(&last_rendered, it.cursor.as_deref());
@@ -389,6 +518,11 @@ pub fn run() -> i32 {
                     size.width,
                     now,
                 );
+            }
+
+            if let Some(notice) = &it.notice {
+                out.pinned
+                    .push(vec![crate::sidebar::view::Span::body(notice.clone())]);
             }
 
             let pinned_keep = out.pinned.len().min(size.height as usize);
@@ -434,6 +568,23 @@ pub fn run() -> i32 {
                         split[0],
                     );
                     frame.render_widget(Paragraph::new(foot.clone()), split[1]);
+                    if let Some(dialog) = open.as_ref() {
+                        let panel = panel_for(dialog, &live, &cfg);
+                        let w = area.width.min(60);
+                        let h = area.height.saturating_sub(2).min(20);
+                        let rect = ratatui::layout::Rect {
+                            x: area.x + (area.width - w) / 2,
+                            y: area.y + (area.height - h) / 2,
+                            width: w,
+                            height: h,
+                        };
+                        let lines: Vec<_> = crate::sidebar::dialog::render(&panel, w, h)
+                            .iter()
+                            .map(|line| to_line(line, live.theme, color))
+                            .collect();
+                        frame.render_widget(ratatui::widgets::Clear, rect);
+                        frame.render_widget(Paragraph::new(lines), rect);
+                    }
                 })
                 .expect("draw sidebar");
             last_rendered = out;
@@ -444,9 +595,17 @@ pub fn run() -> i32 {
             match crossterm::event::read() {
                 Ok(Event::Key(key)) => {
                     dirty = true;
-                    if let KeyOutcome::Quit =
-                        apply_key(key, &mut it, &mut live, &last_rendered, viewport, total)
-                    {
+                    if let KeyOutcome::Quit = route(
+                        key,
+                        &mut open,
+                        &mut it,
+                        &mut live,
+                        &last_rendered,
+                        viewport,
+                        total,
+                        frame_size.width,
+                        frame_size.height,
+                    ) {
                         return 0;
                     }
                 }
@@ -500,6 +659,211 @@ mod tests {
         assert!(age_tick_due(0, 60_000));
         assert!(!age_tick_due(60_000, 90_000));
         assert!(!age_tick_due(90_000, 0));
+    }
+
+    #[test]
+    fn x_opens_the_menu_and_esc_closes_it() {
+        let r = two_cards();
+        let mut it = Interaction {
+            follow: true,
+            ..Default::default()
+        };
+        let mut live = live_default();
+        let mut open: Option<Dialog> = None;
+
+        route(
+            press(KeyCode::Char('x')),
+            &mut open,
+            &mut it,
+            &mut live,
+            &r,
+            10,
+            40,
+            40,
+            20,
+        );
+        assert!(open.is_some(), "x opens the menu");
+
+        route(
+            press(KeyCode::Esc),
+            &mut open,
+            &mut it,
+            &mut live,
+            &r,
+            10,
+            40,
+            40,
+            20,
+        );
+        assert!(open.is_none(), "esc closes it rather than quitting");
+    }
+
+    /// One key is not enough: a router that forwards `k` and `PageDown` passes
+    /// a test that only presses `j`.
+    #[test]
+    fn no_key_reaches_the_card_list_while_a_panel_is_open() {
+        let r = two_cards();
+        for code in [
+            KeyCode::Char('j'),
+            KeyCode::Char('k'),
+            KeyCode::Char('o'),
+            KeyCode::Enter,
+            KeyCode::Char('z'),
+            KeyCode::Up,
+            KeyCode::Down,
+            KeyCode::PageUp,
+            KeyCode::PageDown,
+        ] {
+            let mut it = Interaction {
+                follow: true,
+                offset: 7,
+                ..Default::default()
+            };
+            it.cursor = Some("a".into());
+            let mut live = live_default();
+            let before = (
+                it.offset,
+                it.cursor.clone(),
+                it.toggled.clone(),
+                live.hide_idle,
+            );
+            let mut open = Some(Dialog::menu());
+
+            route(
+                press(code),
+                &mut open,
+                &mut it,
+                &mut live,
+                &r,
+                10,
+                40,
+                40,
+                20,
+            );
+            assert_eq!(
+                (
+                    it.offset,
+                    it.cursor.clone(),
+                    it.toggled.clone(),
+                    live.hide_idle
+                ),
+                before,
+                "{code:?} reached the card list"
+            );
+        }
+    }
+
+    #[test]
+    fn a_panels_close_keys_close_it_rather_than_quitting() {
+        let r = two_cards();
+        for code in [KeyCode::Esc, KeyCode::Char('q')] {
+            let mut it = Interaction::default();
+            let mut live = live_default();
+            let mut open = Some(Dialog::menu());
+            let outcome = route(
+                press(code),
+                &mut open,
+                &mut it,
+                &mut live,
+                &r,
+                10,
+                40,
+                40,
+                20,
+            );
+            assert!(
+                matches!(outcome, KeyOutcome::Handled),
+                "{code:?} quit the sidebar"
+            );
+            assert!(open.is_none());
+        }
+    }
+
+    #[test]
+    fn the_same_keys_still_quit_when_no_panel_is_open() {
+        let r = two_cards();
+        for code in [KeyCode::Esc, KeyCode::Char('q')] {
+            let mut it = Interaction::default();
+            let mut live = live_default();
+            let mut open = None;
+            assert!(matches!(
+                route(
+                    press(code),
+                    &mut open,
+                    &mut it,
+                    &mut live,
+                    &r,
+                    10,
+                    40,
+                    40,
+                    20
+                ),
+                KeyOutcome::Quit
+            ));
+        }
+    }
+
+    #[test]
+    fn the_notice_lasts_exactly_one_key() {
+        let r = two_cards();
+        let mut it = Interaction::default();
+        let mut live = live_default();
+        let mut open = None;
+        route(
+            press(KeyCode::Char('x')),
+            &mut open,
+            &mut it,
+            &mut live,
+            &r,
+            10,
+            40,
+            19,
+            20,
+        );
+        assert!(it.notice.is_some(), "the refusal said why");
+
+        route(
+            press(KeyCode::Char('j')),
+            &mut open,
+            &mut it,
+            &mut live,
+            &r,
+            10,
+            40,
+            19,
+            20,
+        );
+        assert!(
+            it.notice.is_none(),
+            "and did not linger through the next key"
+        );
+    }
+
+    #[test]
+    fn a_frame_too_small_declines_to_open() {
+        let r = two_cards();
+        for (w, h) in [(19u16, 20u16), (40, 7)] {
+            let mut it = Interaction::default();
+            let mut live = live_default();
+            let mut open = None;
+            route(
+                press(KeyCode::Char('x')),
+                &mut open,
+                &mut it,
+                &mut live,
+                &r,
+                10,
+                40,
+                w,
+                h,
+            );
+            assert!(open.is_none(), "{w}x{h} should decline");
+            assert!(
+                it.notice.as_deref().is_some_and(|n| n.contains("small")),
+                "and say why: {:?}",
+                it.notice
+            );
+        }
     }
 
     #[test]
