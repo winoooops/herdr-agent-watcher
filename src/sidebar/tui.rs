@@ -229,6 +229,12 @@ impl Dialog {
     /// Whether `esc` steps back to the menu or closes the sidebar's overlay
     /// entirely. Opening settings with `s` and being dropped into a menu you
     /// never saw is not going back.
+    /// Whether a panel opened from here should offer a way back to the menu:
+    /// either this IS the menu, or this was itself reached through it.
+    fn leads_back_to_menu(&self) -> bool {
+        matches!(self, Dialog::Menu { .. }) || self.from_menu()
+    }
+
     fn from_menu(&self) -> bool {
         match self {
             Dialog::Settings { from_menu, .. } | Dialog::Doctor { from_menu, .. } => *from_menu,
@@ -549,11 +555,15 @@ fn route(
             // `s` and `d` reach their panels from anywhere, including from
             // inside another one -- the menu lists them, so they have to work
             // there or the menu is lying.
+            //
+            // And they carry the trail: pressing `s` while the menu is open
+            // was reached THROUGH the menu, so esc goes back to it. Losing
+            // that is why esc closed everything from a panel the menu opened.
             (KeyCode::Char('s'), _) if !matches!(dialog, Dialog::Settings { .. }) => {
-                *open = Some(settings_dialog(false));
+                *open = Some(settings_dialog(dialog.leads_back_to_menu()));
             }
             (KeyCode::Char('d'), _) if !matches!(dialog, Dialog::Doctor { .. }) => {
-                *open = Some(doctor_dialog(false));
+                *open = Some(doctor_dialog(dialog.leads_back_to_menu()));
             }
             (KeyCode::Char('s'), _) => {
                 it.notice = Some(
@@ -1208,6 +1218,127 @@ mod tests {
     fn a_fresh_report_is_not_taken_now_ago() {
         assert_eq!(taken_ago(1_000, 1_000), "now");
         assert_eq!(taken_ago(1_000, 1_000 + 120_000), "2m ago");
+    }
+
+    /// The menu lists `s` and `d`, so reaching a panel that way was reached
+    /// through the menu -- and esc has somewhere to go back to. Without this,
+    /// the advertised shortcut and the `↵` beside it behave differently.
+    #[test]
+    fn a_panel_opened_from_the_menu_goes_back_to_it_however_it_was_opened() {
+        let r = two_cards();
+        for code in [KeyCode::Enter, KeyCode::Char('s')] {
+            let mut it = Interaction::default();
+            let mut live = live_default();
+            let mut open = Some(Dialog::menu());
+            route(
+                press(code),
+                &mut open,
+                &mut it,
+                &mut live,
+                &r,
+                10,
+                40,
+                60,
+                24,
+            );
+            assert!(
+                matches!(open, Some(Dialog::Settings { .. })),
+                "{code:?} did not open settings"
+            );
+            route(
+                press(KeyCode::Esc),
+                &mut open,
+                &mut it,
+                &mut live,
+                &r,
+                10,
+                40,
+                60,
+                24,
+            );
+            assert!(
+                matches!(open, Some(Dialog::Menu { .. })),
+                "{code:?}: esc should step back to the menu, not close everything"
+            );
+        }
+    }
+
+    /// A config the panel cannot parse still opens -- showing the values in
+    /// force, which are the defaults `Loaded` fell back to -- and refuses to
+    /// save. Saving anyway would discard whatever the operator was in the
+    /// middle of writing.
+    #[test]
+    fn a_broken_config_opens_the_panel_and_refuses_the_save() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let broken = "[daemon]\ninterval_ms = 3000\n[list\nscope = \"workspace\"\n";
+        std::fs::write(&path, broken).unwrap();
+
+        let live = live_default();
+        let mut dialog = Dialog::Settings {
+            cursor: 0,
+            from_menu: false,
+            dirty: vec![crate::sidebar::live::Setting::Sort],
+            path: Some(path.clone()),
+            source: Ok(Some(broken.to_string())),
+        };
+        let error = save_settings(&mut dialog, &live).expect_err("must refuse");
+        assert!(error.contains("not valid TOML"), "{error}");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            broken,
+            "the file the operator was editing is untouched"
+        );
+    }
+
+    /// The other broken case: the file could not be read at all.
+    #[test]
+    fn an_unreadable_config_refuses_the_save_with_the_read_error() {
+        let live = live_default();
+        let mut dialog = Dialog::Settings {
+            cursor: 0,
+            from_menu: false,
+            dirty: vec![crate::sidebar::live::Setting::Sort],
+            path: Some("/nowhere/config.toml".into()),
+            source: Err("read /nowhere/config.toml: no such file".into()),
+        };
+        let error = save_settings(&mut dialog, &live).expect_err("must refuse");
+        assert!(error.contains("no such file"), "{error}");
+    }
+
+    #[test]
+    fn a_panel_opened_directly_closes_on_esc() {
+        let r = two_cards();
+        let mut it = Interaction::default();
+        let mut live = live_default();
+        let mut open = None;
+        route(
+            press(KeyCode::Char('s')),
+            &mut open,
+            &mut it,
+            &mut live,
+            &r,
+            10,
+            40,
+            60,
+            24,
+        );
+        assert!(matches!(open, Some(Dialog::Settings { .. })));
+        route(
+            press(KeyCode::Esc),
+            &mut open,
+            &mut it,
+            &mut live,
+            &r,
+            10,
+            40,
+            60,
+            24,
+        );
+        assert!(
+            open.is_none(),
+            "there was no menu to go back to, so esc closes"
+        );
     }
 
     #[test]
