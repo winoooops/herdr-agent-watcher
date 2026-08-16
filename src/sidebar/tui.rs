@@ -186,6 +186,7 @@ enum KeyOutcome {
 pub(crate) enum Dialog {
     Menu { cursor: usize },
     Keys { cursor: usize },
+    Settings { cursor: usize },
 }
 
 impl Dialog {
@@ -195,7 +196,9 @@ impl Dialog {
 
     fn cursor_mut(&mut self) -> &mut usize {
         match self {
-            Dialog::Menu { cursor } | Dialog::Keys { cursor } => cursor,
+            Dialog::Menu { cursor }
+            | Dialog::Keys { cursor }
+            | Dialog::Settings { cursor } => cursor,
         }
     }
 
@@ -203,6 +206,7 @@ impl Dialog {
         match self {
             Dialog::Menu { .. } => MENU.len(),
             Dialog::Keys { .. } => KEYS.len(),
+            Dialog::Settings { .. } => crate::sidebar::live::SETTINGS.len(),
         }
     }
 }
@@ -236,7 +240,7 @@ const KEYS: [(&str, &str); 12] = [
 /// `r` only means something with the doctor panel open and `↵` only inside
 /// settings, so those arrive with the panels that give them meaning.
 #[cfg(test)]
-const ROUTED: [(&str, KeyCode, KeyModifiers, &str, Option<Dialog>); 9] = [
+const ROUTED: [(&str, KeyCode, KeyModifiers, &str, Option<Dialog>); 10] = [
     ("j / ↓", KeyCode::Char('j'), KeyModifiers::NONE, "a", None),
     ("k / ↑", KeyCode::Char('k'), KeyModifiers::NONE, "b", None),
     ("o / ↵", KeyCode::Char('o'), KeyModifiers::NONE, "a", None),
@@ -250,6 +254,7 @@ const ROUTED: [(&str, KeyCode, KeyModifiers, &str, Option<Dialog>); 9] = [
     ),
     ("x", KeyCode::Char('x'), KeyModifiers::NONE, "a", None),
     ("?", KeyCode::Char('?'), KeyModifiers::NONE, "a", None),
+    ("s", KeyCode::Char('s'), KeyModifiers::NONE, "a", None),
     ("q / esc", KeyCode::Esc, KeyModifiers::NONE, "a", None),
     (
         "ctrl-c",
@@ -300,13 +305,26 @@ fn route(
                 let cursor = dialog.cursor_mut();
                 *cursor = cursor.saturating_sub(1);
             }
+            (KeyCode::Enter, _) | (KeyCode::Char('o'), _) => {
+                if let Dialog::Settings { cursor } = dialog {
+                    if let Some(setting) = crate::sidebar::live::SETTINGS.get(*cursor) {
+                        // Read here, not in `live.rs`, which stays pure and
+                        // takes the workspace as an argument.
+                        let workspace = std::env::var("HERDR_WORKSPACE_ID").ok();
+                        live.cycle(*setting, workspace.as_deref());
+                    }
+                }
+                if let Dialog::Menu { cursor: 0 } = dialog {
+                    *open = Some(Dialog::Settings { cursor: 0 });
+                }
+            }
             _ => {}
         }
         return KeyOutcome::Handled;
     }
 
     match (key.code, key.modifiers) {
-        (KeyCode::Char('x'), _) | (KeyCode::Char('?'), _) => {
+        (KeyCode::Char('x'), _) | (KeyCode::Char('?'), _) | (KeyCode::Char('s'), _) => {
             if width < MIN_DIALOG_WIDTH || height < MIN_DIALOG_HEIGHT {
                 it.notice = Some(format!(
                     "the frame is too small for a panel ({width}x{height}; \
@@ -316,6 +334,7 @@ fn route(
             }
             *open = Some(match key.code {
                 KeyCode::Char('?') => Dialog::Keys { cursor: 0 },
+                KeyCode::Char('s') => Dialog::Settings { cursor: 0 },
                 _ => Dialog::menu(),
             });
             KeyOutcome::Handled
@@ -357,6 +376,32 @@ fn panel_for(
             footer: "esc close".into(),
             cursor: *cursor,
         },
+        Dialog::Settings { cursor } => {
+            let mut rows: Vec<Row> = crate::sidebar::live::SETTINGS
+                .iter()
+                .map(|setting| Row::Entry {
+                    label: setting.label().into(),
+                    value: _live.value(*setting),
+                    enabled: true,
+                })
+                .collect();
+            rows.push(Row::Rule);
+            rows.push(Row::Entry {
+                label: "interval_ms".into(),
+                value: crate::daemon::config::DaemonConfig::load()
+                    .interval
+                    .as_millis()
+                    .to_string(),
+                enabled: false,
+            });
+            rows.push(Row::Note("needs restart-daemon; not changed here".into()));
+            Panel {
+                title: "Settings".into(),
+                rows,
+                footer: "j/k move · ↵ change · s save · esc close".into(),
+                cursor: *cursor,
+            }
+        }
     }
 }
 
@@ -980,10 +1025,8 @@ mod tests {
             KEYS.iter().map(|(key, _)| *key).collect();
         let driven: std::collections::BTreeSet<&str> =
             ROUTED.iter().map(|(key, ..)| *key).collect();
-        // `s`, `d` and `r` only mean something with a panel open; Tasks 5 and 8
-        // move them from this exception into ROUTED with their contexts.
-        let pending: std::collections::BTreeSet<&str> =
-            ["s", "d", "r"].into_iter().collect();
+        // `d` and `r` arrive with the doctor panel in Task 8.
+        let pending: std::collections::BTreeSet<&str> = ["d", "r"].into_iter().collect();
         assert_eq!(
             sheet
                 .difference(&driven)
@@ -995,6 +1038,81 @@ mod tests {
         assert!(
             driven.difference(&sheet).next().is_none(),
             "a key pressed by the table but missing from the sheet"
+        );
+    }
+
+    /// Through the real router, and asserting on what gets drawn. A panel
+    /// wired to nothing passes every test in `live.rs`.
+    #[test]
+    fn changing_sort_through_the_panel_reorders_the_drawn_cards() {
+        use crate::sidebar::live::Setting;
+        let mut state = crate::sidebar::reducer::State::default();
+        for (id, position, seq) in [("first", 0u32, 1u64), ("second", 1, 99)] {
+            let mut t = crate::daemon::store::PaneTelemetry::with_agent("claude");
+            t.position = Some(position);
+            t.updated_seq = seq;
+            t.card_state = crate::daemon::store::CardState::Running;
+            state.panes.insert(id.to_string(), t);
+        }
+        // Somewhere for a save to land, so the test can prove none did.
+        let config_dir = tempfile::tempdir().expect("tempdir");
+        let cfg = crate::sidebar::config::Loaded::from_missing();
+        let toggled = std::collections::HashSet::new();
+        let mut live = crate::sidebar::live::Live::from(&cfg);
+
+        let order = |live: &crate::sidebar::live::Live| {
+            crate::sidebar::view::render(
+                &state,
+                &view_input(&cfg, live, &toggled, None),
+                60,
+                0,
+            )
+            .spans
+            .iter()
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>()
+        };
+        assert_eq!(order(&live), vec!["first", "second"], "position order");
+
+        // The panel's ↵ on the sort row, through the router.
+        let mut it = Interaction::default();
+        let mut open = Some(Dialog::Settings { cursor: 0 });
+        let r = two_cards();
+        crate::test_env::with_env(
+            &[
+                (
+                    "HERDR_PLUGIN_CONFIG_DIR",
+                    Some(config_dir.path().into()),
+                ),
+                ("HERDR_WORKSPACE_ID", Some("w4".into())),
+            ],
+            || {
+                route(
+                    press(KeyCode::Enter),
+                    &mut open,
+                    &mut it,
+                    &mut live,
+                    &r,
+                    10,
+                    40,
+                    60,
+                    24,
+                );
+            },
+        );
+
+        assert_eq!(live.value(Setting::Sort), "smart");
+        assert_eq!(
+            order(&live),
+            vec!["second", "first"],
+            "smart ranks by recency"
+        );
+
+        // "with no file written" has to observe a file. A route that also
+        // saved would pass every assertion above.
+        assert!(
+            !config_dir.path().join("config.toml").exists(),
+            "cycling a setting must not write anything"
         );
     }
 
