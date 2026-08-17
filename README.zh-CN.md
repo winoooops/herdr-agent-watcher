@@ -91,6 +91,10 @@ herdr plugin action invoke <id> --plugin herdr-agent-watcher
 
 ## 配置
 
+大部分设置从 sidebar 里改更省事：打开它，按 `x`，设置面板会实时编辑同一个文件 —— 每改一项
+都能立刻在卡片上看到效果，而且只会写入你动过的键。需要写注释、需要面板没有暴露的键，或者
+要把配置纳入版本管理时，再直接编辑文件。
+
 设置放在**插件自己的** `config.toml` 里，不是 Herdr 的那个。Herdr 会忽略它不认识的表，
 所以把 `[daemon]` 写进 `~/.config/herdr/config.toml` 不会有任何效果，只会让
 `herdr config check` 报告一个未知小节。
@@ -238,6 +242,9 @@ statusLine 不会被动** —— 桥接只收回仍然属于它自己的东西�
 
 ## Doctor
 
+同样的报告在 sidebar 里一个按键就能看到：`x`，然后选 doctor 那一行，`r` 重新生成。需要在
+Herdr pane 之外查看、或者写进脚本时，再用命令行。
+
 卡片显示 `— bridge not connected (README)` 时用它；或者任何时候指标缺失、你想知道为什么。
 
 ```sh
@@ -322,7 +329,15 @@ sidecar 树中，而那棵树是冻结的。
       （会误伤长时间空闲但仍开着的 pane）
 - [x] 每个 release 发布预编译二进制，让安装不再需要 `cargo`。`[[build]]` 现在跑
       `scripts/fetch-or-build.sh`：下载匹配平台的产物、校验 SHA256，任何一步失败就改为编译
-- [ ] sidebar 的 `:` 命令模式，以及整页 doctor 视图
+- [x] sidebar 内的设置面板与 doctor 面板，让最常用的配置和最常用的诊断都不必离开这个 pane
+- [x] 扛住设置面板自己下达的 daemon 重启：卡片留在屏上、按秒计数、自行重新订阅，而不是停在
+      一个等待按键的死胡同
+- [ ] 告诉 sidebar 它已经过期。升级插件后，已经开着的 sidebar 会继续跑旧二进制，界面上没有
+      任何提示 —— 0.1.4 测试时我们就被它误导过。让 state socket 的 hello 带上版本，不一致
+      时在底部钉一条提示
+- [ ] doctor 面板里可操作的修复建议 —— `↵` 复制到剪贴板而不是直接执行，因为这些修复要改的是
+      本插件之外的文件
+- [ ] sidebar 的 `:` 命令模式
 - [ ] 修掉 flaky 的 `pane_without_cwd_uses_herdrs_cwd_for_that_pane` 测试
 
 ## 本地开发
