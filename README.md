@@ -153,8 +153,25 @@ herdr plugin action invoke open-sidebar --plugin herdr-agent-watcher
 
 Each invocation intentionally opens another split. Cards show agent state, agent/model,
 title, context use, cache hit rate, cost, tool count, and the three newest tool traces.
-Use `j`/`k` or PageUp/PageDown to scroll, `o`/`↵` to expand, `z` to hide idle agents, and
-`q`, Escape, or Ctrl-C to close.
+Use `j`/`k` or PageUp/PageDown to scroll, `o`/`↵` to expand, `z` to hide idle agents,
+`x` to open the menu, `?` to list every key, `s` for settings, `d` for doctor, and
+`q`/`Esc` or Ctrl-C to close.
+
+`x` opens a menu, `?` lists every key. From the menu — or directly with `s` and `d` — a
+settings panel and a doctor panel. `Esc` is one level back wherever you are: a panel returns
+to the menu, and the menu closes.
+
+Settings change what you are looking at as you cycle them — `l`/`→` forward, `h`/`←` back,
+`o`/`↵` forward as well — and nothing is written until you press `s`. Saving edits only the
+keys you changed and leaves the rest of `config.toml`, including `[daemon]`, `[agent.*]` and
+your comments, exactly as you wrote it.
+
+`interval_ms` is the exception: it belongs to the daemon, so changing it does nothing until
+the daemon restarts. Leaving the panel with it changed asks first — restart now, or put it
+back the way it was — and will not let you past without an answer.
+
+The doctor panel shows what `doctor` prints, without leaving the sidebar. `r` rebuilds it,
+and `j`/`k` scroll it when the report is taller than the pane.
 
 With `scope = "workspace"` each sidebar lists only the panes in its own workspace, which is
 what makes opening one per workspace useful. A pane the daemon has not placed yet is shown
@@ -179,8 +196,11 @@ open_sidebar = "prefix+a"
 `unbind-sidebar-key` takes it back out. **Run it before uninstalling the plugin**, or the
 binding outlives the action it points at — Herdr runs nothing on uninstall.
 
-If the daemon is unavailable or disconnects, the pane says so and waits for a key. Its
-state socket (`$HERDR_PLUGIN_STATE_DIR/herdr-agent-watcher-state.sock`,
+If the daemon is unavailable when the sidebar opens, the pane says so and waits for a key.
+If it disconnects while the sidebar is open — usually the restart the settings panel just
+ordered — the cards stay on screen, a notice counts the seconds, and the sidebar resubscribes
+on its own; keys keep working the whole time. After a minute without the daemon it stops
+trying and waits for a key. Its state socket (`$HERDR_PLUGIN_STATE_DIR/herdr-agent-watcher-state.sock`,
 `WIRE_VERSION = 2`) is plugin-internal, not a public API.
 
 Stop the daemon with:

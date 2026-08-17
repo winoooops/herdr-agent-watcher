@@ -1,6 +1,6 @@
 id = "herdr-agent-watcher"
 name = "Agent Watcher"
-version = "0.1.3"
+version = "0.1.4"
 min_herdr_version = "0.8.0"
 description = "Coding-agent observability: transcript watchers, metrics, and notifications for Claude Code, Codex, Kimi Code, and OpenCode."
 platforms = ["macos", "linux"]

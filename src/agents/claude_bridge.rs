@@ -724,22 +724,13 @@ pub fn cli_disable(_args: &[String]) -> i32 {
     }
 }
 
-pub fn cli_doctor(_args: &[String]) -> i32 {
+/// Everything `doctor::run` needs, gathered once. The sidebar's doctor panel
+/// is the second reader; a copy of this is how the two would come to show
+/// different checks.
+pub(crate) fn doctor_report() -> Result<crate::agents::doctor::Report, String> {
     use crate::agents::doctor;
-    let settings = match crate::agents::bridge_settings::user_settings_path() {
-        Ok(path) => path,
-        Err(error) => {
-            eprintln!("{error}");
-            return 1;
-        }
-    };
-    let (statusline, attention, _, _) = match bridge_paths() {
-        Ok(paths) => paths,
-        Err(error) => {
-            eprintln!("{error}");
-            return 1;
-        }
-    };
+    let settings = crate::agents::bridge_settings::user_settings_path()?;
+    let (statusline, attention, _, _) = bridge_paths()?;
     let me = std::env::current_exe().unwrap_or_default();
     let socket = crate::daemon::state_socket_path();
     let client = crate::herdr::client::HerdrClient::from_env();
@@ -771,7 +762,7 @@ pub fn cli_doctor(_args: &[String]) -> i32 {
             let ours = crate::sidebar::config::config_path()?;
             (!tables.is_empty()).then_some((tables, herdr, ours))
         });
-    let report = doctor::run(
+    Ok(doctor::run(
         &socket,
         &settings,
         &statusline,
@@ -781,9 +772,43 @@ pub fn cli_doctor(_args: &[String]) -> i32 {
         &|pane, session| resolve_status_path(&socket, pane, session).ok(),
         &config_problems,
         misplaced,
-    );
-    print!("{}", doctor::render(&report));
-    0
+    ))
+}
+
+/// The value after `flag`, if it was passed.
+fn flag_value(args: &[String], flag: &str) -> Option<String> {
+    args.iter()
+        .position(|argument| argument == flag)
+        .and_then(|index| args.get(index + 1))
+        .cloned()
+}
+
+pub fn cli_doctor(args: &[String]) -> i32 {
+    // The failure this command reports most often is the missing state
+    // directory, and it names `--state-dir` as the fix -- so the flag has to
+    // work here, not only in `claude-bridge`. Doctor is the one command you
+    // run by hand, outside the plugin process that would have set the
+    // variable. Every path it inspects comes from that variable, so setting
+    // it is the whole of honouring the flag.
+    if let Some(dir) = flag_value(args, "--state-dir") {
+        match resolve_state_dir(Some(Path::new(&dir))) {
+            Ok(absolute) => std::env::set_var("HERDR_PLUGIN_STATE_DIR", absolute),
+            Err(error) => {
+                eprintln!("{error}");
+                return 1;
+            }
+        }
+    }
+    match doctor_report() {
+        Ok(report) => {
+            print!("{}", crate::agents::doctor::render(&report));
+            0
+        }
+        Err(error) => {
+            eprintln!("{error}");
+            1
+        }
+    }
 }
 
 fn process_argv_for_pane(pane_id: &str) -> Vec<String> {
@@ -820,6 +845,39 @@ fn process_argv_for_pane(pane_id: &str) -> Vec<String> {
 mod tests {
     use super::*;
     use crate::test_env::with_env;
+
+    /// Both readers call this; the sidebar's panel is the second. A copy is
+    /// how the two come to show different checks.
+    #[test]
+    fn the_report_is_gathered_in_one_place() {
+        let state = tempfile::tempdir().expect("tempdir");
+        let claude = tempfile::tempdir().expect("tempdir");
+        let config = tempfile::tempdir().expect("tempdir");
+        let report = crate::test_env::with_env(
+            &[
+                ("HERDR_PLUGIN_STATE_DIR", Some(state.path().into())),
+                ("CLAUDE_CONFIG_DIR", Some(claude.path().into())),
+                ("HERDR_PLUGIN_CONFIG_DIR", Some(config.path().into())),
+                (
+                    "HERDR_SOCKET_PATH",
+                    Some(state.path().join("absent.sock").into()),
+                ),
+            ],
+            doctor_report,
+        )
+        .expect("the gatherer produced a report");
+        assert!(report
+            .checks
+            .iter()
+            .any(|c| c.id == crate::agents::doctor::CheckId::ConfigValid));
+        assert!(
+            report
+                .checks
+                .iter()
+                .any(|c| c.id == crate::agents::doctor::CheckId::DaemonReachable),
+            "with no daemon this is a finding, not an error"
+        );
+    }
 
     fn fake_state_socket(dir: &std::path::Path, reply: Option<&str>) -> std::path::PathBuf {
         use std::io::{BufRead, BufReader, Write};

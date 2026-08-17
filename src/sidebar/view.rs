@@ -174,13 +174,6 @@ fn cwd_of(t: &PaneTelemetry, cx: &CardCtx<'_>) -> Option<String> {
     Some(raw.rsplit('/').next().unwrap_or(&raw).to_string())
 }
 
-fn pad_to(line: &mut Line, width: u16) {
-    let used: usize = line.iter().map(|s| format::width(&s.text)).sum();
-    if (used as u16) < width {
-        line.push(Span::body(" ".repeat(width as usize - used)));
-    }
-}
-
 fn justify(left: Line, right: Line, width: u16) -> Line {
     let l: usize = left.iter().map(|s| format::width(&s.text)).sum();
     let r: usize = right.iter().map(|s| format::width(&s.text)).sum();
@@ -908,7 +901,15 @@ fn config_notice(status: crate::sidebar::style::ConfigStatus, width: u16) -> Str
 }
 
 fn footer(width: u16) -> Line {
-    let hints = [("j/k", "move"), ("o/↵", "expand"), ("z", "idle")];
+    // `x` first among the ones that drop: a panel layer nothing points at is
+    // a panel layer nobody finds. The order here is the order they survive
+    // narrowing, so this keeps `x` longer than `idle`.
+    let hints = [
+        ("j/k", "move"),
+        ("o/↵", "expand"),
+        ("x", "menu"),
+        ("z", "idle"),
+    ];
     let cost = |keep: usize| -> usize {
         if keep == 0 {
             return 3;
@@ -1992,7 +1993,7 @@ mod tests {
                 .iter()
                 .map(|l| l.iter().map(|s| s.text.as_str()).collect::<String>())
                 .collect::<Vec<_>>(),
-            vec!["── j/k move · o/↵ expand · z idle"],
+            vec!["── j/k move · o/↵ expand · x menu · z idle"],
             "no config notice, no idle notice, footer last"
         );
         assert_eq!(
@@ -2115,8 +2116,14 @@ mod tests {
 
     #[test]
     fn the_footer_reads_exactly_as_specified_and_drops_from_the_end() {
-        assert_eq!(plain(&[footer(44)])[0], "── j/k move · o/↵ expand · z idle");
-        assert_eq!(plain(&[footer(34)])[0], "── j/k move · o/↵ expand · z idle");
+        assert_eq!(
+            plain(&[footer(60)])[0],
+            "── j/k move · o/↵ expand · x menu · z idle"
+        );
+        // `x menu` outlives `z idle` as the frame narrows: a panel layer
+        // nothing points at is a panel layer nobody finds, whereas `z` is
+        // discoverable from the `?` sheet once you know `x`.
+        assert_eq!(plain(&[footer(34)])[0], "── j/k move · o/↵ expand · x menu");
         assert_eq!(plain(&[footer(30)])[0], "── j/k move · o/↵ expand");
         assert_eq!(plain(&[footer(12)])[0], "── j/k move");
     }
