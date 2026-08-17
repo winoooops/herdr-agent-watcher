@@ -124,9 +124,10 @@ Run [`doctor`](#doctor) to see whether a setting was rejected and what was used 
 herdr plugin action invoke open-sidebar --plugin herdr-agent-watcher
 ```
 
-Each invocation intentionally opens another split — `prefix+a` by default, which is `ctrl+b`
-then `a` with Herdr's own default prefix. Cards show agent state, agent/model, title,
-context use, cache hit rate, cost, tool count, and the three newest tool traces.
+Each invocation intentionally opens another split. No key opens it until you bind one with
+the steps below; the default is `prefix+a`, which is `ctrl+b` then `a` with Herdr's own
+prefix. Cards show agent state, agent/model, title, context use, cache hit rate, cost, tool
+count, and the three newest tool traces.
 Use `j`/`k` or PageUp/PageDown to scroll, `o`/`↵` to expand, `z` to hide idle agents,
 `x` to open the menu, `?` to list every key, and `q`/`Esc` or Ctrl-C to close.
 
@@ -136,9 +137,7 @@ nothing, so `x` is the one way in. `Esc` is one level back wherever you are: a p
 to the menu, and the menu closes.
 
 Settings change what you are looking at as you cycle them — `l`/`→` forward, `h`/`←` back,
-`o`/`↵` forward as well — and nothing is written until you press `s`. Saving edits only the
-keys you changed and leaves the rest of `config.toml`, including `[daemon]`, `[agent.*]` and
-your comments, exactly as you wrote it.
+`o`/`↵` forward as well — and nothing is written until you press `s`.
 
 `interval_ms` is the exception: it belongs to the daemon, so changing it does nothing until
 the daemon restarts. Leaving the panel with it changed asks first — restart now, or put it
@@ -147,10 +146,9 @@ back the way it was — and will not let you past without an answer.
 The doctor panel shows what `doctor` prints, without leaving the sidebar. `r` rebuilds it,
 and `j`/`k` scroll it when the report is taller than the pane.
 
-With `scope = "workspace"` each sidebar lists only the panes in its own workspace, which is
-what makes opening one per workspace useful. A pane the daemon has not placed yet is shown
-rather than hidden. Without `HERDR_WORKSPACE_ID` — running the sidebar outside a Herdr pane
-— the scope falls back to `all` and the sidebar says so above its footer.
+`scope = "workspace"` is what makes opening one sidebar per workspace useful. A pane the
+daemon has not placed yet is shown rather than hidden, and when the scope falls back to
+`all` the sidebar says so above its footer.
 
 To open it with a key:
 
@@ -159,13 +157,7 @@ herdr plugin action invoke bind-sidebar-key --plugin herdr-agent-watcher
 ```
 
 That writes the binding into **Herdr's** config, refusing if the key is already taken and
-naming what holds it. The default is `prefix+a` — with Herdr's default prefix, `ctrl+b` then
-`a`. Change it in the plugin's `config.toml` before binding:
-
-```toml
-[keys]
-open_sidebar = "prefix+a"
-```
+naming what holds it. For a different key, set `keys.open_sidebar` before running it.
 
 `unbind-sidebar-key` takes it back out. **Run it before uninstalling the plugin**, or the
 binding outlives the action it points at — Herdr runs nothing on uninstall.

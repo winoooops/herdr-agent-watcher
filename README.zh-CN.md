@@ -120,8 +120,9 @@ sort  = "position"
 herdr plugin action invoke open-sidebar --plugin herdr-agent-watcher
 ```
 
-每次调用都会**有意**新开一个分屏 —— 默认快捷键是 `prefix+a`，配合 Herdr 自身的默认前缀
-就是 `ctrl+b` 再按 `a`。卡片显示 agent 状态、agent/模型、标题、上下文用量、
+每次调用都会**有意**新开一个分屏。在你绑定之前它没有快捷键 —— 绑定步骤见下文；默认是
+`prefix+a`，配合 Herdr 自身的默认前缀就是先按 `ctrl+b` 再按 `a`。
+卡片显示 agent 状态、agent/模型、标题、上下文用量、
 缓存命中率、成本、工具调用数，以及最近三条工具调用记录。`j`/`k` 或 PageUp/PageDown 滚动，
 `o`/`↵` 展开，`z` 隐藏空闲 agent，`x` 打开菜单，`?` 列出所有按键，`q`/`Esc` 或
 Ctrl-C 关闭。
@@ -131,8 +132,7 @@ Ctrl-C 关闭。
 `Esc` 在任何位置都只退一级：面板退回菜单，菜单则关闭。
 
 循环切换设置时，你正在查看的内容会立即变化 —— `l`/`→` 向前、`h`/`←` 向后，`o`/`↵` 同样
-向前 —— 按下 `s` 之前不会写入任何内容。保存只会编辑你更改过的键，并让 `config.toml` 的
-其余部分（包括 `[daemon]`、`[agent.*]` 和你的注释）完全保持原样。
+向前 —— 按下 `s` 之前不会写入任何内容。
 
 `interval_ms` 是例外：它属于 daemon，因此改动在 daemon 重启前不会生效。改过它之后要离开
 面板时会先询问 —— 立即重启，或改回原值 —— 不作答就无法离开。
@@ -140,10 +140,9 @@ Ctrl-C 关闭。
 doctor 面板会在不离开 sidebar 的情况下显示 `doctor` 打印的内容。按 `r` 重新生成报告；
 报告比 pane 高时用 `j`/`k` 滚动。
 
-设置 `scope = "workspace"` 后，每个 sidebar 只列出自身 workspace 中的 pane，这使得为每个
-workspace 各开一个 sidebar 真正有用。daemon 尚未确定 workspace 的 pane 会显示出来，而不会
-被隐藏。在没有 `HERDR_WORKSPACE_ID` 时 —— 也就是在 Herdr pane 外运行 sidebar —— scope
-会回退到 `all`，sidebar 也会在 footer 上方说明原因。
+`scope = "workspace"` 正是「为每个 workspace 各开一个 sidebar」这件事有意义的原因。daemon
+尚未确定 workspace 的 pane 会显示出来而不是被隐藏；scope 回退到 `all` 时，sidebar 会在
+footer 上方说明原因。
 
 要用快捷键打开它：
 
@@ -152,13 +151,7 @@ herdr plugin action invoke bind-sidebar-key --plugin herdr-agent-watcher
 ```
 
 这会把绑定写入 **Herdr 的**配置；如果这个键已经被占用，操作会拒绝并指出占用它的项目。
-默认值是 `prefix+a` —— 使用 Herdr 的默认 prefix 时，就是先按 `ctrl+b` 再按 `a`。
-绑定前可在插件的 `config.toml` 中修改：
-
-```toml
-[keys]
-open_sidebar = "prefix+a"
-```
+想换一个键，运行它之前先设好 `keys.open_sidebar`。
 
 `unbind-sidebar-key` 会移除该绑定。**卸载插件前先运行它**，否则绑定会比它指向的 action
 存留得更久 —— Herdr 卸载插件时不会运行任何命令。
