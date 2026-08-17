@@ -274,6 +274,42 @@ bridge the other three agents do not, why it installs into Claude's own settings
 intercepting `PATH`, why the daemon owns the destination, and what a broken bridge is
 required to degrade to.
 
+## Local development
+
+```sh
+cargo build --release
+herdr plugin link "$PWD"
+herdr plugin action invoke restart-daemon --plugin herdr-agent-watcher
+```
+
+`plugin link` skips the build step by design; build the working directory yourself.
+
+## Verify
+
+From a source checkout, on the build above.
+
+Scan every supported live agent pane without exposing pane or session IDs:
+
+```sh
+./tests/verify-live-agents.sh
+./tests/verify-sidebar-state.sh
+```
+
+Tier A runs against the deterministic fake Herdr socket and is always enabled:
+
+```sh
+cargo test --test e2e_fake_herdr
+```
+
+Tier B starts the installed Herdr binary with isolated HOME/XDG directories and is ignored
+by default:
+
+```sh
+cargo test --test e2e_real_herdr -- --ignored
+```
+
+Run all regular tests with `cargo test`.
+
 ## Known limitations
 
 - **A pane that was open before the daemon started has no card.** Herdr reports no
@@ -320,39 +356,3 @@ required to degrade to.
 - [ ] Remedies you can act on from the doctor panel — copy to clipboard on `↵` rather than
       running anything, since the fixes edit files outside this plugin
 - [ ] Fix the flaky `pane_without_cwd_uses_herdrs_cwd_for_that_pane` test
-
-## Local development
-
-```sh
-cargo build --release
-herdr plugin link "$PWD"
-herdr plugin action invoke restart-daemon --plugin herdr-agent-watcher
-```
-
-`plugin link` skips the build step by design; build the working directory yourself.
-
-## Verify
-
-From a source checkout, on the build above.
-
-Scan every supported live agent pane without exposing pane or session IDs:
-
-```sh
-./tests/verify-live-agents.sh
-./tests/verify-sidebar-state.sh
-```
-
-Tier A runs against the deterministic fake Herdr socket and is always enabled:
-
-```sh
-cargo test --test e2e_fake_herdr
-```
-
-Tier B starts the installed Herdr binary with isolated HOME/XDG directories and is ignored
-by default:
-
-```sh
-cargo test --test e2e_real_herdr -- --ignored
-```
-
-Run all regular tests with `cargo test`.

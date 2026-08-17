@@ -256,6 +256,41 @@ sidecar 树中，而那棵树是冻结的。
 为什么装进 Claude 自己的配置而不是拦截 `PATH`、为什么由 daemon 拥有写入目标、
 以及一个坏掉的桥接**必须**退化成什么样子。
 
+## 本地开发
+
+```sh
+cargo build --release
+herdr plugin link "$PWD"
+herdr plugin action invoke restart-daemon --plugin herdr-agent-watcher
+```
+
+`plugin link` 按设计跳过构建步骤，工作目录由你自己构建。
+
+## 验证
+
+以下都基于上面的源码检出与构建。
+
+扫描所有已支持的活跃 agent pane，且不暴露 pane 或 session ID：
+
+```sh
+./tests/verify-live-agents.sh
+./tests/verify-sidebar-state.sh
+```
+
+Tier A 跑在确定性的 fake Herdr socket 上，始终启用：
+
+```sh
+cargo test --test e2e_fake_herdr
+```
+
+Tier B 会用隔离的 HOME/XDG 目录启动已安装的 Herdr 二进制，默认被忽略：
+
+```sh
+cargo test --test e2e_real_herdr -- --ignored
+```
+
+普通测试全跑：`cargo test`。
+
 ## 已知限制
 
 - **daemon 启动前就已打开的 pane 没有卡片。** Herdr 不为它上报 `agent_session`，因此无法绑定。
@@ -293,38 +328,3 @@ sidecar 树中，而那棵树是冻结的。
 - [ ] doctor 面板里可操作的修复建议 —— `↵` 复制到剪贴板而不是直接执行，因为这些修复要改的是
       本插件之外的文件
 - [ ] 修掉 flaky 的 `pane_without_cwd_uses_herdrs_cwd_for_that_pane` 测试
-
-## 本地开发
-
-```sh
-cargo build --release
-herdr plugin link "$PWD"
-herdr plugin action invoke restart-daemon --plugin herdr-agent-watcher
-```
-
-`plugin link` 按设计跳过构建步骤，工作目录由你自己构建。
-
-## 验证
-
-以下都基于上面的源码检出与构建。
-
-扫描所有已支持的活跃 agent pane，且不暴露 pane 或 session ID：
-
-```sh
-./tests/verify-live-agents.sh
-./tests/verify-sidebar-state.sh
-```
-
-Tier A 跑在确定性的 fake Herdr socket 上，始终启用：
-
-```sh
-cargo test --test e2e_fake_herdr
-```
-
-Tier B 会用隔离的 HOME/XDG 目录启动已安装的 Herdr 二进制，默认被忽略：
-
-```sh
-cargo test --test e2e_real_herdr -- --ignored
-```
-
-普通测试全跑：`cargo test`。

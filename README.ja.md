@@ -280,6 +280,43 @@ Kimi のプラン使用量取得は、設定された API キーを `/usages` �
 入れるのか、なぜ書き込み先をデーモンが所有するのか、そして壊れたブリッジが何に劣化
 しなければならないのか。
 
+## ローカル開発
+
+```sh
+cargo build --release
+herdr plugin link "$PWD"
+herdr plugin action invoke restart-daemon --plugin herdr-agent-watcher
+```
+
+`plugin link` は設計上ビルド手順をスキップします。作業ディレクトリのビルドは自分で行って
+ください。
+
+## 検証
+
+いずれも上記のソースチェックアウトとビルドが前提です。
+
+ペイン ID やセッション ID を露出せずに、対応する全ライブエージェントペインを走査します:
+
+```sh
+./tests/verify-live-agents.sh
+./tests/verify-sidebar-state.sh
+```
+
+Tier A は決定的な fake Herdr socket に対して実行され、常に有効です:
+
+```sh
+cargo test --test e2e_fake_herdr
+```
+
+Tier B はインストール済みの Herdr バイナリを隔離した HOME/XDG ディレクトリで起動し、既定では
+無視されます:
+
+```sh
+cargo test --test e2e_real_herdr -- --ignored
+```
+
+通常のテストをすべて実行するには `cargo test`。
+
 ## 既知の制限
 
 - **デーモン起動前から開いていたペインにはカードが出ません。** Herdr がその
@@ -326,40 +363,3 @@ Kimi のプラン使用量取得は、設定された API キーを `/usages` �
 - [ ] doctor パネルから操作できる対処法 — 修正対象がこのプラグイン外のファイルなので、
       実行ではなく `↵` でクリップボードにコピーする
 - [ ] flaky な `pane_without_cwd_uses_herdrs_cwd_for_that_pane` テストの修正
-
-## ローカル開発
-
-```sh
-cargo build --release
-herdr plugin link "$PWD"
-herdr plugin action invoke restart-daemon --plugin herdr-agent-watcher
-```
-
-`plugin link` は設計上ビルド手順をスキップします。作業ディレクトリのビルドは自分で行って
-ください。
-
-## 検証
-
-いずれも上記のソースチェックアウトとビルドが前提です。
-
-ペイン ID やセッション ID を露出せずに、対応する全ライブエージェントペインを走査します:
-
-```sh
-./tests/verify-live-agents.sh
-./tests/verify-sidebar-state.sh
-```
-
-Tier A は決定的な fake Herdr socket に対して実行され、常に有効です:
-
-```sh
-cargo test --test e2e_fake_herdr
-```
-
-Tier B はインストール済みの Herdr バイナリを隔離した HOME/XDG ディレクトリで起動し、既定では
-無視されます:
-
-```sh
-cargo test --test e2e_real_herdr -- --ignored
-```
-
-通常のテストをすべて実行するには `cargo test`。
