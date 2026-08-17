@@ -775,7 +775,30 @@ pub(crate) fn doctor_report() -> Result<crate::agents::doctor::Report, String> {
     ))
 }
 
-pub fn cli_doctor(_args: &[String]) -> i32 {
+/// The value after `flag`, if it was passed.
+fn flag_value(args: &[String], flag: &str) -> Option<String> {
+    args.iter()
+        .position(|argument| argument == flag)
+        .and_then(|index| args.get(index + 1))
+        .cloned()
+}
+
+pub fn cli_doctor(args: &[String]) -> i32 {
+    // The failure this command reports most often is the missing state
+    // directory, and it names `--state-dir` as the fix -- so the flag has to
+    // work here, not only in `claude-bridge`. Doctor is the one command you
+    // run by hand, outside the plugin process that would have set the
+    // variable. Every path it inspects comes from that variable, so setting
+    // it is the whole of honouring the flag.
+    if let Some(dir) = flag_value(args, "--state-dir") {
+        match resolve_state_dir(Some(Path::new(&dir))) {
+            Ok(absolute) => std::env::set_var("HERDR_PLUGIN_STATE_DIR", absolute),
+            Err(error) => {
+                eprintln!("{error}");
+                return 1;
+            }
+        }
+    }
     match doctor_report() {
         Ok(report) => {
             print!("{}", crate::agents::doctor::render(&report));

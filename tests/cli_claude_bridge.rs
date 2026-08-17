@@ -26,6 +26,39 @@ fn doctor_reports_a_rejected_interval_from_the_plugin_config() {
     assert!(text.contains("1000"), "{text}");
 }
 
+/// The failure doctor reports when the state directory is unknown names
+/// `--state-dir` as the fix. Run it the way that message tells you to, with
+/// the variable unset, and it has to work -- otherwise the advice is a
+/// dead end and doctor is the one command you reach for by hand.
+#[test]
+fn doctor_takes_the_state_dir_its_own_error_tells_you_to_pass() {
+    let config = tempfile::tempdir().expect("tempdir");
+    let state = tempfile::tempdir().expect("tempdir");
+    let claude = tempfile::tempdir().expect("tempdir");
+
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_herdr-agent-watcher"))
+        .arg("doctor")
+        .arg("--state-dir")
+        .arg(state.path())
+        .env("CLAUDE_CONFIG_DIR", claude.path())
+        .env("HERDR_PLUGIN_CONFIG_DIR", config.path())
+        .env_remove("HERDR_PLUGIN_STATE_DIR")
+        .env_remove("HERDR_SOCKET_PATH")
+        .output()
+        .expect("run doctor");
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("cannot resolve the plugin state directory"),
+        "the flag its own error recommends was ignored: {stderr}"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("doctor"),
+        "expected a report, got {:?}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
 fn fake_state_socket(dir: &std::path::Path, reply: Option<&str>) -> std::path::PathBuf {
     use std::io::{BufRead, BufReader, Write};
     let socket = dir.join("state.sock");
