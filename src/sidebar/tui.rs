@@ -513,8 +513,8 @@ const KEYS: [(&str, &str); 13] = [
     ("PageUp / PageDown", "scroll"),
     ("x", "menu"),
     ("?", "this sheet"),
-    ("s", "settings · save, in the settings panel"),
-    ("d", "doctor"),
+    ("s", "settings, in a panel · save, in the settings panel"),
+    ("d", "doctor, in a panel"),
     ("r", "rebuild the report, in the doctor panel"),
     ("q / esc", "close a panel, or the sidebar"),
     ("ctrl-c", "close the sidebar"),
@@ -526,8 +526,10 @@ const KEYS: [(&str, &str); 13] = [
 /// from the last one correctly does nothing and `k` from the first correctly
 /// does nothing. A single start makes one of them look like an ignored key.
 ///
-/// `r` only means something with the doctor panel open and `↵` only inside
-/// settings, so those arrive with the panels that give them meaning.
+/// `r` only means something with the doctor panel open, `↵` only inside
+/// settings, and `s`/`d` only once a panel is up at all -- from the cards
+/// they are deliberately dead. Each arrives with the state that gives it
+/// meaning.
 #[cfg(test)]
 const ROUTED: [(&str, KeyCode, KeyModifiers, &str, Option<Dialog>); 13] = [
     ("j / ↓", KeyCode::Char('j'), KeyModifiers::NONE, "a", None),
@@ -557,8 +559,20 @@ const ROUTED: [(&str, KeyCode, KeyModifiers, &str, Option<Dialog>); 13] = [
     ),
     ("x", KeyCode::Char('x'), KeyModifiers::NONE, "a", None),
     ("?", KeyCode::Char('?'), KeyModifiers::NONE, "a", None),
-    ("s", KeyCode::Char('s'), KeyModifiers::NONE, "a", None),
-    ("d", KeyCode::Char('d'), KeyModifiers::NONE, "a", None),
+    (
+        "s",
+        KeyCode::Char('s'),
+        KeyModifiers::NONE,
+        "a",
+        Some(Dialog::Menu { cursor: 0 }),
+    ),
+    (
+        "d",
+        KeyCode::Char('d'),
+        KeyModifiers::NONE,
+        "a",
+        Some(Dialog::Menu { cursor: 0 }),
+    ),
     (
         "r",
         KeyCode::Char('r'),
@@ -725,11 +739,11 @@ fn route(
         return KeyOutcome::Handled;
     }
 
+    // `s` and `d` are panel keys, not card-list keys: from the cards they do
+    // nothing. One way in -- `x` -- is what makes them unambiguous, and `s`
+    // three rows from `x` on the keyboard was being pressed for it.
     match (key.code, key.modifiers) {
-        (KeyCode::Char('x'), _)
-        | (KeyCode::Char('?'), _)
-        | (KeyCode::Char('s'), _)
-        | (KeyCode::Char('d'), _) => {
+        (KeyCode::Char('x'), _) | (KeyCode::Char('?'), _) => {
             if width < MIN_DIALOG_WIDTH || height < MIN_DIALOG_HEIGHT {
                 it.notice = Some(format!(
                     "the frame is too small for a panel ({width}x{height}; \
@@ -739,8 +753,6 @@ fn route(
             }
             *open = Some(match key.code {
                 KeyCode::Char('?') => Dialog::Keys { cursor: 0 },
-                KeyCode::Char('s') => settings_dialog(live.interval_ms),
-                KeyCode::Char('d') => doctor_dialog(),
                 _ => Dialog::menu(),
             });
             KeyOutcome::Handled
@@ -1642,38 +1654,38 @@ mod tests {
         );
     }
 
+    /// The cards have one way into the dialogs, and `s`/`d` are not it: they
+    /// are panel keys. `s` sits three rows from `x` and was being pressed for
+    /// it, which is the whole reason the cards ignore both.
     #[test]
-    fn a_panel_opened_directly_still_steps_back_to_the_menu() {
+    fn the_cards_take_only_x_into_the_dialogs() {
         let r = two_cards();
         let mut it = Interaction::default();
         let mut live = live_default();
         let mut open = None;
-        route(
-            press(KeyCode::Char('s')),
-            &mut open,
-            &mut it,
-            &mut live,
-            &r,
-            10,
-            40,
-            60,
-            24,
+        let go = |key, open: &mut Option<Dialog>, live: &mut _, it: &mut _| {
+            route(press(key), open, it, live, &r, 10, 40, 60, 24);
+        };
+
+        for key in [KeyCode::Char('s'), KeyCode::Char('d')] {
+            go(key, &mut open, &mut live, &mut it);
+            assert!(open.is_none(), "the cards ignore panel keys");
+        }
+
+        go(KeyCode::Char('x'), &mut open, &mut live, &mut it);
+        assert!(matches!(open, Some(Dialog::Menu { .. })), "x is the way in");
+
+        // And from there they are the accelerators the menu advertises.
+        go(KeyCode::Char('d'), &mut open, &mut live, &mut it);
+        assert!(
+            matches!(open, Some(Dialog::Doctor { .. })),
+            "d works in a panel"
         );
-        assert!(matches!(open, Some(Dialog::Settings { .. })));
-        route(
-            press(KeyCode::Esc),
-            &mut open,
-            &mut it,
-            &mut live,
-            &r,
-            10,
-            40,
-            60,
-            24,
-        );
+
+        go(KeyCode::Esc, &mut open, &mut live, &mut it);
         assert!(
             matches!(open, Some(Dialog::Menu { .. })),
-            "esc is one level back even for a panel opened straight with `s`"
+            "esc is one level back"
         );
     }
 
@@ -1764,7 +1776,7 @@ mod tests {
                 // moves a setting is still a key that did something.
                 live.clone(),
                 open.is_some(),
-                std::mem::discriminant(&open),
+                open.as_ref().map(std::mem::discriminant),
                 doctor_taken_at(&open),
             );
             let outcome = route(
@@ -1784,7 +1796,7 @@ mod tests {
                 it.toggled.clone(),
                 live.clone(),
                 open.is_some(),
-                std::mem::discriminant(&open),
+                open.as_ref().map(std::mem::discriminant),
                 doctor_taken_at(&open),
             );
             assert!(

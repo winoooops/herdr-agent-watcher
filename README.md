@@ -154,11 +154,11 @@ herdr plugin action invoke open-sidebar --plugin herdr-agent-watcher
 Each invocation intentionally opens another split. Cards show agent state, agent/model,
 title, context use, cache hit rate, cost, tool count, and the three newest tool traces.
 Use `j`/`k` or PageUp/PageDown to scroll, `o`/`↵` to expand, `z` to hide idle agents,
-`x` to open the menu, `?` to list every key, `s` for settings, `d` for doctor, and
-`q`/`Esc` or Ctrl-C to close.
+`x` to open the menu, `?` to list every key, and `q`/`Esc` or Ctrl-C to close.
 
-`x` opens a menu, `?` lists every key. From the menu — or directly with `s` and `d` — a
-settings panel and a doctor panel. `Esc` is one level back wherever you are: a panel returns
+`x` opens a menu, `?` lists every key. The menu leads to a settings panel and a doctor
+panel; `s` and `d` reach them too, but only once a panel is open — from the cards they do
+nothing, so `x` is the one way in. `Esc` is one level back wherever you are: a panel returns
 to the menu, and the menu closes.
 
 Settings change what you are looking at as you cycle them — `l`/`→` forward, `h`/`←` back,
