@@ -151,7 +151,7 @@ herdr plugin action invoke open-sidebar --plugin herdr-agent-watcher
 `d` 打开 doctor，`q`/`Esc` 或 Ctrl-C 关闭。
 
 `x` 打开菜单，`?` 列出所有按键。可以从菜单打开设置面板和 doctor 面板，也可以直接按
-`s` 和 `d` 打开。
+`s` 和 `d` 打开。`Esc` 在任何位置都只退一级：面板退回菜单，菜单则关闭。
 
 循环切换设置时，你正在查看的内容会立即变化 —— `l`/`→` 向前、`h`/`←` 向后，`o`/`↵` 同样
 向前 —— 按下 `s` 之前不会写入任何内容。保存只会编辑你更改过的键，并让 `config.toml` 的

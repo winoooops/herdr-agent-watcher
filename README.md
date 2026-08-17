@@ -158,7 +158,8 @@ Use `j`/`k` or PageUp/PageDown to scroll, `o`/`↵` to expand, `z` to hide idle 
 `q`/`Esc` or Ctrl-C to close.
 
 `x` opens a menu, `?` lists every key. From the menu — or directly with `s` and `d` — a
-settings panel and a doctor panel.
+settings panel and a doctor panel. `Esc` is one level back wherever you are: a panel returns
+to the menu, and the menu closes.
 
 Settings change what you are looking at as you cycle them — `l`/`→` forward, `h`/`←` back,
 `o`/`↵` forward as well — and nothing is written until you press `s`. Saving edits only the
