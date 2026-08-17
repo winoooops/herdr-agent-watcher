@@ -79,23 +79,6 @@ herdr plugin action invoke open-sidebar --plugin herdr-agent-watcher
 `o`/`↵` 展开，`z` 隐藏空闲 agent，`x` 打开菜单，`?` 列出所有按键，`q`/`Esc` 或
 Ctrl-C 关闭。
 
-`x` 打开菜单，`?` 列出所有按键。菜单通向设置面板和 doctor 面板；`s` 和 `d` 也能到达，
-但只在已经打开某个面板时有效 —— 在卡片列表上它们不做任何事，所以 `x` 是唯一入口。
-`Esc` 在任何位置都只退一级：面板退回菜单，菜单则关闭。
-
-循环切换设置时，你正在查看的内容会立即变化 —— `l`/`→` 向前、`h`/`←` 向后，`o`/`↵` 同样
-向前 —— 按下 `s` 之前不会写入任何内容。
-
-`interval_ms` 是例外：它属于 daemon，因此改动在 daemon 重启前不会生效。改过它之后要离开
-面板时会先询问 —— 立即重启，或改回原值 —— 不作答就无法离开。
-
-doctor 面板会在不离开 sidebar 的情况下显示 `doctor` 打印的内容。按 `r` 重新生成报告；
-报告比 pane 高时用 `j`/`k` 滚动。
-
-`scope = "workspace"` 正是「为每个 workspace 各开一个 sidebar」这件事有意义的原因。daemon
-尚未确定 workspace 的 pane 会显示出来而不是被隐藏；scope 回退到 `all` 时，sidebar 会在
-footer 上方说明原因。
-
 要用快捷键打开它：
 
 ```sh
@@ -105,8 +88,9 @@ herdr plugin action invoke bind-sidebar-key --plugin herdr-agent-watcher
 这会把绑定写入 **Herdr 的**配置；如果这个键已经被占用，操作会拒绝并指出占用它的项目。
 想换一个键，运行它之前先设好 `keys.open_sidebar`。
 
-`unbind-sidebar-key` 会移除该绑定。**卸载插件前先运行它**，否则绑定会比它指向的 action
-存留得更久 —— Herdr 卸载插件时不会运行任何命令。
+> [!WARNING]
+> `unbind-sidebar-key` 会移除该绑定。请在**卸载插件之前**运行它 —— Herdr 卸载插件时不会
+> 运行任何命令，否则这个绑定会比它指向的 action 存留得更久。
 
 sidebar 打开时若 daemon 不可用，面板会说明并等待按键。若是在 sidebar 打开期间断开 ——
 通常正是设置面板刚刚要求的那次重启 —— 卡片会留在屏幕上，提示会显示已等待的秒数，sidebar

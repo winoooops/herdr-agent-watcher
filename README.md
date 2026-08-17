@@ -81,25 +81,6 @@ count, and the three newest tool traces.
 Use `j`/`k` or PageUp/PageDown to scroll, `o`/`↵` to expand, `z` to hide idle agents,
 `x` to open the menu, `?` to list every key, and `q`/`Esc` or Ctrl-C to close.
 
-`x` opens a menu, `?` lists every key. The menu leads to a settings panel and a doctor
-panel; `s` and `d` reach them too, but only once a panel is open — from the cards they do
-nothing, so `x` is the one way in. `Esc` is one level back wherever you are: a panel returns
-to the menu, and the menu closes.
-
-Settings change what you are looking at as you cycle them — `l`/`→` forward, `h`/`←` back,
-`o`/`↵` forward as well — and nothing is written until you press `s`.
-
-`interval_ms` is the exception: it belongs to the daemon, so changing it does nothing until
-the daemon restarts. Leaving the panel with it changed asks first — restart now, or put it
-back the way it was — and will not let you past without an answer.
-
-The doctor panel shows what `doctor` prints, without leaving the sidebar. `r` rebuilds it,
-and `j`/`k` scroll it when the report is taller than the pane.
-
-`scope = "workspace"` is what makes opening one sidebar per workspace useful. A pane the
-daemon has not placed yet is shown rather than hidden, and when the scope falls back to
-`all` the sidebar says so above its footer.
-
 To open it with a key:
 
 ```sh
@@ -109,8 +90,10 @@ herdr plugin action invoke bind-sidebar-key --plugin herdr-agent-watcher
 That writes the binding into **Herdr's** config, refusing if the key is already taken and
 naming what holds it. For a different key, set `keys.open_sidebar` before running it.
 
-`unbind-sidebar-key` takes it back out. **Run it before uninstalling the plugin**, or the
-binding outlives the action it points at — Herdr runs nothing on uninstall.
+> [!WARNING]
+> `unbind-sidebar-key` takes the binding back out. Run it **before uninstalling the
+> plugin** — Herdr runs nothing on uninstall, so otherwise the binding outlives the action
+> it points at.
 
 If the daemon is unavailable when the sidebar opens, the pane says so and waits for a key.
 If it disconnects while the sidebar is open — usually the restart the settings panel just
