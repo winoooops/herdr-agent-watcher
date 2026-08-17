@@ -38,7 +38,7 @@ pub enum Row {
     Rule,
 }
 
-const VALUE_COLUMN: usize = 18;
+const GAP: usize = 3;
 
 /// Split `text` to fit `width` cells, breaking at spaces where it can.
 fn wrap(text: &str, width: usize) -> Vec<String> {
@@ -154,6 +154,17 @@ pub fn render(panel: &Panel, width: u16, height: u16) -> Vec<Line> {
     // Two for the borders, two for the footer and its rule.
     let body_rows = height.saturating_sub(4);
     let inner = width.saturating_sub(2);
+    let value_column = panel
+        .rows
+        .iter()
+        .filter_map(|row| match row {
+            Row::Entry { label, .. } => Some(format::width(label)),
+            _ => None,
+        })
+        .max()
+        .unwrap_or(0)
+        .saturating_add(2 + GAP)
+        .min(inner.saturating_sub(1));
 
     // Rows become lines first, because a wrapped note is more than one line
     // and the offset has to count what is drawn, not what it came from.
@@ -167,8 +178,8 @@ pub fn render(panel: &Panel, width: u16, height: u16) -> Vec<Line> {
                 enabled,
             } => {
                 let mark = if selected { "▸" } else { " " };
-                let label = format::truncate(label, VALUE_COLUMN.saturating_sub(3));
-                let pad = VALUE_COLUMN.saturating_sub(2 + format::width(&label));
+                let label = format::truncate(label, value_column.saturating_sub(2 + GAP));
+                let pad = value_column.saturating_sub(2 + format::width(&label));
                 let dim = if *enabled || !mark_read_only {
                     ""
                 } else {
@@ -315,6 +326,64 @@ mod tests {
             column("position"),
             column("workspace"),
             "the value column wandered: {text:?}"
+        );
+    }
+
+    #[test]
+    fn the_value_column_moves_to_fit_the_longest_label() {
+        let label = "a label longer than page down";
+        let p = Panel {
+            title: "Keys".into(),
+            rows: vec![
+                Row::Entry {
+                    label: label.into(),
+                    value: "does a thing".into(),
+                    enabled: false,
+                },
+                Row::Entry {
+                    label: "short".into(),
+                    value: "also aligned".into(),
+                    enabled: false,
+                },
+            ],
+            footer: "esc".into(),
+            cursor: None,
+            offset: 0,
+        };
+        let text = plain(&render(&p, 60, 8));
+        assert!(
+            text.iter().any(|line| line.contains(label)),
+            "the longest label was truncated: {text:?}"
+        );
+    }
+
+    #[test]
+    fn the_longest_label_keeps_the_minimum_gap() {
+        let label = "prune after days";
+        let value = "7";
+        let p = Panel {
+            title: "Settings".into(),
+            rows: vec![Row::Entry {
+                label: label.into(),
+                value: value.into(),
+                enabled: true,
+            }],
+            footer: "esc".into(),
+            cursor: None,
+            offset: 0,
+        };
+        let text = plain(&render(&p, 60, 7));
+        let line = text
+            .iter()
+            .find(|line| line.contains(label))
+            .unwrap_or_else(|| panic!("the label is missing from {text:?}"));
+        let label_start = format::width(&line[..line.find(label).expect("label")]);
+        let value_start = format::width(&line[..line.find(value).expect("value")]);
+
+        let gap = value_start - label_start - format::width(label);
+        assert!(
+            gap >= 3,
+            "the longest row is cramped: expected at least 3 spaces between its label and value, got {gap} in {line:?}"
         );
     }
 
