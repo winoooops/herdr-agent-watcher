@@ -88,7 +88,7 @@ herdr plugin action invoke bind-sidebar-key --plugin herdr-agent-watcher
 这会把绑定写入 **Herdr 的**配置；如果这个键已经被占用，操作会拒绝并指出占用它的项目。
 想换一个键，运行它之前先设好 `keys.open_sidebar`。
 
-`x` 里还有 **Update**：它向 GitHub 查询最新 release，并说明它与你正在运行的版本的关系。
+`x` 里还有 **Update**（在任意面板中按 `u` 也能直接打开）：它向 GitHub 查询最新 release，并说明它与你正在运行的版本的关系。
 只在你打开它时才请求 —— 这里没有任何东西会自行联网。当存在更新且插件是从 GitHub 安装的，
 按 `u` 就会安装，然后请你重新打开 sidebar：没有进程能替换自己正在执行的二进制。若是链接的
 工作目录，它会改为提示你 `git pull` —— herdr 拒绝覆盖链接，而那棵树属于正在编辑它的人。

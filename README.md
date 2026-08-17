@@ -90,7 +90,7 @@ herdr plugin action invoke bind-sidebar-key --plugin herdr-agent-watcher
 That writes the binding into **Herdr's** config, refusing if the key is already taken and
 naming what holds it. For a different key, set `keys.open_sidebar` before running it.
 
-`x` also offers **Update**: it asks GitHub for the newest release and says how it compares
+`x` also offers **Update**, or `u` from any panel: it asks GitHub for the newest release and says how it compares
 to the build you are running. It asks only when you open it — nothing here contacts the
 network on its own. When a newer release exists and the plugin came from GitHub, `u`
 installs it and then asks you to reopen the sidebar, because no process can replace the

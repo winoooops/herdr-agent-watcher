@@ -543,7 +543,7 @@ fn doctor_rows(report: &crate::agents::doctor::Report) -> Vec<crate::sidebar::di
     rows
 }
 
-const MENU: [(&str, &str); 3] = [("Settings", "s"), ("Doctor", "d"), ("Update", "")];
+const MENU: [(&str, &str); 3] = [("Settings", "s"), ("Doctor", "d"), ("Update", "u")];
 
 /// The rows of `MENU`, by name. A bare uppercase identifier in a match arm is
 /// a binding, not a constant, so leaving these undefined makes the first arm
@@ -569,7 +569,7 @@ const KEYS: [(&str, &str); 14] = [
         "r",
         "rebuild the report, in the doctor panel · recheck, in update",
     ),
-    ("u", "install the update, when one is offered"),
+    ("u", "update, in a panel · install it, in the update panel"),
     ("q / esc", "close a panel, or the sidebar"),
     ("ctrl-c", "close the sidebar"),
 ];
@@ -796,6 +796,11 @@ fn route(
                     save_settings(dialog, live)
                         .unwrap_or_else(|error| format!("save failed: {error}")),
                 );
+            }
+            // Same shape as `s`: from anywhere else it opens the panel, and
+            // inside the panel the letter belongs to the panel's own action.
+            (KeyCode::Char('u'), _) if !matches!(dialog, Dialog::Update { .. }) => {
+                *open = Some(update_dialog());
             }
             (KeyCode::Char('u'), _) => {
                 if let Dialog::Update { check, pending, .. } = dialog {
@@ -2527,6 +2532,38 @@ mod tests {
                 "{source:?} should {} an upgrade",
                 if starts { "start" } else { "not start" }
             );
+        }
+    }
+    /// The menu shows a key beside every row, so every row needs one that
+    /// works. `Update` shipped with an empty column because its letter was
+    /// spent on the panel's own action -- which `s` also does, and still
+    /// opens settings from outside.
+    #[test]
+    fn every_menu_row_has_a_key_that_opens_it() {
+        let r = two_cards();
+        for (label, key) in MENU {
+            assert!(!key.is_empty(), "{label} has no key beside it in the menu");
+            let mut it = Interaction::default();
+            let mut live = live_default();
+            let mut open = Some(Dialog::menu());
+            route(
+                press(KeyCode::Char(key.chars().next().unwrap())),
+                &mut open,
+                &mut it,
+                &mut live,
+                &r,
+                10,
+                40,
+                60,
+                24,
+            );
+            let opened = matches!(
+                (&open, label),
+                (Some(Dialog::Settings { .. }), "Settings")
+                    | (Some(Dialog::Doctor { .. }), "Doctor")
+                    | (Some(Dialog::Update { .. }), "Update")
+            );
+            assert!(opened, "{key} should open {label} from the menu");
         }
     }
 }
