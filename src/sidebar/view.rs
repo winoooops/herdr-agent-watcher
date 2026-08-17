@@ -913,11 +913,23 @@ fn config_notice(status: crate::sidebar::style::ConfigStatus, width: u16) -> Str
 /// knowing which side the reader is looking at.
 fn stale_notice(daemon: &str, width: u16) -> String {
     let ours = env!("CARGO_PKG_VERSION");
+    let fits = |s: &str| crate::sidebar::format::width(s) <= width as usize;
     let full = format!("  daemon {daemon} · this sidebar {ours} — reopen it");
-    if crate::sidebar::format::width(&full) <= width as usize {
+    let short = format!("  {ours} → {daemon}, reopen");
+    // A third rung, like `config_notice`: two versions and an arrow still say
+    // "these differ", where a clipped `reope` says it badly.
+    let bare = format!("{ours}→{daemon}");
+    if fits(&full) {
         full
+    } else if fits(&short) {
+        short
+    } else if fits(&bare) {
+        bare
     } else {
-        format!("  {ours} → {daemon}, reopen")
+        // Narrower than two version numbers. `footer` shrinks until it fits
+        // rather than letting the terminal cut a word in half, and a notice
+        // that cannot say which builds can at least say that one is wrong.
+        crate::sidebar::format::truncate("stale", width as usize)
     }
 }
 
@@ -2269,5 +2281,20 @@ mod tests {
             .flat_map(|l| l.iter().map(|s| s.text.clone()))
             .collect();
         assert!(!text.contains("reopen"), "nothing to say: {text}");
+    }
+    /// A notice wider than its pane is clipped by the terminal mid-word, so
+    /// each rung has to fit the width it was handed. That is `footer`'s
+    /// contract, not `config_notice`'s -- the latter still returns 9 cells at
+    /// width 8, which is what this notice is written not to do.
+    #[test]
+    fn the_stale_notice_fits_every_width_it_is_drawn_at() {
+        for width in 8u16..=90 {
+            let line = stale_notice("9.9.9", width);
+            let cells = crate::sidebar::format::width(&line);
+            assert!(
+                cells <= width as usize,
+                "at width {width} the notice is {cells} cells: {line:?}"
+            );
+        }
     }
 }
