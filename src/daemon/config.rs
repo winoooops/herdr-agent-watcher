@@ -16,6 +16,10 @@ pub const DEFAULT_INTERVAL: Duration = Duration::from_millis(1000);
 #[derive(Debug, Clone)]
 pub struct DaemonConfig {
     pub interval: Duration,
+    /// How long a session directory may go unwritten before the sweep takes
+    /// it. `None` turns the sweep off entirely, which is a different decision
+    /// from keeping things for a long time.
+    pub prune_after: Option<Duration>,
     pub problems: Vec<String>,
 }
 
@@ -23,6 +27,9 @@ impl Default for DaemonConfig {
     fn default() -> Self {
         Self {
             interval: DEFAULT_INTERVAL,
+            prune_after: Some(Duration::from_secs(
+                u64::from(crate::daemon::prune::DEFAULT_RETENTION_DAYS) * 86_400,
+            )),
             problems: Vec::new(),
         }
     }
@@ -75,6 +82,22 @@ impl DaemonConfig {
                     )),
                     None => out.problems.push(format!(
                         "daemon.interval_ms must be an integer, found {value}; using 1000"
+                    )),
+                },
+                // Days, not milliseconds: the unit a reader would answer
+                // "how long do you keep these?" in.
+                "prune_after_days" => match value.as_integer() {
+                    Some(0) => out.prune_after = None,
+                    Some(days) if days > 0 => {
+                        out.prune_after = Some(Duration::from_secs(days as u64 * 86_400))
+                    }
+                    Some(days) => out.problems.push(format!(
+                        "daemon.prune_after_days cannot be negative, found {days}; using {}",
+                        crate::daemon::prune::DEFAULT_RETENTION_DAYS
+                    )),
+                    None => out.problems.push(format!(
+                        "daemon.prune_after_days must be an integer, found {value}; using {}",
+                        crate::daemon::prune::DEFAULT_RETENTION_DAYS
                     )),
                 },
                 other => out.problems.push(format!("unknown key daemon.{other}")),
@@ -168,5 +191,43 @@ mod tests {
                 assert_eq!(c.problems.len(), 1);
             },
         );
+    }
+    #[test]
+    fn a_retention_is_read_in_days() {
+        let c = DaemonConfig::from_toml("[daemon]\nprune_after_days = 30\n");
+        assert_eq!(c.prune_after, Some(Duration::from_secs(30 * 86_400)));
+        assert!(c.problems.is_empty(), "{:?}", c.problems);
+    }
+
+    /// Zero is the off switch, not a retention of no time at all -- which
+    /// would sweep every session directory the moment it stopped being
+    /// written to.
+    #[test]
+    fn zero_turns_the_sweep_off_rather_than_deleting_everything() {
+        let c = DaemonConfig::from_toml("[daemon]\nprune_after_days = 0\n");
+        assert_eq!(c.prune_after, None);
+        assert!(c.problems.is_empty(), "{:?}", c.problems);
+    }
+
+    #[test]
+    fn a_retention_that_makes_no_sense_keeps_the_default_and_says_so() {
+        for text in [
+            "[daemon]\nprune_after_days = -1\n",
+            "[daemon]\nprune_after_days = \"a week\"\n",
+        ] {
+            let c = DaemonConfig::from_toml(text);
+            assert_eq!(
+                c.prune_after,
+                DaemonConfig::default().prune_after,
+                "{text:?} should fall back"
+            );
+            assert_eq!(c.problems.len(), 1, "{text:?} should say why");
+        }
+    }
+
+    #[test]
+    fn the_default_keeps_a_week() {
+        let c = DaemonConfig::default();
+        assert_eq!(c.prune_after, Some(Duration::from_secs(7 * 86_400)));
     }
 }

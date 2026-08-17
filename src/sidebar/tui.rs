@@ -208,11 +208,32 @@ struct Interaction {
     offset: u16,
     follow: bool,
     notice: Option<String>,
+    /// Refreshed from the daemon snapshot before each key is routed. Bridge
+    /// IO receives an owned copy so it never holds up the event loop.
+    live_panes: std::collections::HashSet<String>,
 }
 
 enum KeyOutcome {
     Quit,
     Handled,
+}
+
+/// The daemon-owned settings as they were when the panel opened. The daemon
+/// reads them once at startup, so changing one without restarting leaves a
+/// value that looks applied and is not.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) struct DaemonSettings {
+    pub interval_ms: u32,
+    pub prune_after_days: u32,
+}
+
+impl From<&crate::sidebar::live::Live> for DaemonSettings {
+    fn from(live: &crate::sidebar::live::Live) -> Self {
+        Self {
+            interval_ms: live.interval_ms,
+            prune_after_days: live.prune_after_days,
+        }
+    }
 }
 
 /// Which panel is open. `None` is the card list.
@@ -231,7 +252,7 @@ pub(crate) enum Dialog {
         /// What the daemon is actually running. The panel can change the
         /// value and save it, but only a restart makes it true -- so leaving
         /// with these apart is the one exit that asks a question.
-        interval_at_open: u32,
+        daemon_at_open: DaemonSettings,
         /// The mandatory prompt, when it is up. A sub-state of the settings
         /// panel rather than a dialog of its own, because answering it may
         /// have to write the file, and the file is here.
@@ -244,6 +265,13 @@ pub(crate) enum Dialog {
         check: crate::sidebar::release::Check,
         offset: usize,
         pending: Option<std::sync::mpsc::Receiver<crate::sidebar::release::Check>>,
+    },
+    Bridges {
+        offset: usize,
+        root: Result<std::path::PathBuf, String>,
+        retention: Option<std::time::Duration>,
+        view: crate::sidebar::bridges::View,
+        pending: Option<std::sync::mpsc::Receiver<crate::sidebar::bridges::View>>,
     },
     Doctor {
         offset: usize,
@@ -262,13 +290,15 @@ impl Dialog {
         match self {
             Dialog::Menu { cursor } | Dialog::Keys { cursor } => Some(cursor),
             Dialog::Settings { cursor, .. } => Some(cursor),
-            Dialog::Doctor { .. } | Dialog::Update { .. } => None,
+            Dialog::Doctor { .. } | Dialog::Update { .. } | Dialog::Bridges { .. } => None,
         }
     }
 
     fn offset_mut(&mut self) -> Option<&mut usize> {
         match self {
-            Dialog::Doctor { offset, .. } | Dialog::Update { offset, .. } => Some(offset),
+            Dialog::Doctor { offset, .. }
+            | Dialog::Update { offset, .. }
+            | Dialog::Bridges { offset, .. } => Some(offset),
             _ => None,
         }
     }
@@ -281,7 +311,7 @@ impl Dialog {
             Dialog::Settings { .. } => crate::sidebar::live::SETTINGS.len(),
             // These scroll; they have no selectable rows, so no cursor to
             // bound.
-            Dialog::Doctor { .. } | Dialog::Update { .. } => 0,
+            Dialog::Doctor { .. } | Dialog::Update { .. } | Dialog::Bridges { .. } => 0,
         }
     }
 
@@ -293,6 +323,7 @@ impl Dialog {
                 .as_ref()
                 .map(|report| doctor_rows(report).len())
                 .unwrap_or(1),
+            Dialog::Bridges { view, .. } => bridge_rows(view).len(),
             other => other.len(),
         }
     }
@@ -330,6 +361,27 @@ fn update_dialog() -> Dialog {
     }
 }
 
+fn retention(days: u32) -> Option<std::time::Duration> {
+    (days != 0).then(|| std::time::Duration::from_secs(u64::from(days) * 86_400))
+}
+
+fn bridges_dialog(live_panes: std::collections::HashSet<String>, prune_after_days: u32) -> Dialog {
+    let root = crate::sidebar::bridges::state_root();
+    let retention = retention(prune_after_days);
+    let pending = Some(crate::sidebar::bridges::read(
+        root.clone(),
+        retention,
+        live_panes,
+    ));
+    Dialog::Bridges {
+        offset: 0,
+        root,
+        retention,
+        view: crate::sidebar::bridges::View::Reading,
+        pending,
+    }
+}
+
 fn doctor_dialog() -> Dialog {
     Dialog::Doctor {
         offset: 0,
@@ -358,6 +410,20 @@ fn update_state(dialog: &Option<Dialog>) -> Option<&'static str> {
 }
 
 #[cfg(test)]
+fn bridge_state(dialog: &Option<Dialog>) -> Option<&'static str> {
+    use crate::sidebar::bridges::View;
+    match dialog {
+        Some(Dialog::Bridges { view, .. }) => Some(match view {
+            View::Reading => "reading",
+            View::Pruning => "pruning",
+            View::Ready(_) => "ready",
+            View::Failed(_) => "failed",
+        }),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
 fn doctor_taken_at(dialog: &Option<Dialog>) -> Option<u64> {
     match dialog {
         Some(Dialog::Doctor { taken_at, .. }) => Some(*taken_at),
@@ -365,7 +431,7 @@ fn doctor_taken_at(dialog: &Option<Dialog>) -> Option<u64> {
     }
 }
 
-fn settings_dialog(interval_at_open: u32) -> Dialog {
+fn settings_dialog(daemon_at_open: DaemonSettings) -> Dialog {
     let path = crate::sidebar::config::config_path();
     let source = match path.as_ref() {
         Some(path) => match std::fs::read_to_string(path) {
@@ -377,7 +443,7 @@ fn settings_dialog(interval_at_open: u32) -> Dialog {
     };
     Dialog::Settings {
         cursor: 0,
-        interval_at_open,
+        daemon_at_open,
         confirm: None,
         dirty: Vec::new(),
         path,
@@ -385,36 +451,39 @@ fn settings_dialog(interval_at_open: u32) -> Dialog {
     }
 }
 
-/// Answer the mandatory prompt. `restart` saves the new interval and reloads
-/// the daemon; otherwise the value goes back to what the daemon is running,
-/// and if it had already been saved the file goes back with it -- cancelling
-/// means the setting was never changed, not that it was changed and ignored.
-fn resolve_interval(
+/// Answer the mandatory prompt. `restart` saves the new daemon settings and
+/// reloads it; otherwise both values go back to what the daemon is running,
+/// and if either had already been saved the file goes back with it.
+fn resolve_daemon_settings(
     dialog: &mut Dialog,
     live: &mut crate::sidebar::live::Live,
     restart: bool,
 ) -> String {
-    let Dialog::Settings {
-        interval_at_open, ..
-    } = dialog
-    else {
+    let Dialog::Settings { daemon_at_open, .. } = dialog else {
         return String::new();
     };
-    let previous = *interval_at_open;
+    let previous = *daemon_at_open;
 
     if !restart {
-        live.interval_ms = previous;
-        // Only writes if the interval is among the keys this session changed;
-        // `edit` touches nothing else either way.
+        live.interval_ms = previous.interval_ms;
+        live.prune_after_days = previous.prune_after_days;
+        // Only writes values among the keys this session changed; `edit`
+        // touches nothing else either way.
         let _ = save_settings(dialog, live);
-        return format!("interval ms put back to {previous}");
+        return format!(
+            "daemon settings put back to {} ms and {} days",
+            previous.interval_ms, previous.prune_after_days
+        );
     }
 
     if let Err(error) = save_settings(dialog, live) {
         return format!("save failed: {error}");
     }
     match restart_daemon() {
-        Ok(()) => format!("daemon reloaded at {} ms", live.interval_ms),
+        Ok(()) => format!(
+            "daemon reloaded at {} ms with pruning after {} days",
+            live.interval_ms, live.prune_after_days
+        ),
         Err(error) => format!("saved, but the reload failed: {error}"),
     }
 }
@@ -543,18 +612,83 @@ fn doctor_rows(report: &crate::agents::doctor::Report) -> Vec<crate::sidebar::di
     rows
 }
 
-const MENU: [(&str, &str); 3] = [("Settings", "s"), ("Doctor", "d"), ("Update", "u")];
+fn bridge_size(bytes: u64) -> String {
+    const KIB: u64 = 1024;
+    const MIB: u64 = KIB * 1024;
+    match bytes {
+        0..=1023 => format!("{bytes} B"),
+        1024..=1_048_575 => format!("{} KiB", bytes / KIB),
+        _ => format!("{}.{} MiB", bytes / MIB, (bytes % MIB) * 10 / MIB),
+    }
+}
+
+fn bridge_rows(view: &crate::sidebar::bridges::View) -> Vec<crate::sidebar::dialog::Row> {
+    use crate::sidebar::bridges::View;
+    use crate::sidebar::dialog::Row;
+    let View::Ready(snapshot) = view else {
+        return vec![match view {
+            View::Reading => Row::Note("reading session directories…".into()),
+            View::Pruning => Row::Note("pruning session directories…".into()),
+            View::Failed(error) => Row::Warn(error.clone()),
+            View::Ready(_) => unreachable!(),
+        }];
+    };
+
+    let mut rows = vec![Row::Note(format!(
+        "{} directories · {} · {} removable",
+        snapshot.entries.len(),
+        bridge_size(snapshot.total_bytes),
+        snapshot.stale_count
+    ))];
+    if let Some((removed, bytes)) = snapshot.removed {
+        rows.push(Row::Note(format!(
+            "removed {removed} · freed {}",
+            bridge_size(bytes)
+        )));
+    }
+    rows.push(Row::Rule);
+    if snapshot.entries.is_empty() {
+        rows.push(Row::Note("no session directories".into()));
+    }
+    rows.extend(snapshot.entries.iter().map(|entry| {
+        let age = entry
+            .quiet_for
+            .map(|quiet| {
+                crate::sidebar::format::age(0, u64::try_from(quiet.as_millis()).unwrap_or(u64::MAX))
+            })
+            .unwrap_or_else(|| "future".into());
+        let stale = if entry.stale { " · removable" } else { "" };
+        Row::Entry {
+            label: format!("{} · {}", entry.pane_id, entry.workspace_id),
+            value: format!(
+                "{age} · {} · {}{stale}",
+                bridge_size(entry.bytes),
+                if entry.live { "live" } else { "dead" }
+            ),
+            enabled: false,
+        }
+    }));
+    rows
+}
+
+const MENU: [(&str, &str); 4] = [
+    ("Settings", "s"),
+    ("Doctor", "d"),
+    ("Bridges", "b"),
+    ("Update", "u"),
+];
 
 /// The rows of `MENU`, by name. A bare uppercase identifier in a match arm is
 /// a binding, not a constant, so leaving these undefined makes the first arm
 /// swallow every row -- silently, apart from an unreachable-pattern warning.
 const MENU_SETTINGS: usize = 0;
-const MENU_UPDATE: usize = 2;
+const MENU_BRIDGES: usize = 2;
+const MENU_UPDATE: usize = 3;
 
 /// One inventory. The sheet is built from it, and the test presses every entry
 /// through the router. Descriptions say where a key means something, because
 /// `s` and `r` mean different things inside a panel and outside one.
-const KEYS: [(&str, &str); 14] = [
+const KEYS: [(&str, &str); 16] = [
     ("j / ↓", "move down"),
     ("k / ↑", "move up"),
     ("o / ↵", "expand a card · change a setting"),
@@ -565,10 +699,9 @@ const KEYS: [(&str, &str); 14] = [
     ("?", "this sheet"),
     ("s", "settings, in a panel · save, in the settings panel"),
     ("d", "doctor, in a panel"),
-    (
-        "r",
-        "rebuild the report, in the doctor panel · recheck, in update",
-    ),
+    ("b", "bridges, in a panel"),
+    ("p", "prune removable bridges, in the bridges panel"),
+    ("r", "reread bridges · rebuild doctor · recheck update"),
     ("u", "update, in a panel · install it, in the update panel"),
     ("q / esc", "close a panel, or the sidebar"),
     ("ctrl-c", "close the sidebar"),
@@ -593,7 +726,7 @@ fn routed() -> [(
     KeyModifiers,
     &'static str,
     Option<Dialog>,
-); 14] {
+); 16] {
     [
         ("j / ↓", KeyCode::Char('j'), KeyModifiers::NONE, "a", None),
         ("k / ↑", KeyCode::Char('k'), KeyModifiers::NONE, "b", None),
@@ -608,7 +741,10 @@ fn routed() -> [(
                 dirty: Vec::new(),
                 path: None,
                 source: Ok(None),
-                interval_at_open: 1000,
+                daemon_at_open: DaemonSettings {
+                    interval_ms: 1000,
+                    prune_after_days: crate::daemon::prune::DEFAULT_RETENTION_DAYS,
+                },
                 confirm: None,
             }),
         ),
@@ -635,6 +771,31 @@ fn routed() -> [(
             KeyModifiers::NONE,
             "a",
             Some(Dialog::Menu { cursor: 0 }),
+        ),
+        (
+            "b",
+            KeyCode::Char('b'),
+            KeyModifiers::NONE,
+            "a",
+            Some(Dialog::Menu { cursor: 0 }),
+        ),
+        (
+            "p",
+            KeyCode::Char('p'),
+            KeyModifiers::NONE,
+            "a",
+            Some(Dialog::Bridges {
+                offset: 0,
+                root: Ok("/does/not/exist".into()),
+                retention: Some(std::time::Duration::from_secs(1)),
+                view: crate::sidebar::bridges::View::Ready(crate::sidebar::bridges::Snapshot {
+                    entries: Vec::new(),
+                    total_bytes: 0,
+                    stale_count: 1,
+                    removed: None,
+                }),
+                pending: None,
+            }),
         ),
         (
             "u",
@@ -719,7 +880,7 @@ fn route(
                 (KeyCode::Char('k'), _) | (KeyCode::Up, _) => *choice = 0,
                 (KeyCode::Enter, _) | (KeyCode::Char('o'), _) => {
                     let restart = *choice == 0;
-                    it.notice = Some(resolve_interval(dialog, live, restart));
+                    it.notice = Some(resolve_daemon_settings(dialog, live, restart));
                     *open = Some(Dialog::menu());
                 }
                 _ => {}
@@ -735,7 +896,7 @@ fn route(
             // menu, and dropping into one you did not open is not going back.
             (KeyCode::Esc, _) | (KeyCode::Char('q'), _) => {
                 if let Dialog::Settings {
-                    interval_at_open,
+                    daemon_at_open,
                     confirm,
                     ..
                 } = dialog
@@ -743,7 +904,7 @@ fn route(
                     // Mandatory: the value and the running daemon disagree,
                     // and leaving without saying which one wins would leave a
                     // setting that looks applied and is not.
-                    if confirm.is_none() && live.interval_ms != *interval_at_open {
+                    if confirm.is_none() && DaemonSettings::from(&*live) != *daemon_at_open {
                         *confirm = Some(0);
                         return KeyOutcome::Handled;
                     }
@@ -778,7 +939,7 @@ fn route(
             // and there is no key that will ever bring it down again.
             (KeyCode::Char('l'), _) | (KeyCode::Right, _) => cycle_selected(dialog, live, false),
             (KeyCode::Char('h'), _) | (KeyCode::Left, _) => cycle_selected(dialog, live, true),
-            // `s` and `d` reach their panels from anywhere, including from
+            // `s`, `d`, and `b` reach their panels from anywhere, including from
             // inside another one -- the menu lists them, so they have to work
             // there or the menu is lying.
             //
@@ -786,10 +947,13 @@ fn route(
             // was reached THROUGH the menu, so esc goes back to it. Losing
             // that is why esc closed everything from a panel the menu opened.
             (KeyCode::Char('s'), _) if !matches!(dialog, Dialog::Settings { .. }) => {
-                *open = Some(settings_dialog(live.interval_ms));
+                *open = Some(settings_dialog(DaemonSettings::from(&*live)));
             }
             (KeyCode::Char('d'), _) if !matches!(dialog, Dialog::Doctor { .. }) => {
                 *open = Some(doctor_dialog());
+            }
+            (KeyCode::Char('b'), _) if !matches!(dialog, Dialog::Bridges { .. }) => {
+                *open = Some(bridges_dialog(it.live_panes.clone(), live.prune_after_days));
             }
             (KeyCode::Char('s'), _) => {
                 it.notice = Some(
@@ -812,6 +976,30 @@ fn route(
                     }
                 }
             }
+            (KeyCode::Char('p'), _) => {
+                if let Dialog::Bridges {
+                    root,
+                    retention: Some(retention),
+                    view,
+                    pending,
+                    ..
+                } = dialog
+                {
+                    let can_prune = matches!(
+                        view,
+                        crate::sidebar::bridges::View::Ready(snapshot)
+                            if snapshot.stale_count > 0
+                    );
+                    if can_prune {
+                        *pending = Some(crate::sidebar::bridges::prune(
+                            root.clone(),
+                            *retention,
+                            it.live_panes.clone(),
+                        ));
+                        *view = crate::sidebar::bridges::View::Pruning;
+                    }
+                }
+            }
             (KeyCode::Char('r'), _) => {
                 if let Dialog::Update { check, pending, .. } = dialog {
                     *pending = Some(crate::sidebar::release::check());
@@ -824,12 +1012,30 @@ fn route(
                     *report = crate::agents::claude_bridge::doctor_report();
                     *taken_at = now_unix_ms();
                 }
+                if let Dialog::Bridges {
+                    root,
+                    retention,
+                    view,
+                    pending,
+                    ..
+                } = dialog
+                {
+                    *pending = Some(crate::sidebar::bridges::read(
+                        root.clone(),
+                        *retention,
+                        it.live_panes.clone(),
+                    ));
+                    *view = crate::sidebar::bridges::View::Reading;
+                }
             }
             (KeyCode::Enter, _) | (KeyCode::Char('o'), _) => {
                 cycle_selected(dialog, live, false);
                 if let Dialog::Menu { cursor } = dialog {
                     *open = Some(match *cursor {
-                        MENU_SETTINGS => settings_dialog(live.interval_ms),
+                        MENU_SETTINGS => settings_dialog(DaemonSettings::from(&*live)),
+                        MENU_BRIDGES => {
+                            bridges_dialog(it.live_panes.clone(), live.prune_after_days)
+                        }
                         MENU_UPDATE => update_dialog(),
                         _ => doctor_dialog(),
                     });
@@ -840,7 +1046,7 @@ fn route(
         return KeyOutcome::Handled;
     }
 
-    // `s` and `d` are panel keys, not card-list keys: from the cards they do
+    // `s`, `d`, and `b` are panel keys, not card-list keys: from the cards they do
     // nothing. One way in -- `x` -- is what makes them unambiguous, and `s`
     // three rows from `x` on the keyboard was being pressed for it.
     match (key.code, key.modifiers) {
@@ -871,6 +1077,34 @@ fn taken_ago(taken_at: u64, now: u64) -> String {
     } else {
         format!("{age} ago")
     }
+}
+
+fn daemon_settings_warning(live: &crate::sidebar::live::Live, running: DaemonSettings) -> String {
+    let mut changed = Vec::new();
+    if live.interval_ms != running.interval_ms {
+        changed.push(format!(
+            "interval ms is {} but the daemon is running {}",
+            live.interval_ms, running.interval_ms
+        ));
+    }
+    if live.prune_after_days != running.prune_after_days {
+        let show = |days: u32| {
+            if days == 0 {
+                "off".to_string()
+            } else {
+                days.to_string()
+            }
+        };
+        changed.push(format!(
+            "prune after days is {} but the daemon is running {}",
+            show(live.prune_after_days),
+            show(running.prune_after_days)
+        ));
+    }
+    format!(
+        "{}. The daemon reads the file once at startup, so this only takes effect when it restarts.",
+        changed.join("; ")
+    )
 }
 
 fn panel_for(
@@ -912,7 +1146,7 @@ fn panel_for(
         Dialog::Settings {
             cursor,
             confirm,
-            interval_at_open,
+            daemon_at_open,
             ..
         } => {
             let rows: Vec<Row> = crate::sidebar::live::SETTINGS
@@ -923,20 +1157,13 @@ fn panel_for(
                     enabled: true,
                 })
                 .collect();
-            // No standing warning: `interval ms` only needs explaining at the
-            // moment it matters, which is when you try to leave with it
-            // changed. Until then it is three lines of the panel spent on
-            // something that has not happened.
+            // No standing warning: daemon settings only need explaining when
+            // you try to leave with one changed.
             if let Some(choice) = confirm {
                 return Panel {
                     title: "Restart the daemon?".into(),
                     rows: vec![
-                        Row::Warn(format!(
-                            "interval ms is {} but the daemon is running {}. It reads the \
-                             file once at startup, so this only takes effect when it \
-                             restarts.",
-                            live.interval_ms, interval_at_open
-                        )),
+                        Row::Warn(daemon_settings_warning(live, *daemon_at_open)),
                         Row::Rule,
                         Row::Entry {
                             label: "restart now".into(),
@@ -945,7 +1172,10 @@ fn panel_for(
                         },
                         Row::Entry {
                             label: "cancel".into(),
-                            value: format!("put it back to {interval_at_open}"),
+                            value: format!(
+                                "put them back to {} ms / {} days",
+                                daemon_at_open.interval_ms, daemon_at_open.prune_after_days
+                            ),
                             enabled: true,
                         },
                     ],
@@ -1025,6 +1255,29 @@ fn panel_for(
                 title: "Update".into(),
                 rows,
                 footer,
+                cursor: None,
+                offset: *offset,
+            }
+        }
+        Dialog::Bridges {
+            offset,
+            retention,
+            view,
+            ..
+        } => {
+            let footer = match view {
+                crate::sidebar::bridges::View::Ready(snapshot)
+                    if retention.is_some() && snapshot.stale_count > 0 =>
+                {
+                    "j/k scroll · p prune · r reread · esc back"
+                }
+                crate::sidebar::bridges::View::Failed(_) => "r retry · esc back",
+                _ => "j/k scroll · r reread · esc back",
+            };
+            Panel {
+                title: "Bridges".into(),
+                rows: bridge_rows(view),
+                footer: footer.into(),
                 cursor: None,
                 offset: *offset,
             }
@@ -1183,8 +1436,8 @@ pub fn run() -> i32 {
     cfg.write_problem_log();
 
     let mut state = State::default();
-    // The daemon's interval is not in `Loaded` -- it deliberately skips
-    // [daemon] -- so the panel reads it from the same place the daemon does.
+    // The environment-overridable interval comes from the daemon's loader;
+    // `Loaded` supplies the retention value shown by the panel.
     let mut live = crate::sidebar::live::Live::from_config(
         &cfg,
         crate::daemon::config::DaemonConfig::load()
@@ -1228,6 +1481,26 @@ pub fn run() -> i32 {
                     Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                         *check = crate::sidebar::release::Check::Failed(
                             "the check stopped without a result".into(),
+                        );
+                        *pending = None;
+                        dirty = true;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                }
+            }
+        }
+
+        if let Some(Dialog::Bridges { view, pending, .. }) = open.as_mut() {
+            if let Some(rx) = pending {
+                match rx.try_recv() {
+                    Ok(fresh) => {
+                        *view = fresh;
+                        *pending = None;
+                        dirty = true;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        *view = crate::sidebar::bridges::View::Failed(
+                            "the directory read stopped without a result".into(),
                         );
                         *pending = None;
                         dirty = true;
@@ -1420,6 +1693,7 @@ pub fn run() -> i32 {
             match crossterm::event::read() {
                 Ok(Event::Key(key)) => {
                     dirty = true;
+                    it.live_panes = state.panes.keys().cloned().collect();
                     if let KeyOutcome::Quit = route(
                         key,
                         &mut open,
@@ -1691,7 +1965,7 @@ mod tests {
         let live = live_default();
         let mut dialog = Dialog::Settings {
             cursor: 0,
-            interval_at_open: crate::sidebar::live::DEFAULT_INTERVAL_MS,
+            daemon_at_open: DaemonSettings::from(&live),
             confirm: None,
             dirty: vec![crate::sidebar::live::Setting::Sort],
             path: Some(path.clone()),
@@ -1712,7 +1986,7 @@ mod tests {
         let live = live_default();
         let mut dialog = Dialog::Settings {
             cursor: 0,
-            interval_at_open: crate::sidebar::live::DEFAULT_INTERVAL_MS,
+            daemon_at_open: DaemonSettings::from(&live),
             confirm: None,
             dirty: vec![crate::sidebar::live::Setting::Sort],
             path: Some("/nowhere/config.toml".into()),
@@ -1722,13 +1996,20 @@ mod tests {
         assert!(error.contains("no such file"), "{error}");
     }
 
-    fn settings_with_interval(at_open: u32, confirm: Option<usize>) -> Dialog {
+    fn settings_with_daemon(
+        interval_ms: u32,
+        prune_after_days: u32,
+        confirm: Option<usize>,
+    ) -> Dialog {
         Dialog::Settings {
             cursor: 0,
             dirty: Vec::new(),
             path: None,
             source: Ok(None),
-            interval_at_open: at_open,
+            daemon_at_open: DaemonSettings {
+                interval_ms,
+                prune_after_days,
+            },
             confirm,
         }
     }
@@ -1741,7 +2022,7 @@ mod tests {
         let mut it = Interaction::default();
         let mut live = live_default();
         live.interval_ms = 5000;
-        let mut open = Some(settings_with_interval(1000, None));
+        let mut open = Some(settings_with_daemon(1000, live.prune_after_days, None));
 
         route(
             press(KeyCode::Esc),
@@ -1767,12 +2048,57 @@ mod tests {
     }
 
     #[test]
+    fn esc_with_changed_pruning_raises_a_prompt_instead_of_closing() {
+        let r = two_cards();
+        let mut it = Interaction::default();
+        let mut live = live_default();
+        let mut open = Some(settings_with_daemon(
+            live.interval_ms,
+            live.prune_after_days,
+            None,
+        ));
+        live.prune_after_days = 30;
+
+        route(
+            press(KeyCode::Esc),
+            &mut open,
+            &mut it,
+            &mut live,
+            &r,
+            10,
+            40,
+            60,
+            24,
+        );
+        assert!(
+            matches!(
+                open.as_ref(),
+                Some(Dialog::Settings {
+                    confirm: Some(_),
+                    ..
+                })
+            ),
+            "esc should ask when pruning changed, even if the interval did not"
+        );
+        let panel = panel_for(
+            open.as_ref().expect("settings prompt"),
+            &live,
+            &crate::sidebar::config::Loaded::from_missing(),
+            0,
+        );
+        assert!(matches!(
+            panel.rows.first(),
+            Some(crate::sidebar::dialog::Row::Warn(text)) if text.contains("prune after days")
+        ));
+    }
+
+    #[test]
     fn an_unchanged_interval_leaves_esc_alone() {
         let r = two_cards();
         let mut it = Interaction::default();
         let mut live = live_default();
         let interval = live.interval_ms;
-        let mut open = Some(settings_with_interval(interval, None));
+        let mut open = Some(settings_with_daemon(interval, live.prune_after_days, None));
 
         route(
             press(KeyCode::Esc),
@@ -1807,7 +2133,7 @@ mod tests {
             let mut it = Interaction::default();
             let mut live = live_default();
             live.interval_ms = 5000;
-            let mut open = Some(settings_with_interval(1000, Some(0)));
+            let mut open = Some(settings_with_daemon(1000, live.prune_after_days, Some(0)));
             route(
                 press(code),
                 &mut open,
@@ -1833,12 +2159,13 @@ mod tests {
     }
 
     #[test]
-    fn cancelling_puts_the_interval_back() {
+    fn cancelling_puts_both_daemon_settings_back() {
         let r = two_cards();
         let mut it = Interaction::default();
         let mut live = live_default();
         live.interval_ms = 5000;
-        let mut open = Some(settings_with_interval(1000, Some(1)));
+        live.prune_after_days = 30;
+        let mut open = Some(settings_with_daemon(1000, 7, Some(1)));
         route(
             press(KeyCode::Enter),
             &mut open,
@@ -1851,6 +2178,10 @@ mod tests {
             24,
         );
         assert_eq!(live.interval_ms, 1000, "cancel means it was never changed");
+        assert_eq!(
+            live.prune_after_days, 7,
+            "cancel restores the retention too"
+        );
         assert!(matches!(open, Some(Dialog::Menu { .. })));
         assert!(
             it.notice.as_deref().is_some_and(|n| n.contains("1000")),
@@ -1984,6 +2315,7 @@ mod tests {
                 open.as_ref().map(std::mem::discriminant),
                 doctor_taken_at(&open),
                 update_state(&open),
+                bridge_state(&open),
             );
             let outcome = route(
                 crossterm::event::KeyEvent::new(code, modifiers),
@@ -2005,6 +2337,7 @@ mod tests {
                 open.as_ref().map(std::mem::discriminant),
                 doctor_taken_at(&open),
                 update_state(&open),
+                bridge_state(&open),
             );
             assert!(
                 matches!(outcome, KeyOutcome::Quit) || before != after,
@@ -2072,7 +2405,7 @@ mod tests {
         let mut it = Interaction::default();
         let mut open = Some(Dialog::Settings {
             cursor: 0,
-            interval_at_open: crate::sidebar::live::DEFAULT_INTERVAL_MS,
+            daemon_at_open: DaemonSettings::from(&live),
             confirm: None,
             dirty: Vec::new(),
             path: None,
@@ -2568,10 +2901,95 @@ mod tests {
                 (&open, label),
                 (Some(Dialog::Settings { .. }), "Settings")
                     | (Some(Dialog::Doctor { .. }), "Doctor")
+                    | (Some(Dialog::Bridges { .. }), "Bridges")
                     | (Some(Dialog::Update { .. }), "Update")
             );
             assert!(opened, "{key} should open {label} from the menu");
         }
+    }
+
+    #[test]
+    fn p_is_inert_when_nothing_is_stale() {
+        let r = two_cards();
+        let mut it = Interaction::default();
+        let mut live = live_default();
+        let mut open = Some(Dialog::Bridges {
+            offset: 0,
+            root: Ok("/does/not/exist".into()),
+            retention: Some(std::time::Duration::from_secs(1)),
+            view: crate::sidebar::bridges::View::Ready(crate::sidebar::bridges::Snapshot {
+                entries: Vec::new(),
+                total_bytes: 0,
+                stale_count: 0,
+                removed: None,
+            }),
+            pending: None,
+        });
+
+        route(
+            press(KeyCode::Char('p')),
+            &mut open,
+            &mut it,
+            &mut live,
+            &r,
+            10,
+            40,
+            60,
+            24,
+        );
+
+        assert!(matches!(
+            open,
+            Some(Dialog::Bridges {
+                view: crate::sidebar::bridges::View::Ready(_),
+                pending: None,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn the_bridge_panel_distinguishes_a_live_pane_from_a_dead_one() {
+        use crate::sidebar::bridges::{Entry, Snapshot, View};
+
+        let entry = |pane_id: &str, live| Entry {
+            pane_id: pane_id.into(),
+            workspace_id: "workspace".into(),
+            quiet_for: Some(std::time::Duration::from_secs(60)),
+            bytes: 10,
+            live,
+            stale: false,
+        };
+        let dialog = Dialog::Bridges {
+            offset: 0,
+            root: Ok("/does/not/exist".into()),
+            retention: Some(std::time::Duration::from_secs(1)),
+            view: View::Ready(Snapshot {
+                entries: vec![entry("pane-a", true), entry("pane-b", false)],
+                total_bytes: 20,
+                stale_count: 0,
+                removed: None,
+            }),
+            pending: None,
+        };
+
+        let text = rows_text(
+            &panel_for(
+                &dialog,
+                &live_default(),
+                &crate::sidebar::config::Loaded::from_missing(),
+                0,
+            )
+            .rows,
+        );
+        assert!(
+            text.contains("pane-a · workspace 1m · 10 B · live"),
+            "{text}"
+        );
+        assert!(
+            text.contains("pane-b · workspace 1m · 10 B · dead"),
+            "{text}"
+        );
     }
     /// `installed 0.1.5` beside `latest v0.1.5` reads as two versions when it
     /// is one. The panel strips the tag's `v`; the tag itself still goes to

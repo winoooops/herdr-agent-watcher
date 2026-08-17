@@ -18,6 +18,7 @@ pub(crate) fn state_socket_path() -> std::path::PathBuf {
 
 #[cfg(all(feature = "runtime", unix))]
 pub mod consent;
+pub mod prune;
 #[cfg(all(feature = "runtime", unix))]
 pub mod reconcile;
 #[cfg(all(feature = "runtime", unix))]

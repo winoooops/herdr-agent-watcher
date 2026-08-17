@@ -128,6 +128,7 @@ setting rather than the plugin.
 | Key | Values | Default | What it does |
 | --- | --- | --- | --- |
 | `daemon.interval_ms` | positive integer | `1000` | Reconcile interval. Read at startup, so a change needs `restart-daemon`. `AGENT_WATCHER_INTERVAL_MS` outranks it |
+| `daemon.prune_after_days` | `7`, `14`, `30`; `0` disables | `7` | Removes session dirs unwritten that long. Startup-only; restart required |
 | `appearance.theme` | `inherit`, `lumon` | `inherit` | `inherit` uses your terminal's colours; `lumon` paints its own |
 | `appearance.agent_mark` | `dot`, `initial`, `symbol` | `dot` | The agent's mark on a card |
 | `cards.auto_expand` | `none`, `all` | `none` | Start cards expanded |
@@ -162,6 +163,11 @@ interval_ms = 5000
 scope = "workspace"
 sort  = "position"
 ```
+
+Each session directory contains only `attention.jsonl` and `status.json`; the scripts live
+once at the state root. Removing a quiet directory is safe because the next write recreates
+it (`append_attention` creates its parent). A still-running session comes back without
+history that nothing was reading.
 
 Run [`doctor`](#doctor) to see whether a setting was rejected and what was used instead.
 
@@ -332,9 +338,16 @@ Run all regular tests with `cargo test`.
 - [x] Read settings from the plugin's own `config.toml` instead of
       `AGENT_WATCHER_INTERVAL_MS`, so configuration no longer depends on which environment
       the Herdr server was launched from
-- [ ] Reap dead bridge directories. Key the reaper on **liveness** — the pane id is absent
-      from Herdr's pane list *and* no process holds it — never on unbind (rebind is the
-      common case) and never on mtime (it would hit long-idle panes that are still open)
+- [x] Reap bridge session directories by mtime. This is safe because a removed directory
+      is recreated on the next write; liveness tracking was only proposed to avoid deleting
+      state that could not regenerate
+- [ ] Fix resumed Kimi sessions flickering once per reconcile tick. `bind_pane` adds the
+      card before binding, then rolls it back when the bind fails. The fallback locator only
+      accepts a session created within its 30-second ownership window, while the index path
+      also accepts `session_resume_at`; the observed session was created Aug 11 at 02:23 and
+      its process started Aug 17 at 06:51. Register the frozen-port change in
+      `PORT-SURFACE.md`, and promote the bind failure from `warn!` to `error!` because
+      `env_logger` defaults to errors and otherwise hides the cause
 - [x] Publish a prebuilt binary per release so `cargo` is not required to install.
       `[[build]]` runs `scripts/fetch-or-build.sh`, which fetches the asset matching the
       platform, verifies its SHA256, and compiles instead on any failure

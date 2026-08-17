@@ -1,9 +1,9 @@
 //! Saving the settings panel's changes into `config.toml`.
 //!
-//! Keys, not the file. `Loaded` models five tables and skips `[daemon]`
-//! entirely, so serialising it back would delete the daemon's interval along
-//! with every comment. `toml_edit` changes the keys it is given and leaves the
-//! rest of the document exactly as the operator wrote it.
+//! Keys, not the file. `Loaded` is not a lossless model of `config.toml`, so
+//! serialising it back would delete values and every comment. `toml_edit`
+//! changes the keys it is given and leaves the rest of the document exactly
+//! as the operator wrote it.
 
 use toml_edit::{value, DocumentMut, Item, Table};
 
@@ -22,6 +22,7 @@ fn table_and_key(setting: Setting) -> (&'static str, &'static str) {
         // The daemon's table. The sidebar's loader skips it entirely, which is
         // exactly why saving edits keys instead of rewriting the file.
         Setting::IntervalMs => ("daemon", "interval_ms"),
+        Setting::PruneAfterDays => ("daemon", "prune_after_days"),
     }
 }
 
@@ -30,6 +31,7 @@ fn item_for(live: &Live, setting: Setting) -> Item {
         Setting::HideIdle => value(live.hide_idle),
         Setting::TraceLines => value(i64::from(live.trace_lines)),
         Setting::IntervalMs => value(i64::from(live.interval_ms)),
+        Setting::PruneAfterDays => value(i64::from(live.prune_after_days)),
         other => value(live.value(other)),
     }
 }
@@ -177,6 +179,36 @@ scope = \"workspace\"
             reloaded.status.problems, 0,
             "{:?}",
             reloaded.problem_details
+        );
+    }
+
+    #[test]
+    fn changing_prune_after_days_preserves_every_other_key_and_comment() {
+        let mut live = live_with(
+            crate::sidebar::select::Sort::Position,
+            crate::sidebar::config::Scope::All,
+        );
+        live.prune_after_days = 30;
+        let out = edit(EXISTING, &live, &[Setting::PruneAfterDays]).expect("edit");
+
+        assert_eq!(
+            out,
+            "\
+# how often the daemon reconciles
+[daemon]
+interval_ms = 3000
+prune_after_days = 30
+
+[agent.claude]
+label = \"CC\"
+
+[list]
+sort = \"position\"
+"
+        );
+        assert_eq!(
+            crate::sidebar::config::Loaded::from_toml(&out).prune_after_days,
+            30
         );
     }
 

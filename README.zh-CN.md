@@ -121,6 +121,7 @@ herdr plugin action invoke stop-daemon --plugin herdr-agent-watcher
 | 键 | 取值 | 默认 | 作用 |
 | --- | --- | --- | --- |
 | `daemon.interval_ms` | 正整数 | `1000` | 对账间隔。启动时读取，改完需 `restart-daemon`。`AGENT_WATCHER_INTERVAL_MS` 优先级更高 |
+| `daemon.prune_after_days` | `7`、`14`、`30`；`0` 关闭 | `7` | 删除这么久无人写入的会话目录。启动时读取，改完需重启 |
 | `appearance.theme` | `inherit`、`lumon` | `inherit` | `inherit` 沿用终端配色；`lumon` 自带一套 |
 | `appearance.agent_mark` | `dot`、`initial`、`symbol` | `dot` | 卡片上 agent 的标记 |
 | `cards.auto_expand` | `none`、`all` | `none` | 卡片默认展开 |
@@ -155,6 +156,10 @@ interval_ms = 5000
 scope = "workspace"
 sort  = "position"
 ```
+
+每个会话目录里只有 `attention.jsonl` 和 `status.json`；脚本只在 state 根目录存一份。
+删除沉寂的目录是安全的，因为下次写入会重新创建它（`append_attention` 会创建父目录）。
+仍在运行的会话会恢复，只是少了原本就无人读取的历史。
 
 运行 [`doctor`](#doctor) 可查看某项设置是否被拒绝，以及实际改用了什么值。
 
@@ -309,9 +314,13 @@ cargo test --test e2e_real_herdr -- --ignored
 
 - [x] 从插件自己的 `config.toml` 读配置，取代 `AGENT_WATCHER_INTERVAL_MS`，
       这样配置就不再取决于 Herdr server 是从哪个环境启动的
-- [ ] 回收失效的 bridge 目录。判据用**存活性** —— pane id 不在 Herdr 的 pane 列表里
-      **且**没有进程持有它 —— 绝不用 unbind（rebind 是常态），也绝不用 mtime
-      （会误伤长时间空闲但仍开着的 pane）
+- [x] 按 mtime 回收 bridge 会话目录。这样做是安全的，因为被删除的目录会在下次写入时
+      重新创建；之前提出存活性跟踪，只是为了避免删除无法再生的状态
+- [ ] 修复恢复旧 Kimi 会话时每个 reconcile tick 闪一次的卡片。`bind_pane` 会先添加卡片，
+      bind 失败后再回滚删除。fallback locator 只接受在 30 秒归属窗口内创建的会话，而 index
+      路径还会接受 `session_resume_at`；实测会话创建于 8 月 11 日 02:23，进程启动于 8 月 17 日
+      06:51。冻结 port 的改动须登记到 `PORT-SURFACE.md`，同时把 bind 失败从 `warn!` 提升为
+      `error!`，因为 `env_logger` 默认只显示 error，否则真正原因不可见
 - [x] 每个 release 发布预编译二进制，让安装不再需要 `cargo`。`[[build]]` 现在跑
       `scripts/fetch-or-build.sh`：下载匹配平台的产物、校验 SHA256，任何一步失败就改为编译
 - [x] sidebar 内的设置面板与 doctor 面板，让最常用的配置和最常用的诊断都不必离开这个 pane

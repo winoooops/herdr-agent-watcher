@@ -1,4 +1,5 @@
 pub mod agent_ids;
+pub mod bridges;
 pub mod config;
 pub mod dialog;
 pub mod layout;

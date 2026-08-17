@@ -132,6 +132,7 @@ herdr plugin action invoke stop-daemon --plugin herdr-agent-watcher
 | キー | 値 | 既定 | 役割 |
 | --- | --- | --- | --- |
 | `daemon.interval_ms` | 正の整数 | `1000` | 突き合わせ間隔。起動時に読むため変更には `restart-daemon` が必要。`AGENT_WATCHER_INTERVAL_MS` が優先される |
+| `daemon.prune_after_days` | `7`、`14`、`30`、無効は `0` | `7` | その日数書かれていないセッションディレクトリを削除。起動時に読み、変更には再起動が必要 |
 | `appearance.theme` | `inherit`、`lumon` | `inherit` | `inherit` は端末の配色、`lumon` は独自の配色 |
 | `appearance.agent_mark` | `dot`、`initial`、`symbol` | `dot` | カード上のエージェントの印 |
 | `cards.auto_expand` | `none`、`all` | `none` | カードを最初から展開する |
@@ -166,6 +167,11 @@ interval_ms = 5000
 scope = "workspace"
 sort  = "position"
 ```
+
+各セッションディレクトリにあるのは `attention.jsonl` と `status.json` だけで、スクリプトは
+state ルートに 1 組だけあります。静かなディレクトリを削除しても、次の書き込みが再作成する
+ため安全です（`append_attention` が親を作成します）。実行中のセッションは、誰も読んで
+いなかった履歴を失うだけで戻ります。
 
 設定が拒否されたか、代わりに何が使われたかは [`doctor`](#doctor) で確認できます。
 
@@ -340,10 +346,16 @@ cargo test --test e2e_real_herdr -- --ignored
 
 - [x] `AGENT_WATCHER_INTERVAL_MS` の代わりに、プラグイン自身の `config.toml` から設定を
       読む。設定が「Herdr サーバーがどの環境から起動されたか」に依存しなくなる
-- [ ] 不要になったブリッジディレクトリの回収。判定は**生存性**で — pane id が Herdr の
-      ペイン一覧に無く、**かつ**どのプロセスも保持していないこと。unbind では絶対に行わず
-      （rebind が通常の流れ）、mtime でも行わない（開いたままの長時間アイドルなペインを
-      巻き込む）
+- [x] mtime でブリッジのセッションディレクトリを回収する。削除されたディレクトリは次の
+      書き込みで再作成されるため安全であり、生存性の追跡は再生成できない状態を削除しない
+      ためだけに提案されていた
+- [ ] 過去の Kimi セッションを再開すると reconcile tick ごとにカードが点滅する問題を直す。
+      `bind_pane` は bind 前にカードを追加し、bind 失敗時に削除してロールバックする。
+      fallback locator は 30 秒の所有時間枠内に作成されたセッションだけを受け入れる一方、
+      index 経路は `session_resume_at` も受け入れる。観測時はセッション作成が 8 月 11 日
+      02:23、プロセス開始が 8 月 17 日 06:51 だった。凍結 port の変更を
+      `PORT-SURFACE.md` に登録し、`env_logger` は既定で error だけを表示するため、原因を隠す
+      bind 失敗を `warn!` から `error!` に引き上げる
 - [x] リリースごとにビルド済みバイナリを公開し、インストールに `cargo` を不要にする。
       `[[build]]` は `scripts/fetch-or-build.sh` を実行し、プラットフォームに合うアセットを
       取得して SHA256 を検証、失敗時はコンパイルにフォールバックする

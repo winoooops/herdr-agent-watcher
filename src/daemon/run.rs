@@ -29,6 +29,51 @@ fn startup_config() -> (Duration, Vec<String>) {
     (interval, config.problems)
 }
 
+/// How often a daemon that keeps running sweeps again.
+///
+/// The retention is measured in days, so a directory that becomes eligible at
+/// noon does not need collecting by one o'clock. Most daemons never reach this
+/// -- herdr restarts them, and so does every plugin upgrade -- which makes the
+/// sweep at startup the one that does the work and this the backstop for the
+/// one that runs for a week.
+const SWEEP_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// Sweep on its own thread, forever, until the daemon goes down.
+///
+/// Not in the reconcile loop: that runs every second and owns pane state,
+/// while this walks a directory tree and calls `remove_dir_all` on what it
+/// finds -- 402 of them in the tree that motivated this. A slow disk would
+/// show up as late pane updates, which is a strange way to learn your disk is
+/// slow.
+fn spawn_sweeper(
+    root: std::path::PathBuf,
+    retention: Duration,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+) {
+    std::thread::spawn(move || {
+        while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+            let (removed, bytes) =
+                crate::daemon::prune::sweep(&root, retention, std::time::SystemTime::now());
+            if removed > 0 {
+                log::error!(
+                    "[daemon] swept {removed} session director{} unwritten for {} days, \
+                     freeing {} KB",
+                    if removed == 1 { "y" } else { "ies" },
+                    retention.as_secs() / 86_400,
+                    bytes / 1024
+                );
+            }
+            // In slices, so shutdown does not wait a day to be noticed.
+            let wake = std::time::Instant::now() + SWEEP_EVERY;
+            while std::time::Instant::now() < wake
+                && !stop.load(std::sync::atomic::Ordering::Relaxed)
+            {
+                std::thread::sleep(Duration::from_secs(1));
+            }
+        }
+    });
+}
+
 fn app_data_dir() -> std::path::PathBuf {
     std::env::var_os("HERDR_PLUGIN_STATE_DIR")
         .map(std::path::PathBuf::from)
@@ -150,6 +195,9 @@ pub fn run() -> i32 {
         // inherited environment is what this change exists to stop depending
         // on.
         log::error!("[daemon] config.toml: {problem}");
+    }
+    if let Some(retention) = crate::daemon::config::DaemonConfig::load().prune_after {
+        spawn_sweeper(app_data_dir(), retention, singleton.shutdown.clone());
     }
 
     while !singleton

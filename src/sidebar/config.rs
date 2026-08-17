@@ -67,6 +67,9 @@ pub struct Loaded {
     /// `daemon::config` because the sidebar's loader is what reports unknown
     /// tables, and this key is about the sidebar.
     pub open_sidebar_key: String,
+    /// The daemon owns validation and diagnostics for this key, but the
+    /// settings panel needs the value currently in the file.
+    pub prune_after_days: u32,
     pub appearances: AgentAppearances,
     pub status: ConfigStatus,
     pub problem_details: Vec<String>,
@@ -85,6 +88,7 @@ impl Default for Loaded {
             scope: Scope::default(),
             workspace_id: None,
             open_sidebar_key: DEFAULT_OPEN_SIDEBAR_KEY.to_string(),
+            prune_after_days: crate::daemon::prune::DEFAULT_RETENTION_DAYS,
             appearances: builtin_appearances(),
             status: ConfigStatus {
                 problems: 0,
@@ -197,10 +201,10 @@ impl Loaded {
                 "cards" => out.read_cards(value),
                 "list" => out.read_list(value),
                 "agent" => out.read_agents(value),
-                // The daemon's section, parsed by `daemon::config`. Reading it
-                // here would duplicate that parse; reporting it would make a
-                // correct file look broken.
-                "daemon" => {}
+                // The daemon still owns validation and diagnostics. The
+                // sidebar reads the retained-days value only so its settings
+                // panel shows what is actually in the file.
+                "daemon" => out.read_daemon(value),
                 "keys" => out.read_keys(value),
                 other => out.problem(format!("unknown table [{other}]")),
             }
@@ -312,6 +316,18 @@ impl Loaded {
                 },
                 other => self.problem(format!("unknown key keys.{other}")),
             }
+        }
+    }
+
+    fn read_daemon(&mut self, v: &Value) {
+        let Some(t) = v.as_table() else {
+            return;
+        };
+        let Some(days) = t.get("prune_after_days").and_then(Value::as_integer) else {
+            return;
+        };
+        if let Ok(days) = u32::try_from(days) {
+            self.prune_after_days = days;
         }
     }
 
@@ -443,8 +459,9 @@ mod tests {
 
     #[test]
     fn the_daemons_table_is_not_the_sidebars_problem() {
-        let l = load_str("[daemon]\ninterval_ms = 5000\n");
+        let l = load_str("[daemon]\ninterval_ms = 5000\nprune_after_days = 30\n");
         assert_eq!(l.status.problems, 0, "{:?}", l.problem_details);
+        assert_eq!(l.prune_after_days, 30);
     }
 
     #[test]

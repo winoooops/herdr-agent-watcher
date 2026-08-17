@@ -25,28 +25,29 @@ pub struct Live {
     /// take effect here -- the daemon reads it once at startup, so the row
     /// carries a warning rather than pretending the change is live.
     pub interval_ms: u32,
+    pub prune_after_days: u32,
 }
 
 /// Move one rung, clamped. A value not on the ladder -- hand-written in the
 /// file -- snaps to the nearest rung in the direction asked for.
-fn step_ladder(current: u32, direction: i32) -> u32 {
+fn step_ladder(ladder: &[u32], current: u32, direction: i32) -> u32 {
     // The strictly-next rung in the direction asked for. Written this way
     // rather than as an index step because a value hand-written into the file
     // need not be on the ladder at all -- and "the rung at or above 1500" is
     // 2000, which is the wrong answer for a decrease.
     if direction > 0 {
-        INTERVALS_MS
+        ladder
             .iter()
             .find(|value| **value > current)
             .copied()
-            .unwrap_or(INTERVALS_MS[INTERVALS_MS.len() - 1])
+            .unwrap_or(ladder[ladder.len() - 1])
     } else {
-        INTERVALS_MS
+        ladder
             .iter()
             .rev()
             .find(|value| **value < current)
             .copied()
-            .unwrap_or(INTERVALS_MS[0])
+            .unwrap_or(ladder[0])
     }
 }
 
@@ -54,11 +55,17 @@ fn step_ladder(current: u32, direction: i32) -> u32 {
 /// step a value, and a list of sensible reconciliation periods is what
 /// someone is choosing between.
 pub const INTERVALS_MS: [u32; 7] = [250, 500, 1000, 2000, 3000, 5000, 10_000];
+const PRUNE_AFTER_DAYS: [u32; 4] = [
+    0,
+    crate::daemon::prune::RETENTIONS_DAYS[0],
+    crate::daemon::prune::RETENTIONS_DAYS[1],
+    crate::daemon::prune::RETENTIONS_DAYS[2],
+];
 
 pub const DEFAULT_INTERVAL_MS: u32 = 1000;
 
 impl Live {
-    /// `Loaded` does not model `[daemon]`, so the interval arrives separately.
+    /// The daemon's environment-overridable interval arrives separately.
     pub fn from_config(cfg: &Loaded, daemon_interval_ms: u32) -> Self {
         Self::build(cfg, daemon_interval_ms)
     }
@@ -83,6 +90,7 @@ impl Live {
             theme: cfg.theme,
             agent_mark: cfg.agent_mark,
             interval_ms: daemon_interval_ms,
+            prune_after_days: cfg.prune_after_days,
         }
     }
 }
@@ -111,9 +119,10 @@ pub enum Setting {
     Theme,
     AgentMark,
     IntervalMs,
+    PruneAfterDays,
 }
 
-pub const SETTINGS: [Setting; 9] = [
+pub const SETTINGS: [Setting; 10] = [
     Setting::Sort,
     Setting::Scope,
     Setting::HideIdle,
@@ -123,6 +132,7 @@ pub const SETTINGS: [Setting; 9] = [
     Setting::Theme,
     Setting::AgentMark,
     Setting::IntervalMs,
+    Setting::PruneAfterDays,
 ];
 
 impl Setting {
@@ -137,6 +147,7 @@ impl Setting {
             Setting::Theme => "theme",
             Setting::AgentMark => "agent mark",
             Setting::IntervalMs => "interval ms",
+            Setting::PruneAfterDays => "prune after days",
         }
     }
 }
@@ -173,6 +184,8 @@ impl Live {
             }
             .into(),
             Setting::IntervalMs => self.interval_ms.to_string(),
+            Setting::PruneAfterDays if self.prune_after_days == 0 => "off".into(),
+            Setting::PruneAfterDays => self.prune_after_days.to_string(),
             Setting::AgentMark => match self.agent_mark {
                 AgentMark::Dot => "dot",
                 AgentMark::Initial => "initial",
@@ -222,7 +235,12 @@ impl Live {
             }
             // Clamped, not wrapped: a held key must not jump 20 → 1.
             Setting::TraceLines => self.trace_lines = (self.trace_lines + 1).min(20),
-            Setting::IntervalMs => self.interval_ms = step_ladder(self.interval_ms, 1),
+            Setting::IntervalMs => {
+                self.interval_ms = step_ladder(&INTERVALS_MS, self.interval_ms, 1)
+            }
+            Setting::PruneAfterDays => {
+                self.prune_after_days = step_ladder(&PRUNE_AFTER_DAYS, self.prune_after_days, 1)
+            }
             Setting::Theme => {
                 self.theme = match self.theme {
                     Theme::Inherit => Theme::Lumon,
@@ -244,7 +262,12 @@ impl Live {
     pub fn cycle_back(&mut self, setting: Setting, workspace: Option<&str>) {
         match setting {
             Setting::TraceLines => self.trace_lines = self.trace_lines.saturating_sub(1).max(1),
-            Setting::IntervalMs => self.interval_ms = step_ladder(self.interval_ms, -1),
+            Setting::IntervalMs => {
+                self.interval_ms = step_ladder(&INTERVALS_MS, self.interval_ms, -1)
+            }
+            Setting::PruneAfterDays => {
+                self.prune_after_days = step_ladder(&PRUNE_AFTER_DAYS, self.prune_after_days, -1)
+            }
             other => self.cycle(other, workspace),
         }
     }
@@ -264,6 +287,7 @@ mod tests {
         cfg.trace_lines = 9;
         cfg.scope = Scope::Workspace;
         cfg.workspace_id = Some("w4".into());
+        cfg.prune_after_days = 30;
 
         let live = Live::from(&cfg);
         assert_eq!(live.sort, Sort::Smart);
@@ -271,6 +295,7 @@ mod tests {
         assert_eq!(live.trace_lines, 9);
         assert_eq!(live.scope, Scope::Workspace);
         assert_eq!(live.workspace.as_deref(), Some("w4"));
+        assert_eq!(live.prune_after_days, 30);
     }
 
     #[test]
@@ -352,6 +377,21 @@ mod tests {
             live.interval_ms, 2000,
             "the next rung up, not the one after"
         );
+    }
+
+    #[test]
+    fn both_ladders_take_the_strictly_next_rung_in_the_direction_asked_for() {
+        assert_eq!(step_ladder(&INTERVALS_MS, 1500, -1), 1000);
+        assert_eq!(step_ladder(&[0, 7, 14, 30], 10, -1), 7);
+        assert_eq!(step_ladder(&[0, 7, 14, 30], 10, 1), 14);
+    }
+
+    #[test]
+    fn pruning_cycles_to_off_and_names_it() {
+        let mut live = Live::from(&Loaded::from_missing());
+        live.cycle_back(Setting::PruneAfterDays, None);
+        assert_eq!(live.prune_after_days, 0);
+        assert_eq!(live.value(Setting::PruneAfterDays), "off");
     }
 
     #[test]
