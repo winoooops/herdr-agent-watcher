@@ -93,19 +93,19 @@ setting rather than the plugin.
 
 | Key | Values | Default | What it does |
 | --- | --- | --- | --- |
-| `daemon.interval_ms` | positive integer | `1000` | How often the daemon reconciles with Herdr. The daemon reads it at startup, so a change needs `restart-daemon` |
-| `appearance.theme` | `inherit`, `lumon` | `inherit` | `inherit` takes your terminal's colours; `lumon` paints its own dark background |
-| `appearance.agent_mark` | `dot`, `initial`, `symbol` | `dot` | What marks the agent on a card — a coloured dot, its first letter, or the per-agent `symbol` below |
-| `cards.auto_expand` | `none`, `all` | `none` | Whether cards start expanded, showing tool traces without pressing `o` |
+| `daemon.interval_ms` | positive integer | `1000` | Reconcile interval. Read at startup, so a change needs `restart-daemon` |
+| `appearance.theme` | `inherit`, `lumon` | `inherit` | `inherit` uses your terminal's colours; `lumon` paints its own |
+| `appearance.agent_mark` | `dot`, `initial`, `symbol` | `dot` | The agent's mark on a card |
+| `cards.auto_expand` | `none`, `all` | `none` | Start cards expanded |
 | `cards.tool_calls` | `bars`, `jar` | `bars` | How the context meter is drawn |
-| `cards.trace_lines` | `1`–`20` | `5` | How many tool traces an expanded card shows. Out-of-range values are clamped, not rejected |
-| `list.sort` | `position`, `smart`, `group` | `position` | Card order; see the table below |
-| `list.hide_idle` | `true`, `false` | `false` | Hide idle agents, the same as pressing `z` |
-| `list.scope` | `all`, `workspace` | `all` | `workspace` lists only the panes in the sidebar's own workspace, which needs `HERDR_WORKSPACE_ID`; without it the scope degrades to `all` and says so |
-| `keys.open_sidebar` | a Herdr key string | `prefix+a` | The key `bind-sidebar-key` writes into Herdr's config. Set it *before* binding |
-| `agent.<id>.color` | `#rrggbb` | built-in | Overrides one agent's colour |
-| `agent.<id>.label` | any string | built-in | Overrides the name shown on its cards |
-| `agent.<id>.symbol` | any string | built-in | The mark used when `agent_mark = "symbol"` |
+| `cards.trace_lines` | `1`–`20` | `5` | Traces per expanded card. Out of range clamps, it does not reject |
+| `list.sort` | `position`, `smart`, `group` | `position` | Card order; see below |
+| `list.hide_idle` | `true`, `false` | `false` | Hide idle agents, as `z` does |
+| `list.scope` | `all`, `workspace` | `all` | `workspace` needs `HERDR_WORKSPACE_ID`; without it, falls back to `all` |
+| `keys.open_sidebar` | a Herdr key string | `prefix+a` | The key `bind-sidebar-key` writes. Set it before binding |
+| `agent.<id>.color` | `#rrggbb` | built-in | Override an agent's colour |
+| `agent.<id>.label` | any string | built-in | Override its name on cards |
+| `agent.<id>.symbol` | any string | built-in | Its mark when `agent_mark = "symbol"` |
 
 ```toml
 [daemon]

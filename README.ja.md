@@ -95,19 +95,19 @@ herdr plugin list
 
 | キー | 値 | 既定 | 役割 |
 | --- | --- | --- | --- |
-| `daemon.interval_ms` | 正の整数 | `1000` | デーモンが Herdr と突き合わせる間隔。起動時にのみ読むため、変更には `restart-daemon` が必要 |
-| `appearance.theme` | `inherit`、`lumon` | `inherit` | `inherit` は端末の配色をそのまま使い、`lumon` は独自の暗い背景を描く |
-| `appearance.agent_mark` | `dot`、`initial`、`symbol` | `dot` | カード上でエージェントを示す方法 — 色付きの点、頭文字、または下記の `symbol` |
-| `cards.auto_expand` | `none`、`all` | `none` | カードを最初から展開し、`o` を押さずにツールトレースを表示するか |
-| `cards.tool_calls` | `bars`、`jar` | `bars` | コンテキスト使用量メーターの描き方 |
-| `cards.trace_lines` | `1`–`20` | `5` | 展開したカードが表示するツールトレースの本数。範囲外の値は拒否ではなくクランプされる |
+| `daemon.interval_ms` | 正の整数 | `1000` | 突き合わせ間隔。起動時に読むため変更には `restart-daemon` が必要 |
+| `appearance.theme` | `inherit`、`lumon` | `inherit` | `inherit` は端末の配色、`lumon` は独自の配色 |
+| `appearance.agent_mark` | `dot`、`initial`、`symbol` | `dot` | カード上のエージェントの印 |
+| `cards.auto_expand` | `none`、`all` | `none` | カードを最初から展開する |
+| `cards.tool_calls` | `bars`、`jar` | `bars` | コンテキストメーターの描き方 |
+| `cards.trace_lines` | `1`–`20` | `5` | 展開時のトレース本数。範囲外は拒否ではなくクランプ |
 | `list.sort` | `position`、`smart`、`group` | `position` | カードの並び順。下の表を参照 |
-| `list.hide_idle` | `true`、`false` | `false` | アイドルのエージェントを隠す。`z` を押すのと同じ |
-| `list.scope` | `all`、`workspace` | `all` | `workspace` はサイドバー自身のワークスペースのペインだけを表示。`HERDR_WORKSPACE_ID` が必要で、無い場合は理由を示して `all` に戻る |
-| `keys.open_sidebar` | Herdr のキー文字列 | `prefix+a` | `bind-sidebar-key` が Herdr の設定に書き込むキー。**バインドする前**に設定すること |
-| `agent.<id>.color` | `#rrggbb` | 組み込み | あるエージェントの色を上書き |
-| `agent.<id>.label` | 任意の文字列 | 組み込み | カードに表示される名前を上書き |
-| `agent.<id>.symbol` | 任意の文字列 | 組み込み | `agent_mark = "symbol"` のときに使う印 |
+| `list.hide_idle` | `true`、`false` | `false` | アイドルを隠す。`z` と同じ |
+| `list.scope` | `all`、`workspace` | `all` | `workspace` は `HERDR_WORKSPACE_ID` が必要。無ければ `all` に戻る |
+| `keys.open_sidebar` | Herdr のキー文字列 | `prefix+a` | `bind-sidebar-key` が書き込むキー。バインド前に設定 |
+| `agent.<id>.color` | `#rrggbb` | 組み込み | エージェントの色を上書き |
+| `agent.<id>.label` | 任意の文字列 | 組み込み | カード上の名前を上書き |
+| `agent.<id>.symbol` | 任意の文字列 | 組み込み | `agent_mark = "symbol"` のときの印 |
 
 ```toml
 [daemon]
