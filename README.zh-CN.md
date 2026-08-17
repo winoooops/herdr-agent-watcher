@@ -324,4 +324,6 @@ cargo test --test e2e_real_herdr -- --ignored
       的开发树给出一个装不上的升级按钮
 - [ ] doctor 面板里可操作的修复建议 —— `↵` 复制到剪贴板而不是直接执行，因为这些修复要改的是
       本插件之外的文件
-- [ ] 修掉 flaky 的 `pane_without_cwd_uses_herdrs_cwd_for_that_pane` 测试
+- [x] 修掉 flaky 的 `pane_without_cwd_uses_herdrs_cwd_for_that_pane` 测试。fake Herdr 会丢弃
+      「accept 那一刻字节尚未抵达」的请求 —— 在 BSD 与 macOS 上，accept 出来的 socket 继承
+      `O_NONBLOCK`

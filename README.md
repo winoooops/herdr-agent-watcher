@@ -350,4 +350,6 @@ Run all regular tests with `cargo test`.
       loop, and refusing to offer an upgrade a linked tree cannot install
 - [ ] Remedies you can act on from the doctor panel — copy to clipboard on `↵` rather than
       running anything, since the fixes edit files outside this plugin
-- [ ] Fix the flaky `pane_without_cwd_uses_herdrs_cwd_for_that_pane` test
+- [x] Fix the flaky `pane_without_cwd_uses_herdrs_cwd_for_that_pane` test. The fake Herdr
+      dropped any request whose bytes had not arrived by the instant it accepted, because
+      an accepted socket inherits `O_NONBLOCK` on BSD and macOS

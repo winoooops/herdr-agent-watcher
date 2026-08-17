@@ -38,6 +38,15 @@ impl FakeHerdr {
             while !stop.load(Ordering::Relaxed) {
                 match listener.accept() {
                     Ok((stream, _)) => {
+                        // On BSD and macOS an accepted socket inherits the
+                        // listener's `O_NONBLOCK`, so a client that has
+                        // connected but not yet written makes `read_line`
+                        // answer `WouldBlock` -- which the arm below reads as
+                        // a dead client and drops the request. The timeout is
+                        // what keeps a genuinely stuck one from holding the
+                        // loop instead.
+                        let _ = stream.set_nonblocking(false);
+                        let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
                         let mut line = String::new();
                         if BufReader::new(stream.try_clone().unwrap())
                             .read_line(&mut line)

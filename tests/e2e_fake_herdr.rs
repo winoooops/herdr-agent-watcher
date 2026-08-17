@@ -857,3 +857,40 @@ fn a_rebind_resets_session_scoped_state_but_keeps_cwd() {
     );
     fake.stop();
 }
+
+/// The fake dropped any request whose bytes had not arrived by the instant it
+/// accepted the connection, because on BSD and macOS an accepted socket
+/// inherits the listener's `O_NONBLOCK` and `read_line` answers `WouldBlock`.
+/// The arm that reads it treated every error as a dead client and moved on, so
+/// the request vanished and the caller saw an empty reply -- which surfaced as
+/// `herdr did not report a cwd`, a message about the wrong thing entirely.
+///
+/// Connecting before writing is what a loaded machine does by accident. Here
+/// it is deliberate, so the failure is a fact rather than a coin flip.
+#[test]
+fn the_fake_answers_a_client_that_connects_before_it_writes() {
+    use std::os::unix::net::UnixStream;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let fake = FakeHerdr::start(tmp.path());
+    fake.set_panes(serde_json::json!([{
+        "pane_id": "w2:p1", "workspace_id": "w2", "agent": "claude", "cwd": "/tmp"
+    }]));
+
+    let mut stream = UnixStream::connect(&fake.socket_path).expect("connect");
+    // The gap. Long enough that the accept has certainly already happened.
+    std::thread::sleep(Duration::from_millis(100));
+    stream
+        .write_all(b"{\"id\":\"1\",\"method\":\"pane.list\",\"params\":{}}\n")
+        .expect("write the request");
+
+    let mut reply = String::new();
+    BufReader::new(stream)
+        .read_line(&mut reply)
+        .expect("read the reply");
+    assert!(
+        reply.contains("w2:p1"),
+        "the request was dropped; got {reply:?}"
+    );
+    fake.stop();
+}

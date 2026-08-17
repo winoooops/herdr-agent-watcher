@@ -358,4 +358,6 @@ cargo test --test e2e_real_herdr -- --ignored
       実行し、リンクされたツリーには導入できない更新を提示しない
 - [ ] doctor パネルから操作できる対処法 — 修正対象がこのプラグイン外のファイルなので、
       実行ではなく `↵` でクリップボードにコピーする
-- [ ] flaky な `pane_without_cwd_uses_herdrs_cwd_for_that_pane` テストの修正
+- [x] flaky な `pane_without_cwd_uses_herdrs_cwd_for_that_pane` テストの修正。BSD と macOS
+      では accept したソケットが `O_NONBLOCK` を引き継ぐため、fake Herdr は accept の時点で
+      バイトが届いていないリクエストを捨てていた
