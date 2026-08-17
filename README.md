@@ -94,6 +94,11 @@ Output goes to the plugin log — read the last run with
 
 ## Configuration
 
+Most of this is easier from the sidebar: open it, press `x`, and the settings panel edits
+the same file live — you see each change on the cards as you make it, and only the keys you
+touched are written. Reach for the file directly when you want comments, a key the panel
+does not expose, or to check something into version control.
+
 Settings live in **the plugin's own** `config.toml` — not Herdr's. Herdr ignores tables it
 does not recognise, so `[daemon]` placed in `~/.config/herdr/config.toml` does nothing
 except make `herdr config check` report an unknown section.
@@ -249,6 +254,9 @@ changed after enabling is left alone — the bridge takes back only what is stil
 
 ## Doctor
 
+The same report is a keypress away inside the sidebar: `x`, then the doctor row. `r`
+rebuilds it. Run it from the shell when you want it outside a Herdr pane, or in a script.
+
 Run it when a card reads `— bridge not connected (README)`, or any time metrics are
 missing and you want to know why.
 
@@ -348,7 +356,16 @@ required to degrade to.
 - [x] Publish a prebuilt binary per release so `cargo` is not required to install.
       `[[build]]` runs `scripts/fetch-or-build.sh`, which fetches the asset matching the
       platform, verifies its SHA256, and compiles instead on any failure
-- [ ] A `:` command mode in the sidebar, with a full-page doctor view
+- [x] Settings and doctor panels in the sidebar, so the common configuration and the
+      common diagnosis both happen without leaving the pane
+- [x] Survive the daemon restart the settings panel can order: keep the cards up, count the
+      seconds, and resubscribe rather than ending at a screen that waits for a key
+- [ ] Tell a sidebar it is out of date. Upgrading the plugin leaves already-open sidebars
+      running the old binary with nothing on screen to say so — it misled us during 0.1.4
+      testing. Carry the version in the state-socket hello and pin a notice when they differ
+- [ ] Remedies you can act on from the doctor panel — copy to clipboard on `↵` rather than
+      running anything, since the fixes edit files outside this plugin
+- [ ] A `:` command mode in the sidebar
 - [ ] Fix the flaky `pane_without_cwd_uses_herdrs_cwd_for_that_pane` test
 
 ## Local development
