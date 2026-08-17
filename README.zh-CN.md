@@ -66,54 +66,6 @@ herdr plugin action invoke <id> --plugin herdr-agent-watcher
 | `kimi-consent-off` | 撤销 —— 无需重启即刻生效 | [Kimi 用量上报同意](#kimi-用量上报同意) |
 | `kimi-consent-status` | 查看当前设置 | [Kimi 用量上报同意](#kimi-用量上报同意) |
 
-## 配置
-
-大部分设置从 sidebar 里改更省事：打开它，按 `x`，设置面板会实时编辑同一个文件 —— 每改一项
-都能立刻在卡片上看到效果，而且只会写入你动过的键。需要写注释、需要面板没有暴露的键，或者
-要把配置纳入版本管理时，再直接编辑文件。
-
-每个键都是可选的，每个无效值都会回退到默认值，因此一个错误只会影响一项设置，而不会影响整个插件。
-
-| 键 | 取值 | 默认 | 作用 |
-| --- | --- | --- | --- |
-| `daemon.interval_ms` | 正整数 | `1000` | 对账间隔。启动时读取，改完需 `restart-daemon`。`AGENT_WATCHER_INTERVAL_MS` 优先级更高 |
-| `appearance.theme` | `inherit`、`lumon` | `inherit` | `inherit` 沿用终端配色；`lumon` 自带一套 |
-| `appearance.agent_mark` | `dot`、`initial`、`symbol` | `dot` | 卡片上 agent 的标记 |
-| `cards.auto_expand` | `none`、`all` | `none` | 卡片默认展开 |
-| `cards.tool_calls` | `bars`、`jar` | `bars` | 上下文用量条的画法 |
-| `cards.trace_lines` | `1`–`20` | `5` | 展开后显示几条记录。超范围是夹到边界，不是拒绝 |
-| `list.sort` | `position`、`smart`、`group` | `position` | 卡片排序：Herdr 的布局顺序、按紧急程度、或按 agent 分组。默认用 `position`，因为只有它不会在你眼皮下移动 |
-| `list.hide_idle` | `true`、`false` | `false` | 隐藏空闲 agent，同按 `z` |
-| `list.scope` | `all`、`workspace` | `all` | `workspace` 需要 `HERDR_WORKSPACE_ID`，没有则退回 `all` |
-| `keys.open_sidebar` | Herdr 按键串 | `prefix+a` | `bind-sidebar-key` 写入的键。须在绑定前设好 |
-| `agent.<id>.color` | `#rrggbb` | 内置 | 覆盖某个 agent 的颜色 |
-| `agent.<id>.label` | 任意字符串 | 内置 | 覆盖它在卡片上的名字 |
-| `agent.<id>.symbol` | 任意字符串 | 内置 | `agent_mark = "symbol"` 时用的标记 |
-
-设置放在**插件自己的** `config.toml` 里，不是 Herdr 的那个。Herdr 会忽略它不认识的表，
-所以把 `[daemon]` 写进 `~/.config/herdr/config.toml` 不会有任何效果，只会让
-`herdr config check` 报告一个未知小节。
-
-插件的配置目录可以用这条命令打印出来：
-
-```sh
-herdr plugin list
-```
-
-默认是 `${XDG_CONFIG_HOME:-~/.config}/herdr/plugins/config/herdr-agent-watcher/`。
-如果 `config.toml` 不存在，自行创建。
-
-```toml
-[daemon]
-interval_ms = 5000
-
-[list]
-scope = "workspace"
-sort  = "position"
-```
-
-运行 [`doctor`](#doctor) 可查看某项设置是否被拒绝，以及实际改用了什么值。
-
 ## 侧边栏
 
 ```sh
@@ -168,6 +120,54 @@ state socket
 ```sh
 herdr plugin action invoke stop-daemon --plugin herdr-agent-watcher
 ```
+
+## 配置
+
+大部分设置从 sidebar 里改更省事：打开它，按 `x`，设置面板会实时编辑同一个文件 —— 每改一项
+都能立刻在卡片上看到效果，而且只会写入你动过的键。需要写注释、需要面板没有暴露的键，或者
+要把配置纳入版本管理时，再直接编辑文件。
+
+每个键都是可选的，每个无效值都会回退到默认值，因此一个错误只会影响一项设置，而不会影响整个插件。
+
+| 键 | 取值 | 默认 | 作用 |
+| --- | --- | --- | --- |
+| `daemon.interval_ms` | 正整数 | `1000` | 对账间隔。启动时读取，改完需 `restart-daemon`。`AGENT_WATCHER_INTERVAL_MS` 优先级更高 |
+| `appearance.theme` | `inherit`、`lumon` | `inherit` | `inherit` 沿用终端配色；`lumon` 自带一套 |
+| `appearance.agent_mark` | `dot`、`initial`、`symbol` | `dot` | 卡片上 agent 的标记 |
+| `cards.auto_expand` | `none`、`all` | `none` | 卡片默认展开 |
+| `cards.tool_calls` | `bars`、`jar` | `bars` | 上下文用量条的画法 |
+| `cards.trace_lines` | `1`–`20` | `5` | 展开后显示几条记录。超范围是夹到边界，不是拒绝 |
+| `list.sort` | `position`、`smart`、`group` | `position` | 卡片排序：Herdr 的布局顺序、按紧急程度、或按 agent 分组。默认用 `position`，因为只有它不会在你眼皮下移动 |
+| `list.hide_idle` | `true`、`false` | `false` | 隐藏空闲 agent，同按 `z` |
+| `list.scope` | `all`、`workspace` | `all` | `workspace` 需要 `HERDR_WORKSPACE_ID`，没有则退回 `all` |
+| `keys.open_sidebar` | Herdr 按键串 | `prefix+a` | `bind-sidebar-key` 写入的键。须在绑定前设好 |
+| `agent.<id>.color` | `#rrggbb` | 内置 | 覆盖某个 agent 的颜色 |
+| `agent.<id>.label` | 任意字符串 | 内置 | 覆盖它在卡片上的名字 |
+| `agent.<id>.symbol` | 任意字符串 | 内置 | `agent_mark = "symbol"` 时用的标记 |
+
+设置放在**插件自己的** `config.toml` 里，不是 Herdr 的那个。Herdr 会忽略它不认识的表，
+所以把 `[daemon]` 写进 `~/.config/herdr/config.toml` 不会有任何效果，只会让
+`herdr config check` 报告一个未知小节。
+
+插件的配置目录可以用这条命令打印出来：
+
+```sh
+herdr plugin list
+```
+
+默认是 `${XDG_CONFIG_HOME:-~/.config}/herdr/plugins/config/herdr-agent-watcher/`。
+如果 `config.toml` 不存在，自行创建。
+
+```toml
+[daemon]
+interval_ms = 5000
+
+[list]
+scope = "workspace"
+sort  = "position"
+```
+
+运行 [`doctor`](#doctor) 可查看某项设置是否被拒绝，以及实际改用了什么值。
 
 ## 已支持的 agent
 
@@ -298,11 +298,16 @@ sidecar 树中，而那棵树是冻结的。
 - [x] 扛住设置面板自己下达的 daemon 重启：卡片留在屏上、按秒计数、自行重新订阅，而不是停在
       一个等待按键的死胡同
 - [ ] 告诉 sidebar 它已经过期。升级插件后，已经开着的 sidebar 会继续跑旧二进制，界面上没有
-      任何提示 —— 0.1.4 测试时我们就被它误导过。让 state socket 的 hello 带上版本，不一致
-      时在底部钉一条提示
+      任何提示 —— 0.1.4 测试时我们就被它误导过。让 state socket 的 hello 带上版本，sidebar
+      与 daemon 不一致时在底部钉一条提示；这一部分不需要联网
+- [ ] 菜单里加一行**检查 / 升级**：向 GitHub 查询最新 release，说明它与当前运行版本的差距，
+      并在你确认后调用 `herdr plugin install` 完成升级 —— 就像设置面板调用 `restart-daemon`
+      那样。只在你按下时才请求：本插件不会自行联网，这与 Kimi 上报同意遵循同一条规则。请求要
+      放在绘制循环之外，否则一次卡住的网络调用会冻住它所在的面板。有两种情况必须处理对：链接
+      的开发树没有东西可下载；没有进程能替换自己正在运行的二进制，所以它应当请你重新打开，而
+      不是假装升级完成
 - [ ] doctor 面板里可操作的修复建议 —— `↵` 复制到剪贴板而不是直接执行，因为这些修复要改的是
       本插件之外的文件
-- [ ] sidebar 的 `:` 命令模式
 - [ ] 修掉 flaky 的 `pane_without_cwd_uses_herdrs_cwd_for_that_pane` 测试
 
 ## 本地开发

@@ -68,56 +68,6 @@ Output goes to the plugin log — read the last run with
 | `kimi-consent-off` | Revoke it — takes effect without a restart | [Kimi usage consent](#kimi-usage-consent) |
 | `kimi-consent-status` | Show the current setting | [Kimi usage consent](#kimi-usage-consent) |
 
-## Configuration
-
-Most of this is easier from the sidebar: open it, press `x`, and the settings panel edits
-the same file live — you see each change on the cards as you make it, and only the keys you
-touched are written. Reach for the file directly when you want comments, a key the panel
-does not expose, or to check something into version control.
-
-Every key is optional and every bad value falls back to its default, so a mistake costs one
-setting rather than the plugin.
-
-| Key | Values | Default | What it does |
-| --- | --- | --- | --- |
-| `daemon.interval_ms` | positive integer | `1000` | Reconcile interval. Read at startup, so a change needs `restart-daemon`. `AGENT_WATCHER_INTERVAL_MS` outranks it |
-| `appearance.theme` | `inherit`, `lumon` | `inherit` | `inherit` uses your terminal's colours; `lumon` paints its own |
-| `appearance.agent_mark` | `dot`, `initial`, `symbol` | `dot` | The agent's mark on a card |
-| `cards.auto_expand` | `none`, `all` | `none` | Start cards expanded |
-| `cards.tool_calls` | `bars`, `jar` | `bars` | How the context meter is drawn |
-| `cards.trace_lines` | `1`–`20` | `5` | Traces per expanded card. Out of range clamps, it does not reject |
-| `list.sort` | `position`, `smart`, `group` | `position` | Card order: Herdr's layout, urgency, or grouped by agent. `position` is the default because it is the only one that does not move under you |
-| `list.hide_idle` | `true`, `false` | `false` | Hide idle agents, as `z` does |
-| `list.scope` | `all`, `workspace` | `all` | `workspace` needs `HERDR_WORKSPACE_ID`; without it, falls back to `all` |
-| `keys.open_sidebar` | a Herdr key string | `prefix+a` | The key `bind-sidebar-key` writes. Set it before binding |
-| `agent.<id>.color` | `#rrggbb` | built-in | Override an agent's colour |
-| `agent.<id>.label` | any string | built-in | Override its name on cards |
-| `agent.<id>.symbol` | any string | built-in | Its mark when `agent_mark = "symbol"` |
-
-Settings live in **the plugin's own** `config.toml` — not Herdr's. Herdr ignores tables it
-does not recognise, so `[daemon]` placed in `~/.config/herdr/config.toml` does nothing
-except make `herdr config check` report an unknown section.
-
-The plugin's config directory is printed by:
-
-```sh
-herdr plugin list
-```
-
-By default that is `${XDG_CONFIG_HOME:-~/.config}/herdr/plugins/config/herdr-agent-watcher/`.
-Create `config.toml` there if it does not exist.
-
-```toml
-[daemon]
-interval_ms = 5000
-
-[list]
-scope = "workspace"
-sort  = "position"
-```
-
-Run [`doctor`](#doctor) to see whether a setting was rejected and what was used instead.
-
 ## Sidebar
 
 ```sh
@@ -174,6 +124,56 @@ Stop the daemon with:
 ```sh
 herdr plugin action invoke stop-daemon --plugin herdr-agent-watcher
 ```
+
+## Configuration
+
+Most of this is easier from the sidebar: open it, press `x`, and the settings panel edits
+the same file live — you see each change on the cards as you make it, and only the keys you
+touched are written. Reach for the file directly when you want comments, a key the panel
+does not expose, or to check something into version control.
+
+Every key is optional and every bad value falls back to its default, so a mistake costs one
+setting rather than the plugin.
+
+| Key | Values | Default | What it does |
+| --- | --- | --- | --- |
+| `daemon.interval_ms` | positive integer | `1000` | Reconcile interval. Read at startup, so a change needs `restart-daemon`. `AGENT_WATCHER_INTERVAL_MS` outranks it |
+| `appearance.theme` | `inherit`, `lumon` | `inherit` | `inherit` uses your terminal's colours; `lumon` paints its own |
+| `appearance.agent_mark` | `dot`, `initial`, `symbol` | `dot` | The agent's mark on a card |
+| `cards.auto_expand` | `none`, `all` | `none` | Start cards expanded |
+| `cards.tool_calls` | `bars`, `jar` | `bars` | How the context meter is drawn |
+| `cards.trace_lines` | `1`–`20` | `5` | Traces per expanded card. Out of range clamps, it does not reject |
+| `list.sort` | `position`, `smart`, `group` | `position` | Card order: Herdr's layout, urgency, or grouped by agent. `position` is the default because it is the only one that does not move under you |
+| `list.hide_idle` | `true`, `false` | `false` | Hide idle agents, as `z` does |
+| `list.scope` | `all`, `workspace` | `all` | `workspace` needs `HERDR_WORKSPACE_ID`; without it, falls back to `all` |
+| `keys.open_sidebar` | a Herdr key string | `prefix+a` | The key `bind-sidebar-key` writes. Set it before binding |
+| `agent.<id>.color` | `#rrggbb` | built-in | Override an agent's colour |
+| `agent.<id>.label` | any string | built-in | Override its name on cards |
+| `agent.<id>.symbol` | any string | built-in | Its mark when `agent_mark = "symbol"` |
+
+Settings live in **the plugin's own** `config.toml` — not Herdr's. Herdr ignores tables it
+does not recognise, so `[daemon]` placed in `~/.config/herdr/config.toml` does nothing
+except make `herdr config check` report an unknown section.
+
+The plugin's config directory is printed by:
+
+```sh
+herdr plugin list
+```
+
+By default that is `${XDG_CONFIG_HOME:-~/.config}/herdr/plugins/config/herdr-agent-watcher/`.
+Create `config.toml` there if it does not exist.
+
+```toml
+[daemon]
+interval_ms = 5000
+
+[list]
+scope = "workspace"
+sort  = "position"
+```
+
+Run [`doctor`](#doctor) to see whether a setting was rejected and what was used instead.
 
 ## Supported agents
 
@@ -323,10 +323,19 @@ required to degrade to.
       seconds, and resubscribe rather than ending at a screen that waits for a key
 - [ ] Tell a sidebar it is out of date. Upgrading the plugin leaves already-open sidebars
       running the old binary with nothing on screen to say so — it misled us during 0.1.4
-      testing. Carry the version in the state-socket hello and pin a notice when they differ
+      testing. Carry the version in the state-socket hello and pin a notice when the
+      sidebar and the daemon disagree; that part needs no network
+- [ ] A **check / upgrade** row in the menu: ask GitHub for the newest release, say how it
+      compares to the running version, and upgrade on request by shelling out to
+      `herdr plugin install`, the way the settings panel already shells out to
+      `restart-daemon`. Only when you press it — this plugin does not talk to the network
+      on its own, the same rule the Kimi consent follows. The request runs off the draw
+      loop, since a blocked network call would freeze the panel it is drawn in. Two cases
+      to get right: a linked dev tree has nothing to fetch, and no process can swap the
+      binary it is already running — so it asks to be reopened rather than pretending it
+      upgraded itself
 - [ ] Remedies you can act on from the doctor panel — copy to clipboard on `↵` rather than
       running anything, since the fixes edit files outside this plugin
-- [ ] A `:` command mode in the sidebar
 - [ ] Fix the flaky `pane_without_cwd_uses_herdrs_cwd_for_that_pane` test
 
 ## Local development

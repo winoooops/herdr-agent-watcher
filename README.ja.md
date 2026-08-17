@@ -70,56 +70,6 @@ herdr plugin action invoke <id> --plugin herdr-agent-watcher
 | `kimi-consent-off` | 取り消す — 再起動なしで反映 | [Kimi 使用量レポートの同意](#kimi-使用量レポートの同意) |
 | `kimi-consent-status` | 現在の設定を表示 | [Kimi 使用量レポートの同意](#kimi-使用量レポートの同意) |
 
-## 設定
-
-ほとんどはサイドバーから行うほうが簡単です。サイドバーを開いて `x` を押すと、設定パネルが
-同じファイルをその場で編集します。変更するたびにカードで結果を確認でき、書き込まれるのは
-触れたキーだけです。コメントを書きたいとき、パネルが公開していないキーを使いたいとき、
-設定をバージョン管理に入れたいときは、ファイルを直接編集してください。
-
-すべてのキーは任意で、不正な値はそれぞれ既定値にフォールバックするため、
-1 つの誤りで失われるのはその設定だけで、プラグイン全体ではありません。
-
-| キー | 値 | 既定 | 役割 |
-| --- | --- | --- | --- |
-| `daemon.interval_ms` | 正の整数 | `1000` | 突き合わせ間隔。起動時に読むため変更には `restart-daemon` が必要。`AGENT_WATCHER_INTERVAL_MS` が優先される |
-| `appearance.theme` | `inherit`、`lumon` | `inherit` | `inherit` は端末の配色、`lumon` は独自の配色 |
-| `appearance.agent_mark` | `dot`、`initial`、`symbol` | `dot` | カード上のエージェントの印 |
-| `cards.auto_expand` | `none`、`all` | `none` | カードを最初から展開する |
-| `cards.tool_calls` | `bars`、`jar` | `bars` | コンテキストメーターの描き方 |
-| `cards.trace_lines` | `1`–`20` | `5` | 展開時のトレース本数。範囲外は拒否ではなくクランプ |
-| `list.sort` | `position`、`smart`、`group` | `position` | カードの並び順：Herdr のレイアウト順、緊急度順、エージェントごと。既定が `position` なのは、見ている間に動かない唯一の順序だから |
-| `list.hide_idle` | `true`、`false` | `false` | アイドルを隠す。`z` と同じ |
-| `list.scope` | `all`、`workspace` | `all` | `workspace` は `HERDR_WORKSPACE_ID` が必要。無ければ `all` に戻る |
-| `keys.open_sidebar` | Herdr のキー文字列 | `prefix+a` | `bind-sidebar-key` が書き込むキー。バインド前に設定 |
-| `agent.<id>.color` | `#rrggbb` | 組み込み | エージェントの色を上書き |
-| `agent.<id>.label` | 任意の文字列 | 組み込み | カード上の名前を上書き |
-| `agent.<id>.symbol` | 任意の文字列 | 組み込み | `agent_mark = "symbol"` のときの印 |
-
-設定は **プラグイン自身の** `config.toml` に置きます。Herdr のものではありません。
-Herdr は認識できないテーブルを無視するため、`~/.config/herdr/config.toml` に `[daemon]` を
-書いても何も起こらず、`herdr config check` が未知のセクションを報告するだけです。
-
-プラグインの設定ディレクトリは次のコマンドで表示できます:
-
-```sh
-herdr plugin list
-```
-
-既定では `${XDG_CONFIG_HOME:-~/.config}/herdr/plugins/config/herdr-agent-watcher/` です。
-`config.toml` が無ければ作成してください。
-
-```toml
-[daemon]
-interval_ms = 5000
-
-[list]
-scope = "workspace"
-sort  = "position"
-```
-
-設定が拒否されたか、代わりに何が使われたかは [`doctor`](#doctor) で確認できます。
-
 ## サイドバー
 
 ```sh
@@ -179,6 +129,56 @@ state socket（`$HERDR_PLUGIN_STATE_DIR/herdr-agent-watcher-state.sock`、
 ```sh
 herdr plugin action invoke stop-daemon --plugin herdr-agent-watcher
 ```
+
+## 設定
+
+ほとんどはサイドバーから行うほうが簡単です。サイドバーを開いて `x` を押すと、設定パネルが
+同じファイルをその場で編集します。変更するたびにカードで結果を確認でき、書き込まれるのは
+触れたキーだけです。コメントを書きたいとき、パネルが公開していないキーを使いたいとき、
+設定をバージョン管理に入れたいときは、ファイルを直接編集してください。
+
+すべてのキーは任意で、不正な値はそれぞれ既定値にフォールバックするため、
+1 つの誤りで失われるのはその設定だけで、プラグイン全体ではありません。
+
+| キー | 値 | 既定 | 役割 |
+| --- | --- | --- | --- |
+| `daemon.interval_ms` | 正の整数 | `1000` | 突き合わせ間隔。起動時に読むため変更には `restart-daemon` が必要。`AGENT_WATCHER_INTERVAL_MS` が優先される |
+| `appearance.theme` | `inherit`、`lumon` | `inherit` | `inherit` は端末の配色、`lumon` は独自の配色 |
+| `appearance.agent_mark` | `dot`、`initial`、`symbol` | `dot` | カード上のエージェントの印 |
+| `cards.auto_expand` | `none`、`all` | `none` | カードを最初から展開する |
+| `cards.tool_calls` | `bars`、`jar` | `bars` | コンテキストメーターの描き方 |
+| `cards.trace_lines` | `1`–`20` | `5` | 展開時のトレース本数。範囲外は拒否ではなくクランプ |
+| `list.sort` | `position`、`smart`、`group` | `position` | カードの並び順：Herdr のレイアウト順、緊急度順、エージェントごと。既定が `position` なのは、見ている間に動かない唯一の順序だから |
+| `list.hide_idle` | `true`、`false` | `false` | アイドルを隠す。`z` と同じ |
+| `list.scope` | `all`、`workspace` | `all` | `workspace` は `HERDR_WORKSPACE_ID` が必要。無ければ `all` に戻る |
+| `keys.open_sidebar` | Herdr のキー文字列 | `prefix+a` | `bind-sidebar-key` が書き込むキー。バインド前に設定 |
+| `agent.<id>.color` | `#rrggbb` | 組み込み | エージェントの色を上書き |
+| `agent.<id>.label` | 任意の文字列 | 組み込み | カード上の名前を上書き |
+| `agent.<id>.symbol` | 任意の文字列 | 組み込み | `agent_mark = "symbol"` のときの印 |
+
+設定は **プラグイン自身の** `config.toml` に置きます。Herdr のものではありません。
+Herdr は認識できないテーブルを無視するため、`~/.config/herdr/config.toml` に `[daemon]` を
+書いても何も起こらず、`herdr config check` が未知のセクションを報告するだけです。
+
+プラグインの設定ディレクトリは次のコマンドで表示できます:
+
+```sh
+herdr plugin list
+```
+
+既定では `${XDG_CONFIG_HOME:-~/.config}/herdr/plugins/config/herdr-agent-watcher/` です。
+`config.toml` が無ければ作成してください。
+
+```toml
+[daemon]
+interval_ms = 5000
+
+[list]
+scope = "workspace"
+sort  = "position"
+```
+
+設定が拒否されたか、代わりに何が使われたかは [`doctor`](#doctor) で確認できます。
 
 ## 対応エージェント
 
@@ -332,10 +332,17 @@ Kimi のプラン使用量取得は、設定された API キーを `/usages` �
       キー入力を待つ行き止まりで終わらずに再購読する
 - [ ] サイドバーに「古い」と伝える。プラグインを更新しても、開いたままのサイドバーは古い
       バイナリで動き続け、画面には何の表示もない — 0.1.4 のテスト中に実際に惑わされた。
-      state socket の hello にバージョンを載せ、食い違うときは通知を固定表示する
+      state socket の hello にバージョンを載せ、サイドバーとデーモンが食い違うときは通知を
+      固定表示する。ここまではネットワーク不要
+- [ ] メニューに**確認 / 更新**の行を足す。GitHub に最新リリースを問い合わせ、実行中の
+      バージョンとの差を示し、要求があれば `herdr plugin install` を呼んで更新する。設定
+      パネルが `restart-daemon` を呼ぶのと同じ要領。押したときだけ通信する — このプラグインは
+      自発的にネットワークへ出ない。Kimi の同意と同じ方針である。通信は描画ループの外で行う。
+      ブロックする通信は、それを描いているパネルごと固まらせるからだ。押さえるべき点が 2 つ —
+      リンクした開発ツリーには取得するものが無いこと、自分が実行中のバイナリを差し替えられる
+      プロセスは無いこと。つまり更新したふりをせず、開き直すよう促す
 - [ ] doctor パネルから操作できる対処法 — 修正対象がこのプラグイン外のファイルなので、
       実行ではなく `↵` でクリップボードにコピーする
-- [ ] サイドバーの `:` コマンドモード
 - [ ] flaky な `pane_without_cwd_uses_herdrs_cwd_for_that_pane` テストの修正
 
 ## ローカル開発
