@@ -2115,7 +2115,7 @@ mod tests {
         let mut it = Interaction::default();
         let mut live = live_default();
         let mut open = None;
-        let mut go = |key, open: &mut Option<Dialog>, live: &mut _, it: &mut _| {
+        let go = |key, open: &mut Option<Dialog>, live: &mut _, it: &mut _| {
             route(press(key), open, it, live, &r, 10, 40, 60, 24);
         };
 
@@ -2149,7 +2149,7 @@ mod tests {
         let mut it = Interaction::default();
         let mut live = live_default();
         let mut open = None;
-        let mut go = |key, open: &mut Option<Dialog>, live: &mut _, it: &mut _| {
+        let go = |key, open: &mut Option<Dialog>, live: &mut _, it: &mut _| {
             route(press(key), open, it, live, &r, 10, 40, 60, 24);
         };
 
