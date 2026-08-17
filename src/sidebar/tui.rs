@@ -122,11 +122,21 @@ fn now_unix_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// The daemon's build when it is not this binary's. `None` from a daemon too
+/// old to report one: silence beats a mismatch that cannot be proved.
+fn stale_against(state: &crate::sidebar::reducer::State) -> Option<&str> {
+    state
+        .daemon_build
+        .as_deref()
+        .filter(|daemon| *daemon != env!("CARGO_PKG_VERSION"))
+}
+
 fn view_input<'a>(
     cfg: &'a crate::sidebar::config::Loaded,
     live: &'a crate::sidebar::live::Live,
     toggled: &'a std::collections::HashSet<String>,
     cursor: Option<&'a str>,
+    stale: Option<&'a str>,
 ) -> ViewInput<'a> {
     ViewInput {
         cursor,
@@ -141,6 +151,7 @@ fn view_input<'a>(
         trace_lines: live.trace_lines,
         agents: &cfg.appearances,
         config: cfg.status,
+        stale,
     }
 }
 
@@ -1126,7 +1137,13 @@ pub fn run() -> i32 {
 
             let mut out = crate::sidebar::view::render(
                 &state,
-                &view_input(&cfg, &live, &it.toggled, it.cursor.as_deref()),
+                &view_input(
+                    &cfg,
+                    &live,
+                    &it.toggled,
+                    it.cursor.as_deref(),
+                    stale_against(&state),
+                ),
                 size.width,
                 now,
             );
@@ -1134,7 +1151,13 @@ pub fn run() -> i32 {
             if recovered {
                 out = crate::sidebar::view::render(
                     &state,
-                    &view_input(&cfg, &live, &it.toggled, it.cursor.as_deref()),
+                    &view_input(
+                        &cfg,
+                        &live,
+                        &it.toggled,
+                        it.cursor.as_deref(),
+                        stale_against(&state),
+                    ),
                     size.width,
                     now,
                 );
@@ -1848,11 +1871,16 @@ mod tests {
         let mut live = crate::sidebar::live::Live::from(&cfg);
 
         let order = |live: &crate::sidebar::live::Live| {
-            crate::sidebar::view::render(&state, &view_input(&cfg, live, &toggled, None), 60, 0)
-                .spans
-                .iter()
-                .map(|(id, _)| id.clone())
-                .collect::<Vec<_>>()
+            crate::sidebar::view::render(
+                &state,
+                &view_input(&cfg, live, &toggled, None, None),
+                60,
+                0,
+            )
+            .spans
+            .iter()
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>()
         };
         assert_eq!(order(&live), vec!["first", "second"], "position order");
 
@@ -2037,7 +2065,7 @@ mod tests {
 
         let toggled = std::collections::HashSet::new();
         let live = crate::sidebar::live::Live::from(&cfg);
-        let v = view_input(&cfg, &live, &toggled, Some("p1"));
+        let v = view_input(&cfg, &live, &toggled, Some("p1"), None);
         assert_eq!(v.theme, Theme::Lumon);
         assert_eq!(v.agent_mark, crate::sidebar::config::AgentMark::Initial);
         assert_eq!(v.auto_expand, crate::sidebar::config::AutoExpand::All);

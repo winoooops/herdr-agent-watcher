@@ -312,9 +312,9 @@ cargo test --test e2e_real_herdr -- --ignored
 - [x] sidebar 内的设置面板与 doctor 面板，让最常用的配置和最常用的诊断都不必离开这个 pane
 - [x] 扛住设置面板自己下达的 daemon 重启：卡片留在屏上、按秒计数、自行重新订阅，而不是停在
       一个等待按键的死胡同
-- [ ] 告诉 sidebar 它已经过期。升级插件后，已经开着的 sidebar 会继续跑旧二进制，界面上没有
-      任何提示 —— 0.1.4 测试时我们就被它误导过。让 state socket 的 hello 带上版本，sidebar
-      与 daemon 不一致时在底部钉一条提示；这一部分不需要联网
+- [x] 告诉 sidebar 它已经过期。升级插件后，已经开着的 sidebar 会继续跑旧二进制，界面上没有
+      任何提示 —— 0.1.4 测试时我们就被它误导过。现在 hello 带上 daemon 的版本，sidebar 发现
+      与自己不同就在底部钉一条提示
 - [ ] 菜单里加一行**检查 / 升级**：向 GitHub 查询最新 release，说明它与当前运行版本的差距，
       并在你确认后调用 `herdr plugin install` 完成升级 —— 就像设置面板调用 `restart-daemon`
       那样。只在你按下时才请求：本插件不会自行联网，这与 Kimi 上报同意遵循同一条规则。请求要

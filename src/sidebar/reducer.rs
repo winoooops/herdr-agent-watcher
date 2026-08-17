@@ -7,6 +7,8 @@ use crate::daemon::store::PaneTelemetry;
 pub struct State {
     pub panes: HashMap<String, PaneTelemetry>,
     pub last_seq: u64,
+    /// The build the daemon reported, or `None` from one too old to say.
+    pub daemon_build: Option<String>,
 }
 
 pub fn apply_line(state: &mut State, line: &str) -> Result<(), String> {
@@ -25,6 +27,7 @@ pub fn apply_line(state: &mut State, line: &str) -> Result<(), String> {
         }
         state.panes = hello.panes;
         state.last_seq = hello.seq;
+        state.daemon_build = hello.build;
     } else if value.get("pane_id").is_some() {
         let delta: Delta = serde_json::from_value(value).map_err(|error| error.to_string())?;
         if delta.seq <= state.last_seq {
@@ -87,5 +90,31 @@ mod tests {
         let mut state = State::default();
         apply_line(&mut state, r#"{"future":true}"#).unwrap();
         assert!(state.panes.is_empty());
+    }
+    /// A daemon from before this field exists sends no `build`. "Cannot tell"
+    /// has to stay silent: a notice that fires on every older daemon would
+    /// train the reader to ignore the one that means something.
+    #[test]
+    fn a_hello_without_a_build_leaves_the_state_saying_nothing() {
+        let mut state = State::default();
+        apply_line(
+            &mut state,
+            &format!("{{\"version\":{WIRE_VERSION},\"seq\":1,\"panes\":{{}}}}"),
+        )
+        .expect("an older daemon is not an error");
+        assert_eq!(state.daemon_build, None, "nothing to compare against");
+    }
+
+    /// And one that does send it is remembered verbatim, including when it
+    /// matches -- the comparison belongs to the caller, not here.
+    #[test]
+    fn a_hello_with_a_build_is_remembered() {
+        let mut state = State::default();
+        apply_line(
+            &mut state,
+            &format!("{{\"version\":{WIRE_VERSION},\"seq\":1,\"panes\":{{}},\"build\":\"0.0.1\"}}"),
+        )
+        .expect("applies");
+        assert_eq!(state.daemon_build.as_deref(), Some("0.0.1"));
     }
 }

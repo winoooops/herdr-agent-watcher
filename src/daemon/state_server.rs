@@ -101,6 +101,7 @@ fn handle_connection(
                     seq,
                     panes,
                     refused: routes.refusals(),
+                    build: Some(env!("CARGO_PKG_VERSION").into()),
                 },
             );
         }
@@ -115,6 +116,7 @@ fn handle_connection(
                     // The sidebar does not read this; `doctor` asks for a
                     // snapshot, not a subscription.
                     refused: Default::default(),
+                    build: Some(env!("CARGO_PKG_VERSION").into()),
                 },
             )
             .is_ok()

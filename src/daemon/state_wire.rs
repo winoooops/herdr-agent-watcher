@@ -29,6 +29,11 @@ pub struct Hello {
     /// one report a mismatch for something it does not read.
     #[serde(default)]
     pub refused: HashMap<String, Refusal>,
+    /// The daemon's package version. Additive for the same reason as
+    /// `refused`; absent from an older daemon, which is why the sidebar
+    /// treats `None` as "cannot tell" rather than "mismatch".
+    #[serde(default)]
+    pub build: Option<String>,
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]

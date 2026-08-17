@@ -666,7 +666,11 @@ fn non_default_config_reaches_what_is_drawn() {
     let mut panes = std::collections::HashMap::new();
     panes.insert("p1".to_string(), telemetry("codex", "review the diff"));
     panes.insert("p2".to_string(), telemetry("claude", "write the spec"));
-    let state = State { panes, last_seq: 2 };
+    let state = State {
+        panes,
+        last_seq: 2,
+        ..Default::default()
+    };
 
     let toggled = std::collections::HashSet::new();
     let input = view::ViewInput {
@@ -682,6 +686,7 @@ fn non_default_config_reaches_what_is_drawn() {
         trace_lines: cfg.trace_lines,
         agents: &cfg.appearances,
         config: cfg.status,
+        stale: None,
     };
     let text = view::render(&state, &input, 44, 0).plain().join("\n");
 

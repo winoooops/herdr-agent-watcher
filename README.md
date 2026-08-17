@@ -335,10 +335,10 @@ Run all regular tests with `cargo test`.
       common diagnosis both happen without leaving the pane
 - [x] Survive the daemon restart the settings panel can order: keep the cards up, count the
       seconds, and resubscribe rather than ending at a screen that waits for a key
-- [ ] Tell a sidebar it is out of date. Upgrading the plugin leaves already-open sidebars
+- [x] Tell a sidebar it is out of date. Upgrading the plugin leaves already-open sidebars
       running the old binary with nothing on screen to say so — it misled us during 0.1.4
-      testing. Carry the version in the state-socket hello and pin a notice when the
-      sidebar and the daemon disagree; that part needs no network
+      testing. The hello carries the daemon's build and the sidebar pins a notice when it
+      is not its own
 - [ ] A **check / upgrade** row in the menu: ask GitHub for the newest release, say how it
       compares to the running version, and upgrade on request by shelling out to
       `herdr plugin install`, the way the settings panel already shells out to

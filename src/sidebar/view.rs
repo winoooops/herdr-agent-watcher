@@ -797,6 +797,10 @@ pub struct ViewInput<'a> {
     pub trace_lines: u8,
     pub agents: &'a AgentAppearances,
     pub config: crate::sidebar::style::ConfigStatus,
+    /// The daemon's build, when it is not this binary's. A sidebar runs the
+    /// binary it was started with, so an upgrade leaves old ones on screen
+    /// with no sign of it -- and none of them can fix that from the inside.
+    pub stale: Option<&'a str>,
 }
 
 fn expanded_by_default(auto: crate::sidebar::config::AutoExpand) -> bool {
@@ -860,6 +864,11 @@ pub fn render(
     }
 
     let mut pinned: Vec<Line> = Vec::new();
+    // First: the others qualify what is on screen, this one questions all of
+    // it. It is also the only one that survives narrowing down to two numbers.
+    if let Some(daemon) = view.stale {
+        pinned.push(vec![Span::label(stale_notice(daemon, width))]);
+    }
     if view.config.problems > 0 {
         pinned.push(vec![Span::label(config_notice(view.config, width))]);
     }
@@ -897,6 +906,18 @@ fn config_notice(status: crate::sidebar::style::ConfigStatus, width: u16) -> Str
         format!("config.toml: {n} problems")
     } else {
         format!("config: {n}")
+    }
+}
+
+/// Names both builds: "the daemon is newer" is not actionable without
+/// knowing which side the reader is looking at.
+fn stale_notice(daemon: &str, width: u16) -> String {
+    let ours = env!("CARGO_PKG_VERSION");
+    let full = format!("  daemon {daemon} · this sidebar {ours} — reopen it");
+    if crate::sidebar::format::width(&full) <= width as usize {
+        full
+    } else {
+        format!("  {ours} → {daemon}, reopen")
     }
 }
 
@@ -1885,6 +1906,7 @@ mod tests {
             trace_lines: 5,
             agents,
             config: crate::sidebar::style::ConfigStatus::default(),
+            stale: None,
         }
     }
 
@@ -1892,7 +1914,11 @@ mod tests {
     fn render_pins_the_footer_and_reports_card_spans() {
         let mut panes = std::collections::HashMap::new();
         panes.insert("p1".to_string(), claude());
-        let state = crate::sidebar::reducer::State { panes, last_seq: 1 };
+        let state = crate::sidebar::reducer::State {
+            panes,
+            last_seq: 1,
+            ..Default::default()
+        };
         let app = appearances();
         let toggled = std::collections::HashSet::new();
         let view = view_input(Some("p1"), &toggled, &app);
@@ -1929,7 +1955,11 @@ mod tests {
         panes.insert("w4:p2".to_string(), placed("w4", CardState::Idle));
         panes.insert("w9:p1".to_string(), placed("w9", CardState::Running));
         panes.insert("w9:p2".to_string(), placed("w9", CardState::Idle));
-        let state = crate::sidebar::reducer::State { panes, last_seq: 4 };
+        let state = crate::sidebar::reducer::State {
+            panes,
+            last_seq: 4,
+            ..Default::default()
+        };
 
         let app = appearances();
         let toggled = std::collections::HashSet::new();
@@ -1968,7 +1998,11 @@ mod tests {
         second.title = None;
         second.tool_call_total = 4;
         panes.insert("p2".to_string(), second);
-        let state = crate::sidebar::reducer::State { panes, last_seq: 2 };
+        let state = crate::sidebar::reducer::State {
+            panes,
+            last_seq: 2,
+            ..Default::default()
+        };
         let toggled = std::collections::HashSet::new();
         let out = render(&state, &view_input(Some("p1"), &toggled, &app), W, 0);
 
@@ -2023,7 +2057,11 @@ mod tests {
         let mut panes = std::collections::HashMap::new();
         panes.insert("p1".to_string(), claude());
         panes.insert("p2".to_string(), claude_expanded());
-        let state = crate::sidebar::reducer::State { panes, last_seq: 2 };
+        let state = crate::sidebar::reducer::State {
+            panes,
+            last_seq: 2,
+            ..Default::default()
+        };
         let mut toggled = std::collections::HashSet::new();
         toggled.insert("p2".to_string());
         let v = view_input(Some("p1"), &toggled, &app);
@@ -2060,7 +2098,11 @@ mod tests {
         let mut panes = std::collections::HashMap::new();
         panes.insert("p1".to_string(), claude());
         panes.insert("p2".to_string(), claude());
-        let state = crate::sidebar::reducer::State { panes, last_seq: 2 };
+        let state = crate::sidebar::reducer::State {
+            panes,
+            last_seq: 2,
+            ..Default::default()
+        };
         let app = appearances();
         let toggled = std::collections::HashSet::new();
         let out = render(&state, &view_input(None, &toggled, &app), W, 0);
@@ -2081,7 +2123,11 @@ mod tests {
     fn a_pane_narrower_than_the_minimum_clamps_instead_of_underflowing() {
         let mut panes = std::collections::HashMap::new();
         panes.insert("p1".to_string(), claude());
-        let state = crate::sidebar::reducer::State { panes, last_seq: 1 };
+        let state = crate::sidebar::reducer::State {
+            panes,
+            last_seq: 1,
+            ..Default::default()
+        };
         let app = appearances();
         let toggled = std::collections::HashSet::new();
         let v = view_input(Some("p1"), &toggled, &app);
@@ -2101,7 +2147,11 @@ mod tests {
         b.cwd = Some("/w/web/api".into());
         panes.insert("p1".to_string(), a);
         panes.insert("p2".to_string(), b);
-        let state = crate::sidebar::reducer::State { panes, last_seq: 2 };
+        let state = crate::sidebar::reducer::State {
+            panes,
+            last_seq: 2,
+            ..Default::default()
+        };
         let app = appearances();
         let toggled = std::collections::HashSet::new();
         let text = render(&state, &view_input(None, &toggled, &app), W, 0)
@@ -2143,7 +2193,11 @@ mod tests {
         let mut idle = claude();
         idle.card_state = CardState::Idle;
         panes.insert("p9".to_string(), idle);
-        let state = crate::sidebar::reducer::State { panes, last_seq: 1 };
+        let state = crate::sidebar::reducer::State {
+            panes,
+            last_seq: 1,
+            ..Default::default()
+        };
         let app = appearances();
         let toggled = std::collections::HashSet::new();
         let mut v = view_input(None, &toggled, &app);
@@ -2174,5 +2228,46 @@ mod tests {
             .pinned
             .iter()
             .any(|l| l.iter().any(|s| s.text.contains("2 problems"))));
+    }
+    /// A sidebar keeps running the binary it started with, so upgrading the
+    /// plugin leaves old ones on screen looking authoritative. The pane has to
+    /// say so, and say the thing that actually fixes it -- no process can
+    /// replace the binary it is executing.
+    #[test]
+    fn a_daemon_from_another_build_is_announced_in_the_pinned_region() {
+        let state = crate::sidebar::reducer::State::default();
+        let app = appearances();
+        let toggled = std::collections::HashSet::new();
+        let mut v = view_input(None, &toggled, &app);
+        v.stale = Some("9.9.9");
+        let out = render(&state, &v, W, 0);
+        let text: String = out
+            .pinned
+            .iter()
+            .flat_map(|l| l.iter().map(|s| s.text.clone()))
+            .collect();
+        assert!(text.contains("9.9.9"), "names the daemon's build: {text}");
+        assert!(
+            text.contains(env!("CARGO_PKG_VERSION")),
+            "and its own, or the reader cannot tell which is stale: {text}"
+        );
+        assert!(text.contains("reopen"), "says what fixes it: {text}");
+    }
+
+    /// The common case must stay silent: matching builds are every sidebar
+    /// that was opened after the last upgrade.
+    #[test]
+    fn a_matching_build_says_nothing() {
+        let state = crate::sidebar::reducer::State::default();
+        let app = appearances();
+        let toggled = std::collections::HashSet::new();
+        let v = view_input(None, &toggled, &app);
+        let out = render(&state, &v, W, 0);
+        let text: String = out
+            .pinned
+            .iter()
+            .flat_map(|l| l.iter().map(|s| s.text.clone()))
+            .collect();
+        assert!(!text.contains("reopen"), "nothing to say: {text}");
     }
 }
