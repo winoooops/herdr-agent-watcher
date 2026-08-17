@@ -104,3 +104,22 @@ two ways: CI passes `--all-features`, and it runs the Windows check.
 `.github/workflows/release.yml` runs on `v*` tags and fails if the tag disagrees with
 `Cargo.toml`. `herdr-plugin.toml` carries its own version and is checked against `Cargo.toml`
 by `tests/cli_keybinding.rs`.
+
+## Releasing
+
+```sh
+git checkout -b release/0.1.7                       # branch from main
+# bump Cargo.toml, herdr-plugin.toml, and Cargo.lock (cargo update -p herdr-agent-watcher)
+git commit -m "chore: 0.1.7"
+git checkout main && git merge --ff-only release/0.1.7
+git tag v0.1.7 release/0.1.7                        # the tag names the bump commit
+git push origin main release/0.1.7 v0.1.7           # keep the branch: it is the version record
+```
+
+`--ff-only`, not `--no-ff`. The release branch has never held more than the bump, so a merge
+commit records a parallel line of work that did not happen — and "a release happened here" is
+what the tag already says. Use `--no-ff` on the release that genuinely accumulates commits of
+its own; then the merge means something.
+
+Do not cut a release to make something testable. A tag is a public artifact, and the assets
+attached to it are what `scripts/fetch-or-build.sh` downloads.
