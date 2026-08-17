@@ -987,13 +987,20 @@ fn panel_for(
                 Check::Ready { latest, source } => {
                     rows.push(Row::Entry {
                         label: "latest".into(),
-                        value: latest.clone(),
+                        // Without the tag's `v` the two rows are comparable
+                        // at a glance; `0.1.5` next to `v0.1.5` reads as two
+                        // different things. The tag itself is what the
+                        // install is given.
+                        value: crate::sidebar::release::version_of_tag(latest).into(),
                         enabled: false,
                     });
                     rows.push(Row::Rule);
                     match (check.upgradable(ours), source) {
                         (Some(tag), _) => {
-                            rows.push(Row::Note(format!("{tag} is available")));
+                            rows.push(Row::Note(format!(
+                                "{} is available",
+                                crate::sidebar::release::version_of_tag(tag)
+                            )));
                             footer = "u upgrade · r recheck · esc back".into();
                         }
                         // Each said plainly: "no upgrade offered" and "you are
@@ -2565,5 +2572,39 @@ mod tests {
             );
             assert!(opened, "{key} should open {label} from the menu");
         }
+    }
+    /// `installed 0.1.5` beside `latest v0.1.5` reads as two versions when it
+    /// is one. The panel strips the tag's `v`; the tag itself still goes to
+    /// `--ref`, which wants the tag and not the version.
+    #[test]
+    fn the_panel_shows_versions_while_the_install_keeps_the_tag() {
+        use crate::sidebar::release::{Check, Source};
+        let live = live_default();
+        let cfg = crate::sidebar::config::Loaded::from_missing();
+        let check = Check::Ready {
+            latest: "v9.9.9".into(),
+            source: Source::Github,
+        };
+        let panel = panel_for(
+            &Dialog::Update {
+                check: check.clone(),
+                offset: 0,
+                pending: None,
+            },
+            &live,
+            &cfg,
+            0,
+        );
+        let text = rows_text(&panel.rows);
+        assert!(text.contains("9.9.9"), "{text}");
+        assert!(
+            !text.contains("v9.9.9"),
+            "the row should read like the installed one: {text}"
+        );
+        assert_eq!(
+            check.upgradable(env!("CARGO_PKG_VERSION")),
+            Some("v9.9.9"),
+            "the tag survives for `--ref`"
+        );
     }
 }
