@@ -214,7 +214,6 @@ pub(crate) enum Dialog {
     },
     Settings {
         cursor: usize,
-        from_menu: bool,
         dirty: Vec<crate::sidebar::live::Setting>,
         path: Option<std::path::PathBuf>,
         source: Result<Option<String>, String>,
@@ -229,7 +228,6 @@ pub(crate) enum Dialog {
     },
     Doctor {
         offset: usize,
-        from_menu: bool,
         report: Result<crate::agents::doctor::Report, String>,
         taken_at: u64,
     },
@@ -261,17 +259,6 @@ impl Dialog {
     /// never saw is not going back.
     /// Whether a panel opened from here should offer a way back to the menu:
     /// either this IS the menu, or this was itself reached through it.
-    fn leads_back_to_menu(&self) -> bool {
-        matches!(self, Dialog::Menu { .. }) || self.came_from_menu()
-    }
-
-    fn came_from_menu(&self) -> bool {
-        match self {
-            Dialog::Settings { from_menu, .. } | Dialog::Doctor { from_menu, .. } => *from_menu,
-            Dialog::Menu { .. } | Dialog::Keys { .. } => false,
-        }
-    }
-
     fn len(&self) -> usize {
         match self {
             Dialog::Menu { .. } => MENU.len(),
@@ -318,10 +305,9 @@ fn cycle_selected(dialog: &mut Dialog, live: &mut crate::sidebar::live::Live, ba
     }
 }
 
-fn doctor_dialog(from_menu: bool) -> Dialog {
+fn doctor_dialog() -> Dialog {
     Dialog::Doctor {
         offset: 0,
-        from_menu,
         report: crate::agents::claude_bridge::doctor_report(),
         taken_at: now_unix_ms(),
     }
@@ -335,7 +321,7 @@ fn doctor_taken_at(dialog: &Option<Dialog>) -> Option<u64> {
     }
 }
 
-fn settings_dialog(from_menu: bool, interval_at_open: u32) -> Dialog {
+fn settings_dialog(interval_at_open: u32) -> Dialog {
     let path = crate::sidebar::config::config_path();
     let source = match path.as_ref() {
         Some(path) => match std::fs::read_to_string(path) {
@@ -347,7 +333,6 @@ fn settings_dialog(from_menu: bool, interval_at_open: u32) -> Dialog {
     };
     Dialog::Settings {
         cursor: 0,
-        from_menu,
         interval_at_open,
         confirm: None,
         dirty: Vec::new(),
@@ -555,7 +540,6 @@ const ROUTED: [(&str, KeyCode, KeyModifiers, &str, Option<Dialog>); 13] = [
         "a",
         Some(Dialog::Settings {
             cursor: 0,
-            from_menu: false,
             dirty: Vec::new(),
             path: None,
             source: Ok(None),
@@ -582,7 +566,6 @@ const ROUTED: [(&str, KeyCode, KeyModifiers, &str, Option<Dialog>); 13] = [
         "a",
         Some(Dialog::Doctor {
             offset: 0,
-            from_menu: false,
             report: Ok(crate::agents::doctor::Report {
                 checks: Vec::new(),
                 panes: Vec::new(),
@@ -642,7 +625,7 @@ fn route(
                 (KeyCode::Enter, _) | (KeyCode::Char('o'), _) => {
                     let restart = *choice == 0;
                     it.notice = Some(resolve_interval(dialog, live, restart));
-                    *open = dialog.came_from_menu().then(Dialog::menu);
+                    *open = Some(Dialog::menu());
                 }
                 _ => {}
             }
@@ -674,7 +657,11 @@ fn route(
                         return KeyOutcome::Handled;
                     }
                 }
-                *open = dialog.came_from_menu().then(Dialog::menu);
+                // One level back, always: the menu is the parent of both
+                // panels however you reached them, so `s` straight from the
+                // cards still leaves the selector between you and the way
+                // out. The menu itself is the level that closes.
+                *open = (!matches!(dialog, Dialog::Menu { .. })).then(Dialog::menu);
             }
             (KeyCode::Char('j'), _) | (KeyCode::Down, _) => {
                 let last = dialog.len().saturating_sub(1);
@@ -704,13 +691,10 @@ fn route(
             // was reached THROUGH the menu, so esc goes back to it. Losing
             // that is why esc closed everything from a panel the menu opened.
             (KeyCode::Char('s'), _) if !matches!(dialog, Dialog::Settings { .. }) => {
-                *open = Some(settings_dialog(
-                    dialog.leads_back_to_menu(),
-                    live.interval_ms,
-                ));
+                *open = Some(settings_dialog(live.interval_ms));
             }
             (KeyCode::Char('d'), _) if !matches!(dialog, Dialog::Doctor { .. }) => {
-                *open = Some(doctor_dialog(dialog.leads_back_to_menu()));
+                *open = Some(doctor_dialog());
             }
             (KeyCode::Char('s'), _) => {
                 it.notice = Some(
@@ -731,8 +715,8 @@ fn route(
                 cycle_selected(dialog, live, false);
                 if let Dialog::Menu { cursor } = dialog {
                     *open = Some(match *cursor {
-                        0 => settings_dialog(true, live.interval_ms),
-                        _ => doctor_dialog(true),
+                        0 => settings_dialog(live.interval_ms),
+                        _ => doctor_dialog(),
                     });
                 }
             }
@@ -755,8 +739,8 @@ fn route(
             }
             *open = Some(match key.code {
                 KeyCode::Char('?') => Dialog::Keys { cursor: 0 },
-                KeyCode::Char('s') => settings_dialog(false, live.interval_ms),
-                KeyCode::Char('d') => doctor_dialog(false),
+                KeyCode::Char('s') => settings_dialog(live.interval_ms),
+                KeyCode::Char('d') => doctor_dialog(),
                 _ => Dialog::menu(),
             });
             KeyOutcome::Handled
@@ -1490,7 +1474,6 @@ mod tests {
         let live = live_default();
         let mut dialog = Dialog::Settings {
             cursor: 0,
-            from_menu: false,
             interval_at_open: crate::sidebar::live::DEFAULT_INTERVAL_MS,
             confirm: None,
             dirty: vec![crate::sidebar::live::Setting::Sort],
@@ -1512,7 +1495,6 @@ mod tests {
         let live = live_default();
         let mut dialog = Dialog::Settings {
             cursor: 0,
-            from_menu: false,
             interval_at_open: crate::sidebar::live::DEFAULT_INTERVAL_MS,
             confirm: None,
             dirty: vec![crate::sidebar::live::Setting::Sort],
@@ -1526,7 +1508,6 @@ mod tests {
     fn settings_with_interval(at_open: u32, confirm: Option<usize>) -> Dialog {
         Dialog::Settings {
             cursor: 0,
-            from_menu: false,
             dirty: Vec::new(),
             path: None,
             source: Ok(None),
@@ -1587,7 +1568,10 @@ mod tests {
             60,
             24,
         );
-        assert!(open.is_none(), "nothing to ask about");
+        assert!(
+            matches!(open, Some(Dialog::Menu { .. })),
+            "nothing to ask about, so esc is an ordinary step back"
+        );
     }
 
     /// Mandatory means mandatory: every key that is not a choice is a way of
@@ -1650,7 +1634,7 @@ mod tests {
             24,
         );
         assert_eq!(live.interval_ms, 1000, "cancel means it was never changed");
-        assert!(open.is_none());
+        assert!(matches!(open, Some(Dialog::Menu { .. })));
         assert!(
             it.notice.as_deref().is_some_and(|n| n.contains("1000")),
             "{:?}",
@@ -1659,7 +1643,7 @@ mod tests {
     }
 
     #[test]
-    fn a_panel_opened_directly_closes_on_esc() {
+    fn a_panel_opened_directly_still_steps_back_to_the_menu() {
         let r = two_cards();
         let mut it = Interaction::default();
         let mut live = live_default();
@@ -1688,8 +1672,8 @@ mod tests {
             24,
         );
         assert!(
-            open.is_none(),
-            "there was no menu to go back to, so esc closes"
+            matches!(open, Some(Dialog::Menu { .. })),
+            "esc is one level back even for a panel opened straight with `s`"
         );
     }
 
@@ -1864,7 +1848,6 @@ mod tests {
         let mut it = Interaction::default();
         let mut open = Some(Dialog::Settings {
             cursor: 0,
-            from_menu: false,
             interval_at_open: crate::sidebar::live::DEFAULT_INTERVAL_MS,
             confirm: None,
             dirty: Vec::new(),
@@ -2121,5 +2104,88 @@ mod tests {
 
         let mut cursor = Some("a".to_string());
         assert!(!reconcile_cursor(&mut cursor, &rendered, 0));
+    }
+    /// The trip the reader actually makes: `x` for the menu, `\u{21b5}` into a
+    /// panel, `esc` back to the menu, and out. Every earlier esc test starts
+    /// with the panel already open, so none of them cross the menu boundary
+    /// that the reader complains about.
+    #[test]
+    fn esc_walks_back_out_through_the_menu_one_level_at_a_time() {
+        let r = two_cards();
+        let mut it = Interaction::default();
+        let mut live = live_default();
+        let mut open = None;
+        let mut go = |key, open: &mut Option<Dialog>, live: &mut _, it: &mut _| {
+            route(press(key), open, it, live, &r, 10, 40, 60, 24);
+        };
+
+        go(KeyCode::Char('x'), &mut open, &mut live, &mut it);
+        assert!(
+            matches!(open, Some(Dialog::Menu { .. })),
+            "x opens the menu"
+        );
+
+        go(KeyCode::Enter, &mut open, &mut live, &mut it);
+        assert!(
+            matches!(open, Some(Dialog::Settings { .. })),
+            "\u{21b5} on the first row opens settings"
+        );
+
+        go(KeyCode::Esc, &mut open, &mut live, &mut it);
+        assert!(
+            matches!(open, Some(Dialog::Menu { .. })),
+            "esc goes back to the menu it came from"
+        );
+
+        go(KeyCode::Esc, &mut open, &mut live, &mut it);
+        assert!(open.is_none(), "esc from the menu closes");
+    }
+
+    /// Same trip, but with the interval touched on the way in, so the
+    /// mandatory prompt stands between the panel and the menu.
+    #[test]
+    fn answering_the_prompt_still_lands_on_the_menu() {
+        let r = two_cards();
+        let mut it = Interaction::default();
+        let mut live = live_default();
+        let mut open = None;
+        let mut go = |key, open: &mut Option<Dialog>, live: &mut _, it: &mut _| {
+            route(press(key), open, it, live, &r, 10, 40, 60, 24);
+        };
+
+        go(KeyCode::Char('x'), &mut open, &mut live, &mut it);
+        go(KeyCode::Enter, &mut open, &mut live, &mut it);
+        // Down to the interval row, then move it.
+        let interval = crate::sidebar::live::SETTINGS
+            .iter()
+            .position(|s| matches!(s, crate::sidebar::live::Setting::IntervalMs))
+            .expect("an interval row");
+        for _ in 0..interval {
+            go(KeyCode::Char('j'), &mut open, &mut live, &mut it);
+        }
+        let before = live.interval_ms;
+        go(KeyCode::Char('l'), &mut open, &mut live, &mut it);
+        assert_ne!(live.interval_ms, before, "l moves the interval");
+
+        go(KeyCode::Esc, &mut open, &mut live, &mut it);
+        assert!(
+            matches!(
+                open,
+                Some(Dialog::Settings {
+                    confirm: Some(_),
+                    ..
+                })
+            ),
+            "esc raises the prompt instead of leaving"
+        );
+
+        // Cancel: put it back, and still land on the menu.
+        go(KeyCode::Char('j'), &mut open, &mut live, &mut it);
+        go(KeyCode::Enter, &mut open, &mut live, &mut it);
+        assert_eq!(live.interval_ms, before, "cancel puts the interval back");
+        assert!(
+            matches!(open, Some(Dialog::Menu { .. })),
+            "answering lands on the menu it came from"
+        );
     }
 }
