@@ -45,30 +45,6 @@ Herdr 標準 UI はサイドバー無しでも機能します。ライフサイ�
 ペインメタデータトークンを受け取ります。**これらの名前は Herdr との連携面であり、
 意図的に安定させています。**
 
-## 検証
-
-ペイン ID やセッション ID を露出せずに、対応する全ライブエージェントペインを走査します:
-
-```sh
-./tests/verify-live-agents.sh
-./tests/verify-sidebar-state.sh
-```
-
-Tier A は決定的な fake Herdr socket に対して実行され、常に有効です:
-
-```sh
-cargo test --test e2e_fake_herdr
-```
-
-Tier B はインストール済みの Herdr バイナリを隔離した HOME/XDG ディレクトリで起動し、既定では
-無視されます:
-
-```sh
-cargo test --test e2e_real_herdr -- --ignored
-```
-
-通常のテストをすべて実行するには `cargo test`。
-
 ## 利用できるコマンド
 
 すべてのアクションは同じ方法で実行します:
@@ -116,6 +92,22 @@ herdr plugin list
 
 すべてのキーは任意で、不正な値はそれぞれ既定値にフォールバックするため、
 1 つの誤りで失われるのはその設定だけで、プラグイン全体ではありません。
+
+| キー | 値 | 既定 | 役割 |
+| --- | --- | --- | --- |
+| `daemon.interval_ms` | 正の整数 | `1000` | デーモンが Herdr と突き合わせる間隔。起動時にのみ読むため、変更には `restart-daemon` が必要 |
+| `appearance.theme` | `inherit`、`lumon` | `inherit` | `inherit` は端末の配色をそのまま使い、`lumon` は独自の暗い背景を描く |
+| `appearance.agent_mark` | `dot`、`initial`、`symbol` | `dot` | カード上でエージェントを示す方法 — 色付きの点、頭文字、または下記の `symbol` |
+| `cards.auto_expand` | `none`、`all` | `none` | カードを最初から展開し、`o` を押さずにツールトレースを表示するか |
+| `cards.tool_calls` | `bars`、`jar` | `bars` | コンテキスト使用量メーターの描き方 |
+| `cards.trace_lines` | `1`–`20` | `5` | 展開したカードが表示するツールトレースの本数。範囲外の値は拒否ではなくクランプされる |
+| `list.sort` | `position`、`smart`、`group` | `position` | カードの並び順。下の表を参照 |
+| `list.hide_idle` | `true`、`false` | `false` | アイドルのエージェントを隠す。`z` を押すのと同じ |
+| `list.scope` | `all`、`workspace` | `all` | `workspace` はサイドバー自身のワークスペースのペインだけを表示。`HERDR_WORKSPACE_ID` が必要で、無い場合は理由を示して `all` に戻る |
+| `keys.open_sidebar` | Herdr のキー文字列 | `prefix+a` | `bind-sidebar-key` が Herdr の設定に書き込むキー。**バインドする前**に設定すること |
+| `agent.<id>.color` | `#rrggbb` | 組み込み | あるエージェントの色を上書き |
+| `agent.<id>.label` | 任意の文字列 | 組み込み | カードに表示される名前を上書き |
+| `agent.<id>.symbol` | 任意の文字列 | 組み込み | `agent_mark = "symbol"` のときに使う印 |
 
 ```toml
 [daemon]
@@ -387,3 +379,29 @@ herdr plugin action invoke restart-daemon --plugin herdr-agent-watcher
 
 `plugin link` は設計上ビルド手順をスキップします。作業ディレクトリのビルドは自分で行って
 ください。
+
+## 検証
+
+いずれも上記のソースチェックアウトとビルドが前提です。
+
+ペイン ID やセッション ID を露出せずに、対応する全ライブエージェントペインを走査します:
+
+```sh
+./tests/verify-live-agents.sh
+./tests/verify-sidebar-state.sh
+```
+
+Tier A は決定的な fake Herdr socket に対して実行され、常に有効です:
+
+```sh
+cargo test --test e2e_fake_herdr
+```
+
+Tier B はインストール済みの Herdr バイナリを隔離した HOME/XDG ディレクトリで起動し、既定では
+無視されます:
+
+```sh
+cargo test --test e2e_real_herdr -- --ignored
+```
+
+通常のテストをすべて実行するには `cargo test`。

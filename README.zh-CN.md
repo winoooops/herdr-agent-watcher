@@ -41,29 +41,6 @@ Herdr 原生 UI 不依赖侧边栏也能工作：它会收到生命周期通知�
 `agent_watcher_context_pct`、`agent_watcher_attention`、`agent_watcher_title`。
 **这些名字是与 Herdr 的集成接口，刻意保持稳定。**
 
-## 验证
-
-扫描所有已支持的活跃 agent pane，且不暴露 pane 或 session ID：
-
-```sh
-./tests/verify-live-agents.sh
-./tests/verify-sidebar-state.sh
-```
-
-Tier A 跑在确定性的 fake Herdr socket 上，始终启用：
-
-```sh
-cargo test --test e2e_fake_herdr
-```
-
-Tier B 会用隔离的 HOME/XDG 目录启动已安装的 Herdr 二进制，默认被忽略：
-
-```sh
-cargo test --test e2e_real_herdr -- --ignored
-```
-
-普通测试全跑：`cargo test`。
-
 ## 可用命令
 
 所有 action 的调用方式相同：
@@ -109,6 +86,22 @@ herdr plugin list
 如果 `config.toml` 不存在，自行创建。
 
 每个键都是可选的，每个无效值都会回退到默认值，因此一个错误只会影响一项设置，而不会影响整个插件。
+
+| 键 | 取值 | 默认 | 作用 |
+| --- | --- | --- | --- |
+| `daemon.interval_ms` | 正整数 | `1000` | daemon 与 Herdr 对账的间隔。daemon 只在启动时读取，改完需要 `restart-daemon` |
+| `appearance.theme` | `inherit`、`lumon` | `inherit` | `inherit` 沿用终端配色；`lumon` 自带深色背景 |
+| `appearance.agent_mark` | `dot`、`initial`、`symbol` | `dot` | 卡片上标识 agent 的方式 —— 彩色圆点、首字母，或下面每个 agent 自定义的 `symbol` |
+| `cards.auto_expand` | `none`、`all` | `none` | 卡片是否默认展开，即不按 `o` 也显示工具调用记录 |
+| `cards.tool_calls` | `bars`、`jar` | `bars` | 上下文用量条的画法 |
+| `cards.trace_lines` | `1`–`20` | `5` | 展开的卡片显示多少条工具调用记录。超范围会被夹到边界，而不是拒绝 |
+| `list.sort` | `position`、`smart`、`group` | `position` | 卡片排序，见下表 |
+| `list.hide_idle` | `true`、`false` | `false` | 隐藏空闲 agent，等同于按 `z` |
+| `list.scope` | `all`、`workspace` | `all` | `workspace` 只列出 sidebar 自身所在 workspace 的 pane，需要 `HERDR_WORKSPACE_ID`；没有它时会退回 `all` 并说明原因 |
+| `keys.open_sidebar` | Herdr 按键串 | `prefix+a` | `bind-sidebar-key` 写进 Herdr 配置的那个键。要在**绑定之前**设好 |
+| `agent.<id>.color` | `#rrggbb` | 内置 | 覆盖某个 agent 的颜色 |
+| `agent.<id>.label` | 任意字符串 | 内置 | 覆盖卡片上显示的名字 |
+| `agent.<id>.symbol` | 任意字符串 | 内置 | `agent_mark = "symbol"` 时使用的标记 |
 
 ```toml
 [daemon]
@@ -349,3 +342,28 @@ herdr plugin action invoke restart-daemon --plugin herdr-agent-watcher
 ```
 
 `plugin link` 按设计跳过构建步骤，工作目录由你自己构建。
+
+## 验证
+
+以下都基于上面的源码检出与构建。
+
+扫描所有已支持的活跃 agent pane，且不暴露 pane 或 session ID：
+
+```sh
+./tests/verify-live-agents.sh
+./tests/verify-sidebar-state.sh
+```
+
+Tier A 跑在确定性的 fake Herdr socket 上，始终启用：
+
+```sh
+cargo test --test e2e_fake_herdr
+```
+
+Tier B 会用隔离的 HOME/XDG 目录启动已安装的 Herdr 二进制，默认被忽略：
+
+```sh
+cargo test --test e2e_real_herdr -- --ignored
+```
+
+普通测试全跑：`cargo test`。

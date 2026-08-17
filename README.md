@@ -43,30 +43,6 @@ pane metadata tokens — `agent_watcher_state`, `agent_watcher_phase`, `agent_wa
 `agent_watcher_context_pct`, `agent_watcher_attention` and `agent_watcher_title`. Those
 names are the integration surface with Herdr and are deliberately stable.
 
-## Verify
-
-Scan every supported live agent pane without exposing pane or session IDs:
-
-```sh
-./tests/verify-live-agents.sh
-./tests/verify-sidebar-state.sh
-```
-
-Tier A runs against the deterministic fake Herdr socket and is always enabled:
-
-```sh
-cargo test --test e2e_fake_herdr
-```
-
-Tier B starts the installed Herdr binary with isolated HOME/XDG directories and is ignored
-by default:
-
-```sh
-cargo test --test e2e_real_herdr -- --ignored
-```
-
-Run all regular tests with `cargo test`.
-
 ## Commands
 
 Every action is invoked the same way:
@@ -114,6 +90,22 @@ Create `config.toml` there if it does not exist.
 
 Every key is optional and every bad value falls back to its default, so a mistake costs one
 setting rather than the plugin.
+
+| Key | Values | Default | What it does |
+| --- | --- | --- | --- |
+| `daemon.interval_ms` | positive integer | `1000` | How often the daemon reconciles with Herdr. The daemon reads it at startup, so a change needs `restart-daemon` |
+| `appearance.theme` | `inherit`, `lumon` | `inherit` | `inherit` takes your terminal's colours; `lumon` paints its own dark background |
+| `appearance.agent_mark` | `dot`, `initial`, `symbol` | `dot` | What marks the agent on a card — a coloured dot, its first letter, or the per-agent `symbol` below |
+| `cards.auto_expand` | `none`, `all` | `none` | Whether cards start expanded, showing tool traces without pressing `o` |
+| `cards.tool_calls` | `bars`, `jar` | `bars` | How the context meter is drawn |
+| `cards.trace_lines` | `1`–`20` | `5` | How many tool traces an expanded card shows. Out-of-range values are clamped, not rejected |
+| `list.sort` | `position`, `smart`, `group` | `position` | Card order; see the table below |
+| `list.hide_idle` | `true`, `false` | `false` | Hide idle agents, the same as pressing `z` |
+| `list.scope` | `all`, `workspace` | `all` | `workspace` lists only the panes in the sidebar's own workspace, which needs `HERDR_WORKSPACE_ID`; without it the scope degrades to `all` and says so |
+| `keys.open_sidebar` | a Herdr key string | `prefix+a` | The key `bind-sidebar-key` writes into Herdr's config. Set it *before* binding |
+| `agent.<id>.color` | `#rrggbb` | built-in | Overrides one agent's colour |
+| `agent.<id>.label` | any string | built-in | Overrides the name shown on its cards |
+| `agent.<id>.symbol` | any string | built-in | The mark used when `agent_mark = "symbol"` |
 
 ```toml
 [daemon]
@@ -377,3 +369,29 @@ herdr plugin action invoke restart-daemon --plugin herdr-agent-watcher
 ```
 
 `plugin link` skips the build step by design; build the working directory yourself.
+
+## Verify
+
+From a source checkout, on the build above.
+
+Scan every supported live agent pane without exposing pane or session IDs:
+
+```sh
+./tests/verify-live-agents.sh
+./tests/verify-sidebar-state.sh
+```
+
+Tier A runs against the deterministic fake Herdr socket and is always enabled:
+
+```sh
+cargo test --test e2e_fake_herdr
+```
+
+Tier B starts the installed Herdr binary with isolated HOME/XDG directories and is ignored
+by default:
+
+```sh
+cargo test --test e2e_real_herdr -- --ignored
+```
+
+Run all regular tests with `cargo test`.
