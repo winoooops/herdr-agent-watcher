@@ -273,13 +273,6 @@ Kimi のプラン使用量取得は、設定された API キーを `/usages` �
 このブリッジプラグインは `agent-watcher-opencode-bridge` というファイル名のままです。移植された
 サイドカーツリー内にあり、そのツリーは凍結されているためです。
 
-## 設計ノート
-
-[`DESIGN.md`](DESIGN.md) は、このプラグインがこの形になっている理由を記録しています。
-なぜ Claude だけがブリッジを必要とするのか、なぜ `PATH` を横取りせず Claude 自身の設定に
-入れるのか、なぜ書き込み先をデーモンが所有するのか、そして壊れたブリッジが何に劣化
-しなければならないのか。
-
 ## ローカル開発
 
 ```sh
@@ -290,6 +283,8 @@ herdr plugin action invoke restart-daemon --plugin herdr-agent-watcher
 
 `plugin link` は設計上ビルド手順をスキップします。作業ディレクトリのビルドは自分で行って
 ください。
+
+[`DESIGN.md`](DESIGN.md) は、このプラグインがこの形になっている理由を記録しています。
 
 ## 検証
 

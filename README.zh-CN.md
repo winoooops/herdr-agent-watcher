@@ -250,12 +250,6 @@ Kimi 的用量查询会把配置的 API key 发送到它的 `/usages` 端点，�
 和事件目录。该 bridge 插件保留 `agent-watcher-opencode-bridge` 这个文件名：它位于移植过来的
 sidecar 树中，而那棵树是冻结的。
 
-## 设计说明
-
-[`DESIGN.md`](DESIGN.md) 记录了这个插件为什么长成这样：为什么只有 Claude 需要桥接、
-为什么装进 Claude 自己的配置而不是拦截 `PATH`、为什么由 daemon 拥有写入目标、
-以及一个坏掉的桥接**必须**退化成什么样子。
-
 ## 本地开发
 
 ```sh
@@ -265,6 +259,8 @@ herdr plugin action invoke restart-daemon --plugin herdr-agent-watcher
 ```
 
 `plugin link` 按设计跳过构建步骤，工作目录由你自己构建。
+
+[`DESIGN.md`](DESIGN.md) 记录了这个插件为什么长成这样。
 
 ## 验证
 

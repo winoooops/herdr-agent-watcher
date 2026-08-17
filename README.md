@@ -267,13 +267,6 @@ override the install and event directories. The bridge plugin keeps its
 `agent-watcher-opencode-bridge` filename: it lives in the ported sidecar tree, which is
 frozen.
 
-## Design notes
-
-[`DESIGN.md`](DESIGN.md) records why the plugin is shaped this way: why Claude needs a
-bridge the other three agents do not, why it installs into Claude's own settings instead of
-intercepting `PATH`, why the daemon owns the destination, and what a broken bridge is
-required to degrade to.
-
 ## Local development
 
 ```sh
@@ -283,6 +276,8 @@ herdr plugin action invoke restart-daemon --plugin herdr-agent-watcher
 ```
 
 `plugin link` skips the build step by design; build the working directory yourself.
+
+[`DESIGN.md`](DESIGN.md) records why the plugin is shaped this way.
 
 ## Verify
 
