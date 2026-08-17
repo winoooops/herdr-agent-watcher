@@ -4,6 +4,7 @@ pub mod dialog;
 pub mod layout;
 pub mod live;
 pub mod reducer;
+pub mod release;
 pub mod view;
 
 pub(crate) mod bars;

@@ -237,6 +237,14 @@ pub(crate) enum Dialog {
         /// have to write the file, and the file is here.
         confirm: Option<usize>,
     },
+    /// Checking GitHub for a newer release, and what came back. `pending`
+    /// holds the thread's end of the channel: the loop polls it rather than
+    /// waiting, so the panel keeps drawing while the network takes its time.
+    Update {
+        check: crate::sidebar::release::Check,
+        offset: usize,
+        pending: Option<std::sync::mpsc::Receiver<crate::sidebar::release::Check>>,
+    },
     Doctor {
         offset: usize,
         report: Result<crate::agents::doctor::Report, String>,
@@ -254,30 +262,26 @@ impl Dialog {
         match self {
             Dialog::Menu { cursor } | Dialog::Keys { cursor } => Some(cursor),
             Dialog::Settings { cursor, .. } => Some(cursor),
-            Dialog::Doctor { .. } => None,
+            Dialog::Doctor { .. } | Dialog::Update { .. } => None,
         }
     }
 
     fn offset_mut(&mut self) -> Option<&mut usize> {
         match self {
-            Dialog::Doctor { offset, .. } => Some(offset),
+            Dialog::Doctor { offset, .. } | Dialog::Update { offset, .. } => Some(offset),
             _ => None,
         }
     }
 
-    /// Whether `esc` steps back to the menu or closes the sidebar's overlay
-    /// entirely. Opening settings with `s` and being dropped into a menu you
-    /// never saw is not going back.
-    /// Whether a panel opened from here should offer a way back to the menu:
-    /// either this IS the menu, or this was itself reached through it.
+    /// How many rows a cursor may move over.
     fn len(&self) -> usize {
         match self {
             Dialog::Menu { .. } => MENU.len(),
             Dialog::Keys { .. } => KEYS.len(),
             Dialog::Settings { .. } => crate::sidebar::live::SETTINGS.len(),
-            // Doctor scrolls; it has no selectable rows, so it has no cursor
-            // to bound.
-            Dialog::Doctor { .. } => 0,
+            // These scroll; they have no selectable rows, so no cursor to
+            // bound.
+            Dialog::Doctor { .. } | Dialog::Update { .. } => 0,
         }
     }
 
@@ -316,11 +320,40 @@ fn cycle_selected(dialog: &mut Dialog, live: &mut crate::sidebar::live::Live, ba
     }
 }
 
+/// Opens already checking: the request starts with the panel, so the reader
+/// never has to press a second key to make it do the thing it is named for.
+fn update_dialog() -> Dialog {
+    Dialog::Update {
+        check: crate::sidebar::release::Check::Checking,
+        offset: 0,
+        pending: Some(crate::sidebar::release::check()),
+    }
+}
+
 fn doctor_dialog() -> Dialog {
     Dialog::Doctor {
         offset: 0,
         report: crate::agents::claude_bridge::doctor_report(),
         taken_at: now_unix_ms(),
+    }
+}
+
+/// Which `Check` the update panel is showing. The snapshot in
+/// `every_key_the_sheet_describes_does_something` compares dialog
+/// discriminants, and `Update` stays `Update` while its contents change --
+/// so `u` would look ignored without this.
+#[cfg(test)]
+fn update_state(dialog: &Option<Dialog>) -> Option<&'static str> {
+    use crate::sidebar::release::Check;
+    match dialog {
+        Some(Dialog::Update { check, .. }) => Some(match check {
+            Check::Checking => "checking",
+            Check::Ready { .. } => "ready",
+            Check::Failed(_) => "failed",
+            Check::Upgrading => "upgrading",
+            Check::Finished(_) => "finished",
+        }),
+        _ => None,
     }
 }
 
@@ -510,12 +543,18 @@ fn doctor_rows(report: &crate::agents::doctor::Report) -> Vec<crate::sidebar::di
     rows
 }
 
-const MENU: [(&str, &str); 2] = [("Settings", "s"), ("Doctor", "d")];
+const MENU: [(&str, &str); 3] = [("Settings", "s"), ("Doctor", "d"), ("Update", "")];
+
+/// The rows of `MENU`, by name. A bare uppercase identifier in a match arm is
+/// a binding, not a constant, so leaving these undefined makes the first arm
+/// swallow every row -- silently, apart from an unreachable-pattern warning.
+const MENU_SETTINGS: usize = 0;
+const MENU_UPDATE: usize = 2;
 
 /// One inventory. The sheet is built from it, and the test presses every entry
 /// through the router. Descriptions say where a key means something, because
 /// `s` and `r` mean different things inside a panel and outside one.
-const KEYS: [(&str, &str); 13] = [
+const KEYS: [(&str, &str); 14] = [
     ("j / ↓", "move down"),
     ("k / ↑", "move up"),
     ("o / ↵", "expand a card · change a setting"),
@@ -526,7 +565,11 @@ const KEYS: [(&str, &str); 13] = [
     ("?", "this sheet"),
     ("s", "settings, in a panel · save, in the settings panel"),
     ("d", "doctor, in a panel"),
-    ("r", "rebuild the report, in the doctor panel"),
+    (
+        "r",
+        "rebuild the report, in the doctor panel · recheck, in update",
+    ),
+    ("u", "install the update, when one is offered"),
     ("q / esc", "close a panel, or the sidebar"),
     ("ctrl-c", "close the sidebar"),
 ];
@@ -541,72 +584,99 @@ const KEYS: [(&str, &str); 13] = [
 /// settings, and `s`/`d` only once a panel is up at all -- from the cards
 /// they are deliberately dead. Each arrives with the state that gives it
 /// meaning.
+/// A function rather than a `const`: one of these starting states holds a
+/// version string, which cannot be built in a constant.
 #[cfg(test)]
-const ROUTED: [(&str, KeyCode, KeyModifiers, &str, Option<Dialog>); 13] = [
-    ("j / ↓", KeyCode::Char('j'), KeyModifiers::NONE, "a", None),
-    ("k / ↑", KeyCode::Char('k'), KeyModifiers::NONE, "b", None),
-    ("o / ↵", KeyCode::Char('o'), KeyModifiers::NONE, "a", None),
-    (
-        "h / l · ← / →",
-        KeyCode::Char('l'),
-        KeyModifiers::NONE,
-        "a",
-        Some(Dialog::Settings {
-            cursor: 0,
-            dirty: Vec::new(),
-            path: None,
-            source: Ok(None),
-            interval_at_open: 1000,
-            confirm: None,
-        }),
-    ),
-    ("z", KeyCode::Char('z'), KeyModifiers::NONE, "a", None),
-    (
-        "PageUp / PageDown",
-        KeyCode::PageDown,
-        KeyModifiers::NONE,
-        "a",
-        None,
-    ),
-    ("x", KeyCode::Char('x'), KeyModifiers::NONE, "a", None),
-    ("?", KeyCode::Char('?'), KeyModifiers::NONE, "a", None),
-    (
-        "s",
-        KeyCode::Char('s'),
-        KeyModifiers::NONE,
-        "a",
-        Some(Dialog::Menu { cursor: 0 }),
-    ),
-    (
-        "d",
-        KeyCode::Char('d'),
-        KeyModifiers::NONE,
-        "a",
-        Some(Dialog::Menu { cursor: 0 }),
-    ),
-    (
-        "r",
-        KeyCode::Char('r'),
-        KeyModifiers::NONE,
-        "a",
-        Some(Dialog::Doctor {
-            offset: 0,
-            report: Ok(crate::agents::doctor::Report {
-                checks: Vec::new(),
-                panes: Vec::new(),
+fn routed() -> [(
+    &'static str,
+    KeyCode,
+    KeyModifiers,
+    &'static str,
+    Option<Dialog>,
+); 14] {
+    [
+        ("j / ↓", KeyCode::Char('j'), KeyModifiers::NONE, "a", None),
+        ("k / ↑", KeyCode::Char('k'), KeyModifiers::NONE, "b", None),
+        ("o / ↵", KeyCode::Char('o'), KeyModifiers::NONE, "a", None),
+        (
+            "h / l · ← / →",
+            KeyCode::Char('l'),
+            KeyModifiers::NONE,
+            "a",
+            Some(Dialog::Settings {
+                cursor: 0,
+                dirty: Vec::new(),
+                path: None,
+                source: Ok(None),
+                interval_at_open: 1000,
+                confirm: None,
             }),
-            taken_at: 0,
-        }),
-    ),
-    ("q / esc", KeyCode::Esc, KeyModifiers::NONE, "a", None),
-    (
-        "ctrl-c",
-        KeyCode::Char('c'),
-        KeyModifiers::CONTROL,
-        "a",
-        None,
-    ),
-];
+        ),
+        ("z", KeyCode::Char('z'), KeyModifiers::NONE, "a", None),
+        (
+            "PageUp / PageDown",
+            KeyCode::PageDown,
+            KeyModifiers::NONE,
+            "a",
+            None,
+        ),
+        ("x", KeyCode::Char('x'), KeyModifiers::NONE, "a", None),
+        ("?", KeyCode::Char('?'), KeyModifiers::NONE, "a", None),
+        (
+            "s",
+            KeyCode::Char('s'),
+            KeyModifiers::NONE,
+            "a",
+            Some(Dialog::Menu { cursor: 0 }),
+        ),
+        (
+            "d",
+            KeyCode::Char('d'),
+            KeyModifiers::NONE,
+            "a",
+            Some(Dialog::Menu { cursor: 0 }),
+        ),
+        (
+            "u",
+            KeyCode::Char('u'),
+            KeyModifiers::NONE,
+            "a",
+            Some(Dialog::Update {
+                check: crate::sidebar::release::Check::Ready {
+                    // Newer than anything this crate will be: `u` is dead unless
+                    // an upgrade is genuinely on offer, so a bare version here
+                    // would make a working key look ignored.
+                    latest: "v99.0.0".into(),
+                    source: crate::sidebar::release::Source::Github,
+                },
+                offset: 0,
+                pending: None,
+            }),
+        ),
+        (
+            "r",
+            KeyCode::Char('r'),
+            KeyModifiers::NONE,
+            "a",
+            Some(Dialog::Doctor {
+                offset: 0,
+                report: Ok(crate::agents::doctor::Report {
+                    checks: Vec::new(),
+                    panes: Vec::new(),
+                }),
+                taken_at: 0,
+            }),
+        ),
+        ("q / esc", KeyCode::Esc, KeyModifiers::NONE, "a", None),
+        (
+            "ctrl-c",
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL,
+            "a",
+            None,
+        ),
+    ]
+}
 
 /// The panel needs a frame it can be legible in. Below this it does not open:
 /// four broken characters are worse than a refusal that says why.
@@ -727,7 +797,21 @@ fn route(
                         .unwrap_or_else(|error| format!("save failed: {error}")),
                 );
             }
+            (KeyCode::Char('u'), _) => {
+                if let Dialog::Update { check, pending, .. } = dialog {
+                    // Only when an upgrade is actually on offer -- `u` on a
+                    // linked tree would run an install herdr refuses.
+                    if let Some(tag) = check.upgradable(env!("CARGO_PKG_VERSION")) {
+                        *pending = Some(crate::sidebar::release::upgrade(tag));
+                        *check = crate::sidebar::release::Check::Upgrading;
+                    }
+                }
+            }
             (KeyCode::Char('r'), _) => {
+                if let Dialog::Update { check, pending, .. } = dialog {
+                    *pending = Some(crate::sidebar::release::check());
+                    *check = crate::sidebar::release::Check::Checking;
+                }
                 if let Dialog::Doctor {
                     report, taken_at, ..
                 } = dialog
@@ -740,7 +824,8 @@ fn route(
                 cycle_selected(dialog, live, false);
                 if let Dialog::Menu { cursor } = dialog {
                     *open = Some(match *cursor {
-                        0 => settings_dialog(live.interval_ms),
+                        MENU_SETTINGS => settings_dialog(live.interval_ms),
+                        MENU_UPDATE => update_dialog(),
                         _ => doctor_dialog(),
                     });
                 }
@@ -871,6 +956,65 @@ fn panel_for(
                 footer: "j/k row · h/l value · s save · esc back".into(),
                 cursor: Some(*cursor),
                 offset: 0,
+            }
+        }
+        Dialog::Update { check, offset, .. } => {
+            use crate::sidebar::release::{Check, Source};
+            let ours = env!("CARGO_PKG_VERSION");
+            let mut rows = vec![Row::Entry {
+                label: "installed".into(),
+                value: ours.into(),
+                enabled: false,
+            }];
+            let mut footer = "esc back".to_string();
+            match check {
+                Check::Checking => rows.push(Row::Note("checking github…".into())),
+                Check::Failed(why) => {
+                    rows.push(Row::Warn(why.clone()));
+                    footer = "r retry · esc back".into();
+                }
+                Check::Upgrading => rows.push(Row::Note("upgrading…".into())),
+                Check::Finished(Ok(said)) => rows.push(Row::Note(said.clone())),
+                Check::Finished(Err(said)) => {
+                    rows.push(Row::Warn(said.clone()));
+                    footer = "r retry · esc back".into();
+                }
+                Check::Ready { latest, source } => {
+                    rows.push(Row::Entry {
+                        label: "latest".into(),
+                        value: latest.clone(),
+                        enabled: false,
+                    });
+                    rows.push(Row::Rule);
+                    match (check.upgradable(ours), source) {
+                        (Some(tag), _) => {
+                            rows.push(Row::Note(format!("{tag} is available")));
+                            footer = "u upgrade · r recheck · esc back".into();
+                        }
+                        // Each said plainly: "no upgrade offered" and "you are
+                        // current" look identical on screen otherwise.
+                        (None, Source::Linked(path)) => {
+                            rows.push(Row::Note(format!("linked from {path}")));
+                            rows.push(Row::Note("git pull, then cargo build --release".into()));
+                            footer = "r recheck · esc back".into();
+                        }
+                        (None, Source::Unknown) => {
+                            rows.push(Row::Warn("herdr did not say how this was installed".into()));
+                            footer = "r recheck · esc back".into();
+                        }
+                        (None, Source::Github) => {
+                            rows.push(Row::Note("up to date".into()));
+                            footer = "r recheck · esc back".into();
+                        }
+                    }
+                }
+            }
+            Panel {
+                title: "Update".into(),
+                rows,
+                footer,
+                cursor: None,
+                offset: *offset,
             }
         }
         Dialog::Doctor {
@@ -1055,6 +1199,32 @@ pub fn run() -> i32 {
     let mut dirty = true;
 
     loop {
+        // The update panel's thread, if one is running. Polled, never waited
+        // on: the check and the install both take seconds, and this is the
+        // loop that also draws and reads the keyboard.
+        if let Some(Dialog::Update { check, pending, .. }) = open.as_mut() {
+            if let Some(rx) = pending {
+                match rx.try_recv() {
+                    Ok(fresh) => {
+                        *check = fresh;
+                        *pending = None;
+                        dirty = true;
+                    }
+                    // The thread died without sending, which no path does --
+                    // but hanging on "checking…" forever would be worse than
+                    // saying so.
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        *check = crate::sidebar::release::Check::Failed(
+                            "the check stopped without a result".into(),
+                        );
+                        *pending = None;
+                        dirty = true;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                }
+            }
+        }
+
         // Retrying is a state of the loop, not a loop of its own: sleeping
         // inside a reconnect means no redraw and no key handling until it
         // finishes, which is exactly when the reader most wants to see the
@@ -1782,7 +1952,7 @@ mod tests {
     #[test]
     fn every_key_the_sheet_describes_does_something() {
         let r = two_cards();
-        for (key, code, modifiers, start, context) in ROUTED {
+        for (key, code, modifiers, start, context) in routed() {
             let mut it = Interaction {
                 follow: true,
                 offset: 5,
@@ -1801,6 +1971,7 @@ mod tests {
                 open.is_some(),
                 open.as_ref().map(std::mem::discriminant),
                 doctor_taken_at(&open),
+                update_state(&open),
             );
             let outcome = route(
                 crossterm::event::KeyEvent::new(code, modifiers),
@@ -1821,6 +1992,7 @@ mod tests {
                 open.is_some(),
                 open.as_ref().map(std::mem::discriminant),
                 doctor_taken_at(&open),
+                update_state(&open),
             );
             assert!(
                 matches!(outcome, KeyOutcome::Quit) || before != after,
@@ -1835,7 +2007,7 @@ mod tests {
     fn the_sheet_and_the_driven_table_describe_the_same_keys() {
         let sheet: std::collections::BTreeSet<&str> = KEYS.iter().map(|(key, _)| *key).collect();
         let driven: std::collections::BTreeSet<&str> =
-            ROUTED.iter().map(|(key, ..)| *key).collect();
+            routed().iter().map(|(key, ..)| *key).collect();
         let pending: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
         assert_eq!(
             sheet
@@ -2227,5 +2399,134 @@ mod tests {
             matches!(open, Some(Dialog::Menu { .. })),
             "answering lands on the menu it came from"
         );
+    }
+    /// The row exists, opens a panel, and the panel starts by saying it is
+    /// working -- a check that renders nothing until the network answers
+    /// looks like a key that did nothing.
+    #[test]
+    fn the_menu_leads_to_an_update_panel_that_starts_out_checking() {
+        let r = two_cards();
+        let mut it = Interaction::default();
+        let mut live = live_default();
+        let mut open = None;
+        let go = |key, open: &mut Option<Dialog>, live: &mut _, it: &mut _| {
+            route(press(key), open, it, live, &r, 10, 40, 60, 24);
+        };
+
+        go(KeyCode::Char('x'), &mut open, &mut live, &mut it);
+        let update = MENU
+            .iter()
+            .position(|(label, _)| *label == "Update")
+            .expect("the menu offers it");
+        for _ in 0..update {
+            go(KeyCode::Char('j'), &mut open, &mut live, &mut it);
+        }
+        go(KeyCode::Enter, &mut open, &mut live, &mut it);
+
+        let Some(Dialog::Update { check, .. }) = &open else {
+            panic!("expected the update panel, got {:?}", open.is_some())
+        };
+        assert!(matches!(check, crate::sidebar::release::Check::Checking));
+        let cfg = crate::sidebar::config::Loaded::from_missing();
+        let rows = rows_text(&panel_for(open.as_ref().unwrap(), &live, &cfg, 0).rows);
+        assert!(
+            rows.contains(env!("CARGO_PKG_VERSION")),
+            "says what it is now, before it knows what is newest: {rows}"
+        );
+    }
+
+    /// Each state has to render something a reader can act on -- especially
+    /// the failures, which is where a panel is most tempting to leave blank.
+    #[test]
+    fn every_check_state_renders_something_to_read() {
+        use crate::sidebar::release::{Check, Source};
+        let live = live_default();
+        let cfg = crate::sidebar::config::Loaded::from_missing();
+        let cases = [
+            (Check::Checking, "checking"),
+            (
+                Check::Ready {
+                    latest: "v9.9.9".into(),
+                    source: Source::Github,
+                },
+                "9.9.9",
+            ),
+            (
+                Check::Ready {
+                    latest: "v0.0.1".into(),
+                    source: Source::Github,
+                },
+                "up to date",
+            ),
+            (
+                Check::Ready {
+                    latest: "v9.9.9".into(),
+                    source: Source::Linked("/tmp/tree".into()),
+                },
+                "/tmp/tree",
+            ),
+            (Check::Failed("cannot reach github".into()), "github"),
+            (Check::Upgrading, "upgrading"),
+            (Check::Finished(Ok("installed".into())), "installed"),
+            (Check::Finished(Err("refused".into())), "refused"),
+        ];
+        for (check, expected) in cases {
+            let dialog = Dialog::Update {
+                check: check.clone(),
+                offset: 0,
+                pending: None,
+            };
+            let panel = panel_for(&dialog, &live, &cfg, 0);
+            let text = format!("{} {}", rows_text(&panel.rows), panel.footer).to_lowercase();
+            assert!(
+                text.contains(&expected.to_lowercase()),
+                "{check:?} should mention {expected:?}, drew: {text}"
+            );
+        }
+    }
+    /// `u` is the one key here that changes the machine, so it has to be dead
+    /// everywhere an upgrade would not work. A linked tree is the case that
+    /// matters: herdr refuses to install over one, so a live `u` would spend
+    /// a subprocess to print someone else's error.
+    #[test]
+    fn u_only_starts_an_upgrade_where_one_can_run() {
+        use crate::sidebar::release::{Check, Source};
+        let r = two_cards();
+        for (source, starts) in [
+            (Source::Github, true),
+            (Source::Linked("/tmp/tree".into()), false),
+            (Source::Unknown, false),
+        ] {
+            let mut it = Interaction::default();
+            let mut live = live_default();
+            let mut open = Some(Dialog::Update {
+                check: Check::Ready {
+                    latest: "v99.0.0".into(),
+                    source: source.clone(),
+                },
+                offset: 0,
+                pending: None,
+            });
+            route(
+                press(KeyCode::Char('u')),
+                &mut open,
+                &mut it,
+                &mut live,
+                &r,
+                10,
+                40,
+                60,
+                24,
+            );
+            let Some(Dialog::Update { check, .. }) = &open else {
+                panic!("still the update panel")
+            };
+            assert_eq!(
+                matches!(check, Check::Upgrading),
+                starts,
+                "{source:?} should {} an upgrade",
+                if starts { "start" } else { "not start" }
+            );
+        }
     }
 }

@@ -90,6 +90,13 @@ herdr plugin action invoke bind-sidebar-key --plugin herdr-agent-watcher
 That writes the binding into **Herdr's** config, refusing if the key is already taken and
 naming what holds it. For a different key, set `keys.open_sidebar` before running it.
 
+`x` also offers **Update**: it asks GitHub for the newest release and says how it compares
+to the build you are running. It asks only when you open it — nothing here contacts the
+network on its own. When a newer release exists and the plugin came from GitHub, `u`
+installs it and then asks you to reopen the sidebar, because no process can replace the
+binary it is executing. A linked working directory is told to `git pull` instead: herdr
+refuses to install over a link, and the tree belongs to whoever is editing it.
+
 > [!WARNING]
 > `unbind-sidebar-key` takes the binding back out. Run it **before uninstalling the
 > plugin** — Herdr runs nothing on uninstall, so otherwise the binding outlives the action
@@ -339,15 +346,8 @@ Run all regular tests with `cargo test`.
       running the old binary with nothing on screen to say so — it misled us during 0.1.4
       testing. The hello carries the daemon's build and the sidebar pins a notice when it
       is not its own
-- [ ] A **check / upgrade** row in the menu: ask GitHub for the newest release, say how it
-      compares to the running version, and upgrade on request by shelling out to
-      `herdr plugin install`, the way the settings panel already shells out to
-      `restart-daemon`. Only when you press it — this plugin does not talk to the network
-      on its own, the same rule the Kimi consent follows. The request runs off the draw
-      loop, since a blocked network call would freeze the panel it is drawn in. Two cases
-      to get right: a linked dev tree has nothing to fetch, and no process can swap the
-      binary it is already running — so it asks to be reopened rather than pretending it
-      upgraded itself
+- [x] A **check / upgrade** row in the menu, asking GitHub only when pressed, off the draw
+      loop, and refusing to offer an upgrade a linked tree cannot install
 - [ ] Remedies you can act on from the doctor panel — copy to clipboard on `↵` rather than
       running anything, since the fixes edit files outside this plugin
 - [ ] Fix the flaky `pane_without_cwd_uses_herdrs_cwd_for_that_pane` test

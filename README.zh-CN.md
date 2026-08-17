@@ -88,6 +88,11 @@ herdr plugin action invoke bind-sidebar-key --plugin herdr-agent-watcher
 这会把绑定写入 **Herdr 的**配置；如果这个键已经被占用，操作会拒绝并指出占用它的项目。
 想换一个键，运行它之前先设好 `keys.open_sidebar`。
 
+`x` 里还有 **Update**：它向 GitHub 查询最新 release，并说明它与你正在运行的版本的关系。
+只在你打开它时才请求 —— 这里没有任何东西会自行联网。当存在更新且插件是从 GitHub 安装的，
+按 `u` 就会安装，然后请你重新打开 sidebar：没有进程能替换自己正在执行的二进制。若是链接的
+工作目录，它会改为提示你 `git pull` —— herdr 拒绝覆盖链接，而那棵树属于正在编辑它的人。
+
 > [!WARNING]
 > `unbind-sidebar-key` 会移除该绑定。请在**卸载插件之前**运行它 —— Herdr 卸载插件时不会
 > 运行任何命令，否则这个绑定会比它指向的 action 存留得更久。
@@ -315,12 +320,8 @@ cargo test --test e2e_real_herdr -- --ignored
 - [x] 告诉 sidebar 它已经过期。升级插件后，已经开着的 sidebar 会继续跑旧二进制，界面上没有
       任何提示 —— 0.1.4 测试时我们就被它误导过。现在 hello 带上 daemon 的版本，sidebar 发现
       与自己不同就在底部钉一条提示
-- [ ] 菜单里加一行**检查 / 升级**：向 GitHub 查询最新 release，说明它与当前运行版本的差距，
-      并在你确认后调用 `herdr plugin install` 完成升级 —— 就像设置面板调用 `restart-daemon`
-      那样。只在你按下时才请求：本插件不会自行联网，这与 Kimi 上报同意遵循同一条规则。请求要
-      放在绘制循环之外，否则一次卡住的网络调用会冻住它所在的面板。有两种情况必须处理对：链接
-      的开发树没有东西可下载；没有进程能替换自己正在运行的二进制，所以它应当请你重新打开，而
-      不是假装升级完成
+- [x] 菜单里的**检查 / 升级**一行：只在按下时请求 GitHub、跑在绘制循环之外，并且不会对链接
+      的开发树给出一个装不上的升级按钮
 - [ ] doctor 面板里可操作的修复建议 —— `↵` 复制到剪贴板而不是直接执行，因为这些修复要改的是
       本插件之外的文件
 - [ ] 修掉 flaky 的 `pane_without_cwd_uses_herdrs_cwd_for_that_pane` 测试
