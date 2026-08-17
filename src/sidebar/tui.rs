@@ -58,6 +58,28 @@ fn spawn_reader(stream: UnixStream) -> Receiver<WireEvent> {
     receiver
 }
 
+/// Connect and subscribe, or say why not. Separated because the sidebar does
+/// this again every time the daemon goes away -- including when the settings
+/// panel restarts it, which is a disconnect this pane caused on purpose.
+fn subscribe(socket: &std::path::Path) -> Result<Receiver<WireEvent>, String> {
+    let mut stream = UnixStream::connect(socket).map_err(|error| {
+        format!(
+            "herdr-agent-watcher daemon is not running\n(no state socket at {}: {error})",
+            socket.display()
+        )
+    })?;
+    stream
+        .write_all(b"{\"method\":\"subscribe\"}\n")
+        .map_err(|_| "herdr-agent-watcher daemon closed the state socket".to_string())?;
+    Ok(spawn_reader(stream))
+}
+
+/// How long to keep trying before giving up on a daemon that is not coming
+/// back. A restart takes a second or two; a minute is long enough that the
+/// only thing still waiting is a daemon that died.
+const RECONNECT_FOR: Duration = Duration::from_secs(60);
+const RECONNECT_EVERY: Duration = Duration::from_millis(400);
+
 fn wait_any_key() {
     loop {
         if matches!(crossterm::event::poll(Duration::from_secs(3600)), Ok(true))
@@ -240,10 +262,10 @@ impl Dialog {
     /// Whether a panel opened from here should offer a way back to the menu:
     /// either this IS the menu, or this was itself reached through it.
     fn leads_back_to_menu(&self) -> bool {
-        matches!(self, Dialog::Menu { .. }) || self.from_menu()
+        matches!(self, Dialog::Menu { .. }) || self.came_from_menu()
     }
 
-    fn from_menu(&self) -> bool {
+    fn came_from_menu(&self) -> bool {
         match self {
             Dialog::Settings { from_menu, .. } | Dialog::Doctor { from_menu, .. } => *from_menu,
             Dialog::Menu { .. } | Dialog::Keys { .. } => false,
@@ -305,6 +327,7 @@ fn doctor_dialog(from_menu: bool) -> Dialog {
     }
 }
 
+#[cfg(test)]
 fn doctor_taken_at(dialog: &Option<Dialog>) -> Option<u64> {
     match dialog {
         Some(Dialog::Doctor { taken_at, .. }) => Some(*taken_at),
@@ -496,10 +519,11 @@ const MENU: [(&str, &str); 2] = [("Settings", "s"), ("Doctor", "d")];
 /// One inventory. The sheet is built from it, and the test presses every entry
 /// through the router. Descriptions say where a key means something, because
 /// `s` and `r` mean different things inside a panel and outside one.
-const KEYS: [(&str, &str); 12] = [
+const KEYS: [(&str, &str); 13] = [
     ("j / ↓", "move down"),
     ("k / ↑", "move up"),
     ("o / ↵", "expand a card · change a setting"),
+    ("h / l · ← / →", "change a setting, back and forward"),
     ("z", "hide idle agents"),
     ("PageUp / PageDown", "scroll"),
     ("x", "menu"),
@@ -520,10 +544,25 @@ const KEYS: [(&str, &str); 12] = [
 /// `r` only means something with the doctor panel open and `↵` only inside
 /// settings, so those arrive with the panels that give them meaning.
 #[cfg(test)]
-const ROUTED: [(&str, KeyCode, KeyModifiers, &str, Option<Dialog>); 12] = [
+const ROUTED: [(&str, KeyCode, KeyModifiers, &str, Option<Dialog>); 13] = [
     ("j / ↓", KeyCode::Char('j'), KeyModifiers::NONE, "a", None),
     ("k / ↑", KeyCode::Char('k'), KeyModifiers::NONE, "b", None),
     ("o / ↵", KeyCode::Char('o'), KeyModifiers::NONE, "a", None),
+    (
+        "h / l · ← / →",
+        KeyCode::Char('l'),
+        KeyModifiers::NONE,
+        "a",
+        Some(Dialog::Settings {
+            cursor: 0,
+            from_menu: false,
+            dirty: Vec::new(),
+            path: None,
+            source: Ok(None),
+            interval_at_open: 1000,
+            confirm: None,
+        }),
+    ),
     ("z", KeyCode::Char('z'), KeyModifiers::NONE, "a", None),
     (
         "PageUp / PageDown",
@@ -603,7 +642,7 @@ fn route(
                 (KeyCode::Enter, _) | (KeyCode::Char('o'), _) => {
                     let restart = *choice == 0;
                     it.notice = Some(resolve_interval(dialog, live, restart));
-                    *open = dialog.from_menu().then(Dialog::menu);
+                    *open = dialog.came_from_menu().then(Dialog::menu);
                 }
                 _ => {}
             }
@@ -635,7 +674,7 @@ fn route(
                         return KeyOutcome::Handled;
                     }
                 }
-                *open = dialog.from_menu().then(Dialog::menu);
+                *open = dialog.came_from_menu().then(Dialog::menu);
             }
             (KeyCode::Char('j'), _) | (KeyCode::Down, _) => {
                 let last = dialog.len().saturating_sub(1);
@@ -779,7 +818,7 @@ fn panel_for(
             interval_at_open,
             ..
         } => {
-            let mut rows: Vec<Row> = crate::sidebar::live::SETTINGS
+            let rows: Vec<Row> = crate::sidebar::live::SETTINGS
                 .iter()
                 .map(|setting| Row::Entry {
                     label: setting.label().into(),
@@ -953,16 +992,12 @@ fn truecolor() -> bool {
 
 pub fn run() -> i32 {
     let socket = crate::daemon::state_socket_path();
-    let Ok(mut stream) = UnixStream::connect(&socket) else {
-        return draw_message_and_wait(&format!(
-            "herdr-agent-watcher daemon is not running\n(no state socket at {})",
-            socket.display()
-        ));
+    let mut wire = match subscribe(&socket) {
+        Ok(wire) => Some(wire),
+        Err(message) => return draw_message_and_wait(&message),
     };
-    if stream.write_all(b"{\"method\":\"subscribe\"}\n").is_err() {
-        return draw_message_and_wait("herdr-agent-watcher daemon closed the state socket");
-    }
-    let wire = spawn_reader(stream);
+    let mut lost_at: Option<std::time::Instant> = None;
+    let mut next_try = std::time::Instant::now();
 
     let guard = match TerminalGuard::enter() {
         Ok(guard) => guard,
@@ -1013,8 +1048,42 @@ pub fn run() -> i32 {
     let mut dirty = true;
 
     loop {
-        loop {
-            match wire.try_recv() {
+        // Retrying is a state of the loop, not a loop of its own: sleeping
+        // inside a reconnect means no redraw and no key handling until it
+        // finishes, which is exactly when the reader most wants to see the
+        // panel is still alive.
+        if wire.is_none() {
+            let now = std::time::Instant::now();
+            if now >= next_try {
+                match subscribe(&socket) {
+                    Ok(fresh) => {
+                        wire = Some(fresh);
+                        lost_at = None;
+                        it.notice = None;
+                        // The state is left alone on purpose: subscribing
+                        // replies with a full snapshot that replaces it, so
+                        // clearing here would only blank the panel in the gap
+                        // before that snapshot lands.
+                    }
+                    Err(_) => next_try = now + RECONNECT_EVERY,
+                }
+                dirty = true;
+            }
+            if let Some(lost) = lost_at {
+                if now.duration_since(lost) > RECONNECT_FOR {
+                    drop(terminal);
+                    drop(guard);
+                    return draw_message_and_wait("herdr-agent-watcher daemon did not come back");
+                }
+                it.notice = Some(format!(
+                    "daemon disconnected; reconnecting… ({}s)",
+                    now.duration_since(lost).as_secs()
+                ));
+            }
+        }
+
+        while let Some(rx) = wire.as_ref() {
+            match rx.try_recv() {
                 Ok(WireEvent::Line(line)) => match apply_line(&mut state, &line) {
                     Ok(()) => dirty = true,
                     Err(message) => {
@@ -1023,17 +1092,19 @@ pub fn run() -> i32 {
                         return draw_message_and_wait(&message);
                     }
                 },
-                Ok(WireEvent::Ended) => {
-                    drop(terminal);
-                    drop(guard);
-                    return draw_message_and_wait("herdr-agent-watcher daemon disconnected");
+                // Not a dead end. The daemon going away is usually a restart
+                // -- and since the settings panel can order one, it is a
+                // disconnect this pane asked for. Drop the wire and let the
+                // loop retry, so the cards stay on screen and keys keep
+                // working while it does.
+                Ok(WireEvent::Ended) | Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    wire = None;
+                    lost_at = Some(std::time::Instant::now());
+                    next_try = std::time::Instant::now();
+                    dirty = true;
+                    break;
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => break,
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    drop(terminal);
-                    drop(guard);
-                    return draw_message_and_wait("herdr-agent-watcher daemon disconnected");
-                }
             }
         }
 
@@ -1705,7 +1776,9 @@ mod tests {
                 it.offset,
                 it.cursor.clone(),
                 it.toggled.clone(),
-                live.hide_idle,
+                // The whole of `live`, not just `hide_idle`: a key that only
+                // moves a setting is still a key that did something.
+                live.clone(),
                 open.is_some(),
                 std::mem::discriminant(&open),
                 doctor_taken_at(&open),
@@ -1725,7 +1798,7 @@ mod tests {
                 it.offset,
                 it.cursor.clone(),
                 it.toggled.clone(),
-                live.hide_idle,
+                live.clone(),
                 open.is_some(),
                 std::mem::discriminant(&open),
                 doctor_taken_at(&open),

@@ -253,7 +253,7 @@ impl Live {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sidebar::config::{AgentMark, AutoExpand, Loaded, Scope, Theme, ToolCallStyle};
+    use crate::sidebar::config::{Loaded, Scope};
     use crate::sidebar::select::Sort;
 
     #[test]

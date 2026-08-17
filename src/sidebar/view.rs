@@ -174,13 +174,6 @@ fn cwd_of(t: &PaneTelemetry, cx: &CardCtx<'_>) -> Option<String> {
     Some(raw.rsplit('/').next().unwrap_or(&raw).to_string())
 }
 
-fn pad_to(line: &mut Line, width: u16) {
-    let used: usize = line.iter().map(|s| format::width(&s.text)).sum();
-    if (used as u16) < width {
-        line.push(Span::body(" ".repeat(width as usize - used)));
-    }
-}
-
 fn justify(left: Line, right: Line, width: u16) -> Line {
     let l: usize = left.iter().map(|s| format::width(&s.text)).sum();
     let r: usize = right.iter().map(|s| format::width(&s.text)).sum();

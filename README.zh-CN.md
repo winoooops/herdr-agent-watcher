@@ -153,11 +153,15 @@ herdr plugin action invoke open-sidebar --plugin herdr-agent-watcher
 `x` 打开菜单，`?` 列出所有按键。可以从菜单打开设置面板和 doctor 面板，也可以直接按
 `s` 和 `d` 打开。
 
-循环切换设置时，你正在查看的内容会立即变化；按下 `s` 之前不会写入任何内容。保存只会
-编辑你更改过的键，并让 `config.toml` 的其余部分（包括 `[daemon]`、`[agent.*]` 和你的
-注释）完全保持原样。
+循环切换设置时，你正在查看的内容会立即变化 —— `l`/`→` 向前、`h`/`←` 向后，`o`/`↵` 同样
+向前 —— 按下 `s` 之前不会写入任何内容。保存只会编辑你更改过的键，并让 `config.toml` 的
+其余部分（包括 `[daemon]`、`[agent.*]` 和你的注释）完全保持原样。
 
-doctor 面板会在不离开 sidebar 的情况下显示 `doctor` 打印的内容。按 `r` 重新生成报告。
+`interval_ms` 是例外：它属于 daemon，因此改动在 daemon 重启前不会生效。改过它之后要离开
+面板时会先询问 —— 立即重启，或改回原值 —— 不作答就无法离开。
+
+doctor 面板会在不离开 sidebar 的情况下显示 `doctor` 打印的内容。按 `r` 重新生成报告；
+报告比 pane 高时用 `j`/`k` 滚动。
 
 设置 `scope = "workspace"` 后，每个 sidebar 只列出自身 workspace 中的 pane，这使得为每个
 workspace 各开一个 sidebar 真正有用。daemon 尚未确定 workspace 的 pane 会显示出来，而不会
@@ -182,7 +186,10 @@ open_sidebar = "prefix+a"
 `unbind-sidebar-key` 会移除该绑定。**卸载插件前先运行它**，否则绑定会比它指向的 action
 存留得更久 —— Herdr 卸载插件时不会运行任何命令。
 
-daemon 不可用或断开时，面板会说明并等待按键。它的 state socket
+sidebar 打开时若 daemon 不可用，面板会说明并等待按键。若是在 sidebar 打开期间断开 ——
+通常正是设置面板刚刚要求的那次重启 —— 卡片会留在屏幕上，提示会显示已等待的秒数，sidebar
+会自行重新订阅；整个过程中按键照常响应。超过一分钟仍未恢复才会停止重试并等待按键。它的
+state socket
 （`$HERDR_PLUGIN_STATE_DIR/herdr-agent-watcher-state.sock`，`WIRE_VERSION = 2`）
 属于插件内部实现，不是公开 API。
 

@@ -130,7 +130,7 @@ fn edge(left: char, right: char, title: &str, width: usize) -> Line {
     } else {
         format!(" {title} ")
     };
-    let bar = width.saturating_sub(2 + format::width(&label)).max(0);
+    let bar = width.saturating_sub(2 + format::width(&label));
     vec![Span::new(
         format!("{left}{label}{}{right}", "─".repeat(bar)),
         Style::role(Role::Rule),
