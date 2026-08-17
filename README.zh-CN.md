@@ -72,6 +72,24 @@ herdr plugin action invoke <id> --plugin herdr-agent-watcher
 都能立刻在卡片上看到效果，而且只会写入你动过的键。需要写注释、需要面板没有暴露的键，或者
 要把配置纳入版本管理时，再直接编辑文件。
 
+每个键都是可选的，每个无效值都会回退到默认值，因此一个错误只会影响一项设置，而不会影响整个插件。
+
+| 键 | 取值 | 默认 | 作用 |
+| --- | --- | --- | --- |
+| `daemon.interval_ms` | 正整数 | `1000` | 对账间隔。启动时读取，改完需 `restart-daemon`。`AGENT_WATCHER_INTERVAL_MS` 优先级更高 |
+| `appearance.theme` | `inherit`、`lumon` | `inherit` | `inherit` 沿用终端配色；`lumon` 自带一套 |
+| `appearance.agent_mark` | `dot`、`initial`、`symbol` | `dot` | 卡片上 agent 的标记 |
+| `cards.auto_expand` | `none`、`all` | `none` | 卡片默认展开 |
+| `cards.tool_calls` | `bars`、`jar` | `bars` | 上下文用量条的画法 |
+| `cards.trace_lines` | `1`–`20` | `5` | 展开后显示几条记录。超范围是夹到边界，不是拒绝 |
+| `list.sort` | `position`、`smart`、`group` | `position` | 卡片排序：Herdr 的布局顺序、按紧急程度、或按 agent 分组。默认用 `position`，因为只有它不会在你眼皮下移动 |
+| `list.hide_idle` | `true`、`false` | `false` | 隐藏空闲 agent，同按 `z` |
+| `list.scope` | `all`、`workspace` | `all` | `workspace` 需要 `HERDR_WORKSPACE_ID`，没有则退回 `all` |
+| `keys.open_sidebar` | Herdr 按键串 | `prefix+a` | `bind-sidebar-key` 写入的键。须在绑定前设好 |
+| `agent.<id>.color` | `#rrggbb` | 内置 | 覆盖某个 agent 的颜色 |
+| `agent.<id>.label` | 任意字符串 | 内置 | 覆盖它在卡片上的名字 |
+| `agent.<id>.symbol` | 任意字符串 | 内置 | `agent_mark = "symbol"` 时用的标记 |
+
 设置放在**插件自己的** `config.toml` 里，不是 Herdr 的那个。Herdr 会忽略它不认识的表，
 所以把 `[daemon]` 写进 `~/.config/herdr/config.toml` 不会有任何效果，只会让
 `herdr config check` 报告一个未知小节。
@@ -85,54 +103,14 @@ herdr plugin list
 默认是 `${XDG_CONFIG_HOME:-~/.config}/herdr/plugins/config/herdr-agent-watcher/`。
 如果 `config.toml` 不存在，自行创建。
 
-每个键都是可选的，每个无效值都会回退到默认值，因此一个错误只会影响一项设置，而不会影响整个插件。
-
-| 键 | 取值 | 默认 | 作用 |
-| --- | --- | --- | --- |
-| `daemon.interval_ms` | 正整数 | `1000` | 对账间隔。启动时读取，改完需 `restart-daemon` |
-| `appearance.theme` | `inherit`、`lumon` | `inherit` | `inherit` 沿用终端配色；`lumon` 自带一套 |
-| `appearance.agent_mark` | `dot`、`initial`、`symbol` | `dot` | 卡片上 agent 的标记 |
-| `cards.auto_expand` | `none`、`all` | `none` | 卡片默认展开 |
-| `cards.tool_calls` | `bars`、`jar` | `bars` | 上下文用量条的画法 |
-| `cards.trace_lines` | `1`–`20` | `5` | 展开后显示几条记录。超范围是夹到边界，不是拒绝 |
-| `list.sort` | `position`、`smart`、`group` | `position` | 卡片排序，见下表 |
-| `list.hide_idle` | `true`、`false` | `false` | 隐藏空闲 agent，同按 `z` |
-| `list.scope` | `all`、`workspace` | `all` | `workspace` 需要 `HERDR_WORKSPACE_ID`，没有则退回 `all` |
-| `keys.open_sidebar` | Herdr 按键串 | `prefix+a` | `bind-sidebar-key` 写入的键。须在绑定前设好 |
-| `agent.<id>.color` | `#rrggbb` | 内置 | 覆盖某个 agent 的颜色 |
-| `agent.<id>.label` | 任意字符串 | 内置 | 覆盖它在卡片上的名字 |
-| `agent.<id>.symbol` | 任意字符串 | 内置 | `agent_mark = "symbol"` 时用的标记 |
-
 ```toml
 [daemon]
-interval_ms = 5000     # daemon 与 Herdr 协调的间隔；默认 1000
+interval_ms = 5000
 
 [list]
-scope = "workspace"    # "all"（默认）列出所有 pane；"workspace" 只列出当前 workspace
-sort  = "position"     # 默认值；另有 "smart" 与 "group"
+scope = "workspace"
+sort  = "position"
 ```
-
-`sort` 决定卡片的顺序：
-
-| 取值 | 顺序 |
-| --- | --- |
-| `position`（默认） | herdr 自身的布局顺序，与它的 agent 侧边栏一致 |
-| `smart` | 最紧急的在前 —— 错误、需要注意、运行中、已完成、空闲 |
-| `group` | 先按 agent 分组，组内同 `smart` |
-
-`position` 之所以是默认，是因为只有它不会动：在 `smart` 下，一个 agent 一开始工作或一停下来，
-它的卡片就换位置 —— 你刚才在看的那张，等你回头时已经不在原处了。
-
-应用修改：
-
-```sh
-herdr plugin action invoke restart-daemon --plugin herdr-agent-watcher
-```
-
-sidebar 会在下次打开时读取 `[list]`。
-
-`AGENT_WATCHER_INTERVAL_MS` 仍然有效，并且优先级高于配置文件。它读取的是 **Herdr server**
-的环境，而不是你的 shell；因此设置它意味着要重启 Herdr —— 这正是配置文件存在的原因。
 
 运行 [`doctor`](#doctor) 可查看某项设置是否被拒绝，以及实际改用了什么值。
 
@@ -142,7 +120,8 @@ sidebar 会在下次打开时读取 `[list]`。
 herdr plugin action invoke open-sidebar --plugin herdr-agent-watcher
 ```
 
-每次调用都会**有意**新开一个分屏。卡片显示 agent 状态、agent/模型、标题、上下文用量、
+每次调用都会**有意**新开一个分屏 —— 默认快捷键是 `prefix+a`，配合 Herdr 自身的默认前缀
+就是 `ctrl+b` 再按 `a`。卡片显示 agent 状态、agent/模型、标题、上下文用量、
 缓存命中率、成本、工具调用数，以及最近三条工具调用记录。`j`/`k` 或 PageUp/PageDown 滚动，
 `o`/`↵` 展开，`z` 隐藏空闲 agent，`x` 打开菜单，`?` 列出所有按键，`q`/`Esc` 或
 Ctrl-C 关闭。

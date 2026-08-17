@@ -77,6 +77,25 @@ herdr plugin action invoke <id> --plugin herdr-agent-watcher
 触れたキーだけです。コメントを書きたいとき、パネルが公開していないキーを使いたいとき、
 設定をバージョン管理に入れたいときは、ファイルを直接編集してください。
 
+すべてのキーは任意で、不正な値はそれぞれ既定値にフォールバックするため、
+1 つの誤りで失われるのはその設定だけで、プラグイン全体ではありません。
+
+| キー | 値 | 既定 | 役割 |
+| --- | --- | --- | --- |
+| `daemon.interval_ms` | 正の整数 | `1000` | 突き合わせ間隔。起動時に読むため変更には `restart-daemon` が必要。`AGENT_WATCHER_INTERVAL_MS` が優先される |
+| `appearance.theme` | `inherit`、`lumon` | `inherit` | `inherit` は端末の配色、`lumon` は独自の配色 |
+| `appearance.agent_mark` | `dot`、`initial`、`symbol` | `dot` | カード上のエージェントの印 |
+| `cards.auto_expand` | `none`、`all` | `none` | カードを最初から展開する |
+| `cards.tool_calls` | `bars`、`jar` | `bars` | コンテキストメーターの描き方 |
+| `cards.trace_lines` | `1`–`20` | `5` | 展開時のトレース本数。範囲外は拒否ではなくクランプ |
+| `list.sort` | `position`、`smart`、`group` | `position` | カードの並び順：Herdr のレイアウト順、緊急度順、エージェントごと。既定が `position` なのは、見ている間に動かない唯一の順序だから |
+| `list.hide_idle` | `true`、`false` | `false` | アイドルを隠す。`z` と同じ |
+| `list.scope` | `all`、`workspace` | `all` | `workspace` は `HERDR_WORKSPACE_ID` が必要。無ければ `all` に戻る |
+| `keys.open_sidebar` | Herdr のキー文字列 | `prefix+a` | `bind-sidebar-key` が書き込むキー。バインド前に設定 |
+| `agent.<id>.color` | `#rrggbb` | 組み込み | エージェントの色を上書き |
+| `agent.<id>.label` | 任意の文字列 | 組み込み | カード上の名前を上書き |
+| `agent.<id>.symbol` | 任意の文字列 | 組み込み | `agent_mark = "symbol"` のときの印 |
+
 設定は **プラグイン自身の** `config.toml` に置きます。Herdr のものではありません。
 Herdr は認識できないテーブルを無視するため、`~/.config/herdr/config.toml` に `[daemon]` を
 書いても何も起こらず、`herdr config check` が未知のセクションを報告するだけです。
@@ -90,57 +109,14 @@ herdr plugin list
 既定では `${XDG_CONFIG_HOME:-~/.config}/herdr/plugins/config/herdr-agent-watcher/` です。
 `config.toml` が無ければ作成してください。
 
-すべてのキーは任意で、不正な値はそれぞれ既定値にフォールバックするため、
-1 つの誤りで失われるのはその設定だけで、プラグイン全体ではありません。
-
-| キー | 値 | 既定 | 役割 |
-| --- | --- | --- | --- |
-| `daemon.interval_ms` | 正の整数 | `1000` | 突き合わせ間隔。起動時に読むため変更には `restart-daemon` が必要 |
-| `appearance.theme` | `inherit`、`lumon` | `inherit` | `inherit` は端末の配色、`lumon` は独自の配色 |
-| `appearance.agent_mark` | `dot`、`initial`、`symbol` | `dot` | カード上のエージェントの印 |
-| `cards.auto_expand` | `none`、`all` | `none` | カードを最初から展開する |
-| `cards.tool_calls` | `bars`、`jar` | `bars` | コンテキストメーターの描き方 |
-| `cards.trace_lines` | `1`–`20` | `5` | 展開時のトレース本数。範囲外は拒否ではなくクランプ |
-| `list.sort` | `position`、`smart`、`group` | `position` | カードの並び順。下の表を参照 |
-| `list.hide_idle` | `true`、`false` | `false` | アイドルを隠す。`z` と同じ |
-| `list.scope` | `all`、`workspace` | `all` | `workspace` は `HERDR_WORKSPACE_ID` が必要。無ければ `all` に戻る |
-| `keys.open_sidebar` | Herdr のキー文字列 | `prefix+a` | `bind-sidebar-key` が書き込むキー。バインド前に設定 |
-| `agent.<id>.color` | `#rrggbb` | 組み込み | エージェントの色を上書き |
-| `agent.<id>.label` | 任意の文字列 | 組み込み | カード上の名前を上書き |
-| `agent.<id>.symbol` | 任意の文字列 | 組み込み | `agent_mark = "symbol"` のときの印 |
-
 ```toml
 [daemon]
-interval_ms = 5000     # デーモンが Herdr と調整する間隔。既定値は 1000
+interval_ms = 5000
 
 [list]
-scope = "workspace"    # "all"（既定）は全ペイン、"workspace" はこのワークスペースだけ
-sort  = "position"     # 既定値。ほかに "smart" と "group"
+scope = "workspace"
+sort  = "position"
 ```
-
-`sort` はカードの並び順を決めます:
-
-| 値 | 並び |
-| --- | --- |
-| `position`（既定） | herdr 自身のレイアウト順。そのエージェントサイドバーと同じ |
-| `smart` | 緊急なものから — エラー、要対応、実行中、完了、アイドル |
-| `group` | エージェントごとにまとめ、各グループ内は `smart` と同じ |
-
-`position` が既定なのは、動かない唯一の並びだからです。`smart` ではエージェントが動き始めたり
-止まったりするたびにカードの位置が変わり、さっき読んでいたものが次に見たときには別の場所に
-あります。
-
-変更の適用:
-
-```sh
-herdr plugin action invoke restart-daemon --plugin herdr-agent-watcher
-```
-
-サイドバーは次に開いたときに `[list]` を取り込みます。
-
-`AGENT_WATCHER_INTERVAL_MS` も引き続き使え、ファイルより優先されます。読み取られるのは
-シェルではなく **Herdr サーバーの**環境なので、設定するには Herdr の再起動が必要です。
-その不便を解消するために、このファイルがあります。
 
 設定が拒否されたか、代わりに何が使われたかは [`doctor`](#doctor) で確認できます。
 
@@ -150,7 +126,8 @@ herdr plugin action invoke restart-daemon --plugin herdr-agent-watcher
 herdr plugin action invoke open-sidebar --plugin herdr-agent-watcher
 ```
 
-呼び出すたびに**意図的に**新しい分割ペインが開きます。カードにはエージェントの状態、
+呼び出すたびに**意図的に**新しい分割ペインが開きます。既定のキーは `prefix+a`、Herdr の
+既定プレフィックスなら `ctrl+b` のあと `a` です。カードにはエージェントの状態、
 エージェント/モデル、タイトル、コンテキスト使用量、キャッシュヒット率、コスト、ツール呼び出し
 回数、最新 3 件のツールトレースが表示されます。`j`/`k` または PageUp/PageDown でスクロール、
 `o`/`↵` で展開、`z` でアイドル状態のエージェントを隠し、`x` でメニューを開き、`?` で

@@ -75,6 +75,25 @@ the same file live — you see each change on the cards as you make it, and only
 touched are written. Reach for the file directly when you want comments, a key the panel
 does not expose, or to check something into version control.
 
+Every key is optional and every bad value falls back to its default, so a mistake costs one
+setting rather than the plugin.
+
+| Key | Values | Default | What it does |
+| --- | --- | --- | --- |
+| `daemon.interval_ms` | positive integer | `1000` | Reconcile interval. Read at startup, so a change needs `restart-daemon`. `AGENT_WATCHER_INTERVAL_MS` outranks it |
+| `appearance.theme` | `inherit`, `lumon` | `inherit` | `inherit` uses your terminal's colours; `lumon` paints its own |
+| `appearance.agent_mark` | `dot`, `initial`, `symbol` | `dot` | The agent's mark on a card |
+| `cards.auto_expand` | `none`, `all` | `none` | Start cards expanded |
+| `cards.tool_calls` | `bars`, `jar` | `bars` | How the context meter is drawn |
+| `cards.trace_lines` | `1`–`20` | `5` | Traces per expanded card. Out of range clamps, it does not reject |
+| `list.sort` | `position`, `smart`, `group` | `position` | Card order: Herdr's layout, urgency, or grouped by agent. `position` is the default because it is the only one that does not move under you |
+| `list.hide_idle` | `true`, `false` | `false` | Hide idle agents, as `z` does |
+| `list.scope` | `all`, `workspace` | `all` | `workspace` needs `HERDR_WORKSPACE_ID`; without it, falls back to `all` |
+| `keys.open_sidebar` | a Herdr key string | `prefix+a` | The key `bind-sidebar-key` writes. Set it before binding |
+| `agent.<id>.color` | `#rrggbb` | built-in | Override an agent's colour |
+| `agent.<id>.label` | any string | built-in | Override its name on cards |
+| `agent.<id>.symbol` | any string | built-in | Its mark when `agent_mark = "symbol"` |
+
 Settings live in **the plugin's own** `config.toml` — not Herdr's. Herdr ignores tables it
 does not recognise, so `[daemon]` placed in `~/.config/herdr/config.toml` does nothing
 except make `herdr config check` report an unknown section.
@@ -88,57 +107,14 @@ herdr plugin list
 By default that is `${XDG_CONFIG_HOME:-~/.config}/herdr/plugins/config/herdr-agent-watcher/`.
 Create `config.toml` there if it does not exist.
 
-Every key is optional and every bad value falls back to its default, so a mistake costs one
-setting rather than the plugin.
-
-| Key | Values | Default | What it does |
-| --- | --- | --- | --- |
-| `daemon.interval_ms` | positive integer | `1000` | Reconcile interval. Read at startup, so a change needs `restart-daemon` |
-| `appearance.theme` | `inherit`, `lumon` | `inherit` | `inherit` uses your terminal's colours; `lumon` paints its own |
-| `appearance.agent_mark` | `dot`, `initial`, `symbol` | `dot` | The agent's mark on a card |
-| `cards.auto_expand` | `none`, `all` | `none` | Start cards expanded |
-| `cards.tool_calls` | `bars`, `jar` | `bars` | How the context meter is drawn |
-| `cards.trace_lines` | `1`–`20` | `5` | Traces per expanded card. Out of range clamps, it does not reject |
-| `list.sort` | `position`, `smart`, `group` | `position` | Card order; see below |
-| `list.hide_idle` | `true`, `false` | `false` | Hide idle agents, as `z` does |
-| `list.scope` | `all`, `workspace` | `all` | `workspace` needs `HERDR_WORKSPACE_ID`; without it, falls back to `all` |
-| `keys.open_sidebar` | a Herdr key string | `prefix+a` | The key `bind-sidebar-key` writes. Set it before binding |
-| `agent.<id>.color` | `#rrggbb` | built-in | Override an agent's colour |
-| `agent.<id>.label` | any string | built-in | Override its name on cards |
-| `agent.<id>.symbol` | any string | built-in | Its mark when `agent_mark = "symbol"` |
-
 ```toml
 [daemon]
-interval_ms = 5000     # how often the daemon reconciles with Herdr; default 1000
+interval_ms = 5000
 
 [list]
-scope = "workspace"    # "all" (default) lists every pane; "workspace" lists only this one
-sort  = "position"     # default; "smart" and "group" below
+scope = "workspace"
+sort  = "position"
 ```
-
-`sort` decides the order of the cards:
-
-| Value | Order |
-| --- | --- |
-| `position` *(default)* | herdr's own layout order, the same one its agent sidebar shows |
-| `smart` | most urgent first — errors, then attention, running, finished, idle |
-| `group` | by agent, then as `smart` within each |
-
-`position` is the default because it is the only one that does not move: under `smart` a card
-changes place whenever its agent starts or stops working, so the one you were reading is
-somewhere else by the time you look back.
-
-Apply a change with:
-
-```sh
-herdr plugin action invoke restart-daemon --plugin herdr-agent-watcher
-```
-
-A sidebar picks up `[list]` when it next opens.
-
-`AGENT_WATCHER_INTERVAL_MS` still works and outranks the file. It is read from the **Herdr
-server's** environment, not your shell, so setting it means restarting Herdr — which is why
-the file exists.
 
 Run [`doctor`](#doctor) to see whether a setting was rejected and what was used instead.
 
@@ -148,8 +124,9 @@ Run [`doctor`](#doctor) to see whether a setting was rejected and what was used 
 herdr plugin action invoke open-sidebar --plugin herdr-agent-watcher
 ```
 
-Each invocation intentionally opens another split. Cards show agent state, agent/model,
-title, context use, cache hit rate, cost, tool count, and the three newest tool traces.
+Each invocation intentionally opens another split — `prefix+a` by default, which is `ctrl+b`
+then `a` with Herdr's own default prefix. Cards show agent state, agent/model, title,
+context use, cache hit rate, cost, tool count, and the three newest tool traces.
 Use `j`/`k` or PageUp/PageDown to scroll, `o`/`↵` to expand, `z` to hide idle agents,
 `x` to open the menu, `?` to list every key, and `q`/`Esc` or Ctrl-C to close.
 
