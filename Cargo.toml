@@ -1,6 +1,6 @@
 [package]
 name = "herdr-agent-watcher"
-version = "0.1.5"
+version = "0.1.6"
 description = "Coding-agent observability plugin for herdr: transcript watchers, metrics, and notifications for Claude Code, Codex, Kimi Code, and OpenCode."
 license = "Apache-2.0"
 edition = "2021"
