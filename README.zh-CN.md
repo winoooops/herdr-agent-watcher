@@ -316,15 +316,6 @@ cargo test --test e2e_real_herdr -- --ignored
 
 ## 后续工作
 
-- [x] 从插件自己的 `config.toml` 读配置，取代 `AGENT_WATCHER_INTERVAL_MS`，
-      这样配置就不再取决于 Herdr server 是从哪个环境启动的
-- [x] 按 mtime 回收 bridge 会话目录。这样做是安全的，因为被删除的目录会在下次写入时
-      重新创建；之前提出存活性跟踪，只是为了避免删除无法再生的状态
-- [ ] 修复恢复旧 Kimi 会话时每个 reconcile tick 闪一次的卡片。`bind_pane` 会先添加卡片，
-      bind 失败后再回滚删除。fallback locator 只接受在 30 秒归属窗口内创建的会话，而 index
-      路径还会接受 `session_resume_at`；实测会话创建于 8 月 11 日 02:23，进程启动于 8 月 17 日
-      06:51。冻结 port 的改动须登记到 `PORT-SURFACE.md`，同时把 bind 失败从 `warn!` 提升为
-      `error!`，因为 `env_logger` 默认只显示 error，否则真正原因不可见
 - [ ] 恢复 Codex 的当前套餐用量。locator 会在 `logs.feedback_log_body` 中查询
       `x-codex-primary-used-percent`，但实测所有匹配行都写于 6 月 17 日，即 61 天前，并且全都
       属于同一个已结束的 thread。Codex 现在只记录事件名 `account/rateLimits/updated`，不带
@@ -333,18 +324,5 @@ cargo test --test e2e_real_herdr -- --ignored
       存在；`sevenDay` 之所以是 null，是因为 parser 还要求 `secondary-reset-at`。需要先找出
       Codex 现在在哪里发布这些限制。修复会改动冻结的 `src/agent/**`，必须登记一条
       `PORT-SURFACE.md` 记录
-- [x] 每个 release 发布预编译二进制，让安装不再需要 `cargo`。`[[build]]` 现在跑
-      `scripts/fetch-or-build.sh`：下载匹配平台的产物、校验 SHA256，任何一步失败就改为编译
-- [x] sidebar 内的设置面板与 doctor 面板，让最常用的配置和最常用的诊断都不必离开这个 pane
-- [x] 扛住设置面板自己下达的 daemon 重启：卡片留在屏上、按秒计数、自行重新订阅，而不是停在
-      一个等待按键的死胡同
-- [x] 告诉 sidebar 它已经过期。升级插件后，已经开着的 sidebar 会继续跑旧二进制，界面上没有
-      任何提示 —— 0.1.4 测试时我们就被它误导过。现在 hello 带上 daemon 的版本，sidebar 发现
-      与自己不同就在底部钉一条提示
-- [x] 菜单里的**检查 / 升级**一行：只在按下时请求 GitHub、跑在绘制循环之外，并且不会对链接
-      的开发树给出一个装不上的升级按钮
 - [ ] doctor 面板里可操作的修复建议 —— `↵` 复制到剪贴板而不是直接执行，因为这些修复要改的是
       本插件之外的文件
-- [x] 修掉 flaky 的 `pane_without_cwd_uses_herdrs_cwd_for_that_pane` 测试。fake Herdr 会丢弃
-      「accept 那一刻字节尚未抵达」的请求 —— 在 BSD 与 macOS 上，accept 出来的 socket 继承
-      `O_NONBLOCK`

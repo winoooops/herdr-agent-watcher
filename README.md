@@ -341,19 +341,6 @@ Run all regular tests with `cargo test`.
 
 ## Future work
 
-- [x] Read settings from the plugin's own `config.toml` instead of
-      `AGENT_WATCHER_INTERVAL_MS`, so configuration no longer depends on which environment
-      the Herdr server was launched from
-- [x] Reap bridge session directories by mtime. This is safe because a removed directory
-      is recreated on the next write; liveness tracking was only proposed to avoid deleting
-      state that could not regenerate
-- [ ] Fix resumed Kimi sessions flickering once per reconcile tick. `bind_pane` adds the
-      card before binding, then rolls it back when the bind fails. The fallback locator only
-      accepts a session created within its 30-second ownership window, while the index path
-      also accepts `session_resume_at`; the observed session was created Aug 11 at 02:23 and
-      its process started Aug 17 at 06:51. Register the frozen-port change in
-      `PORT-SURFACE.md`, and promote the bind failure from `warn!` to `error!` because
-      `env_logger` defaults to errors and otherwise hides the cause
 - [ ] Restore current Codex plan usage. The locator queries `logs.feedback_log_body` for
       `x-codex-primary-used-percent`, but every matching row observed was written on 17 June,
       61 days ago, and belongs to one finished thread. Codex now logs only the event name
@@ -363,21 +350,5 @@ Run all regular tests with `cargo test`.
       was present too; `sevenDay` is null because the parser also requires `secondary-reset-at`.
       Find where Codex publishes these limits now. A fix touches frozen `src/agent/**` and needs
       a `PORT-SURFACE.md` entry
-- [x] Publish a prebuilt binary per release so `cargo` is not required to install.
-      `[[build]]` runs `scripts/fetch-or-build.sh`, which fetches the asset matching the
-      platform, verifies its SHA256, and compiles instead on any failure
-- [x] Settings and doctor panels in the sidebar, so the common configuration and the
-      common diagnosis both happen without leaving the pane
-- [x] Survive the daemon restart the settings panel can order: keep the cards up, count the
-      seconds, and resubscribe rather than ending at a screen that waits for a key
-- [x] Tell a sidebar it is out of date. Upgrading the plugin leaves already-open sidebars
-      running the old binary with nothing on screen to say so — it misled us during 0.1.4
-      testing. The hello carries the daemon's build and the sidebar pins a notice when it
-      is not its own
-- [x] A **check / upgrade** row in the menu, asking GitHub only when pressed, off the draw
-      loop, and refusing to offer an upgrade a linked tree cannot install
 - [ ] Remedies you can act on from the doctor panel — copy to clipboard on `↵` rather than
       running anything, since the fixes edit files outside this plugin
-- [x] Fix the flaky `pane_without_cwd_uses_herdrs_cwd_for_that_pane` test. The fake Herdr
-      dropped any request whose bytes had not arrived by the instant it accepted, because
-      an accepted socket inherits `O_NONBLOCK` on BSD and macOS
