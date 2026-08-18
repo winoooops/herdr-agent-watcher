@@ -90,3 +90,12 @@ sidecar merges must reconcile the opencode subtree by hand:
 - `src/agent/adapter/opencode/plugin/agent-watcher-opencode-bridge.test.ts`
 - `src/agent/adapter/opencode/transcript.rs`
 - `src/agent/adapter/opencode/types.rs`
+
+### Kimi fallback resume parity — `src/agent/adapter/kimi/locator.rs`
+
+The exact-bucket fallback now accepts `session resume` startup evidence through the same
+cached `session_resume_at` path as index resolution. Previously the index path understood a
+resumed session but the fallback only accepted sessions created by the current process; the
+affected live session was absent from the index, so only the disagreeing fallback was
+reachable. This makes the two resolution paths agree rather than adding new resume
+behaviour. Future sidecar merges must reconcile this locator change by hand.

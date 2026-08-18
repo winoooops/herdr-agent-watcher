@@ -21,9 +21,9 @@
 //!    session activity so a resumed session keeps winning after kimi appends a
 //!    later empty index row.
 //! 4. exact-bucket sha256 scan: last-resort newest `session_*` under
-//!    this cwd's `wd_<basename>_<hex>` bucket, gated on a `pty_start`
-//!    mtime freshness check (no append ordering to tell current from
-//!    stale, so a stale same-cwd bucket session must not win there).
+//!    this cwd's `wd_<basename>_<hex>` bucket. When process start is known,
+//!    creation or resume evidence must identify its session; otherwise a
+//!    `pty_start` mtime freshness check keeps stale same-cwd sessions out.
 //!
 //! On macOS (no `/proc`, `proc_root == None`) steps 1-2 cleanly skip and
 //! resolution falls through to the index / bucket fallbacks.
@@ -625,14 +625,16 @@ impl KimiLocator {
             let session_path = session.path();
             let wire = session_path.join("agents").join("main").join("wire.jsonl");
             // Same per-process discriminator as the index path: when the
-            // process start is known, only a session this process created may
-            // bind; otherwise fall back to the pty-start freshness gate so a
-            // stale same-cwd bucket session can't bind.
+            // process start is known, only a session this process created or
+            // resumed may bind; otherwise fall back to the pty-start freshness
+            // gate so a stale same-cwd bucket session can't bind.
             let fresh = match process_start {
-                Some(start) => session_path
-                    .to_str()
-                    .and_then(session_created_at)
-                    .is_some_and(|created| created_in_own_window(created, start.at)),
+                Some(start) => session_path.to_str().is_some_and(|session_dir| {
+                    session_created_at(session_dir)
+                        .filter(|created| created_in_own_window(*created, start.at))
+                        .or_else(|| self.session_resume_at(session_dir, start))
+                        .is_some()
+                }),
                 None => wire_is_fresh(&wire, self.pty_start),
             };
             if !fresh {
@@ -1800,6 +1802,42 @@ mod tests {
             "fallback must pick the session in this cwd's bucket, not the newer decoy"
         );
         assert_eq!(located.agent_session_id.as_deref(), Some("session_scoped"));
+    }
+
+    #[test]
+    fn fallback_binds_resumed_session_from_startup_log() {
+        let kimi_home = tempfile::tempdir().expect("kimi home");
+        let work = tempfile::tempdir().expect("work dir");
+        let proc_root = tempfile::tempdir().expect("proc root");
+        let pid = 4242u32;
+        let hz = clock_ticks_per_sec();
+        let btime = 1_700_000_000u64;
+        let process_start_ms = (btime + 50) * 1000;
+        write_proc_btime(proc_root.path(), btime);
+        write_proc_stat(proc_root.path(), pid, 50 * hz);
+
+        let resumed_dir = kimi_home
+            .path()
+            .join("sessions")
+            .join(bucket_for(work.path()))
+            .join("session_resumed");
+        let resumed_wire = write_wire_created(&resumed_dir, process_start_ms - 3_600_000);
+        let log = resumed_dir.join("logs").join("kimi-code.log");
+        std::fs::create_dir_all(log.parent().expect("log parent")).expect("mkdir log");
+        std::fs::write(
+            log,
+            b"2023-11-14T22:14:10.000Z INFO  session resume  app_version=0.27.0\n",
+        )
+        .expect("write session log");
+        write_index(kimi_home.path(), &[]);
+
+        let locator = locator_with_proc(kimi_home.path(), pid, SystemTime::now(), proc_root.path());
+        let located = locator
+            .locate(work.path(), "pty-1")
+            .expect("resumed bucket session resolves");
+
+        assert_eq!(located.status_path, resumed_wire);
+        assert_eq!(located.agent_session_id.as_deref(), Some("session_resumed"));
     }
 
     /// Exact-bucket freshness: a STALE bucket session (wire mtime far

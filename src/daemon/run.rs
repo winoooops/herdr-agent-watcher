@@ -262,7 +262,9 @@ pub fn run() -> i32 {
                     };
                     match result {
                         Ok(()) => applied.push(action),
-                        Err(error) => log::warn!("[daemon] {action:?} failed: {error}"),
+                        // error!, not warn!: a failed bind visibly blinks its
+                        // card, and env_logger hides warnings by default.
+                        Err(error) => log::error!("[daemon] {action:?} failed: {error}"),
                     }
                 }
                 bindings.apply(&applied);
