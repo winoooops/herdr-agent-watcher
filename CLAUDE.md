@@ -116,6 +116,10 @@ git tag v0.1.7 release/0.1.7                        # the tag names the bump com
 git push origin main release/0.1.7 v0.1.7           # keep the branch: it is the version record
 ```
 
+Write the `chore: 0.1.x` commit body as release notes for a reader deciding whether to
+upgrade. The release workflow puts that body above GitHub's generated compare link; an empty
+body falls back to generated notes alone. Do not duplicate it in a changelog.
+
 `--ff-only`, not `--no-ff`. The release branch has never held more than the bump, so a merge
 commit records a parallel line of work that did not happen — and "a release happened here" is
 what the tag already says. Use `--no-ff` on the release that genuinely accumulates commits of

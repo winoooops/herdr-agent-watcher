@@ -608,7 +608,20 @@ fn plan_usage_rows(t: &PaneTelemetry, cx: &CardCtx<'_>) -> Vec<Line> {
             if resets_at == 0 || !pct.is_finite() || pct < 0.0 {
                 return None;
             }
+            let resets_at_ms = resets_at.saturating_mul(1_000);
             let used = (pct.clamp(0.0, 100.0) * 1_000.0).round() as u64;
+            let status = if resets_at_ms < cx.now_unix_ms {
+                Span::new(
+                    format!(" {} · ended", format::percent(pct)),
+                    Style::semantic(Role::Body, Semantic::Warn),
+                )
+            } else {
+                Span::body(format!(
+                    " {} · resets {}",
+                    format::percent(pct),
+                    format::age(cx.now_unix_ms, resets_at_ms)
+                ))
+            };
             Some(label_row(
                 label,
                 vec![
@@ -616,11 +629,7 @@ fn plan_usage_rows(t: &PaneTelemetry, cx: &CardCtx<'_>) -> Vec<Line> {
                         bars::gauge(bars::gauge_pct(pct), used, 100_000, cells),
                         Style::semantic(Role::Body, Semantic::Accent),
                     ),
-                    Span::body(format!(
-                        " {} · resets {}",
-                        format::percent(pct),
-                        format::age(cx.now_unix_ms, resets_at.saturating_mul(1_000))
-                    )),
+                    status,
                 ],
                 cx.width,
             ))
@@ -648,6 +657,16 @@ pub fn expanded_card(t: &PaneTelemetry, cx: &CardCtx<'_>) -> Vec<Line> {
         });
     }
     lines.push(blank());
+
+    let usage = plan_usage_rows(t, cx);
+    if !usage.is_empty() {
+        lines.extend(usage);
+        lines.push(vec![Span::new(
+            "─".repeat(width as usize),
+            Style::role(Role::Rule),
+        )]);
+    }
+
     let cells = GAUGE_MAX_CELLS.min(width.saturating_sub(13)).max(6);
 
     // CONTEXT, CACHE and COST go missing together and for one reason, so the
@@ -691,12 +710,6 @@ pub fn expanded_card(t: &PaneTelemetry, cx: &CardCtx<'_>) -> Vec<Line> {
         }
     }
     lines.push(blank());
-
-    let usage = plan_usage_rows(t, cx);
-    if !usage.is_empty() {
-        lines.extend(usage);
-        lines.push(blank());
-    }
 
     match t
         .status
@@ -1383,6 +1396,18 @@ mod tests {
             seven.contains("7%") && seven.contains("resets 7d"),
             "{seven}"
         );
+
+        let five = lines.iter().position(|line| line == five).expect("5h row");
+        let seven = lines.iter().position(|line| line == seven).expect("7d row");
+        let divider = expanded_card(&t, &cx)
+            .iter()
+            .position(|line| line.iter().any(|span| span.style.role == Role::Rule))
+            .expect("plan/context divider");
+        let context = lines
+            .iter()
+            .position(|line| line.trim_start().starts_with("CONTEXT"))
+            .expect("context row");
+        assert!(five < seven && seven < divider && divider < context);
     }
 
     #[test]
@@ -1401,6 +1426,43 @@ mod tests {
                 .any(|line| matches!(line.split_whitespace().next(), Some("5h" | "7d"))),
             "the keys exist, but resetsAt=0 means placeholder: {lines:?}"
         );
+    }
+
+    #[test]
+    fn an_expired_plan_window_says_it_ended_in_warn_styling() {
+        let app = appearances();
+        let mut t = claude_expanded();
+        t.status.as_mut().expect("status")["rateLimits"] = json!({
+            "fiveHour": {"usedPercentage": 19.0, "resetsAt": 100}
+        });
+        let mut cx = ctx(&app, W);
+        cx.now_unix_ms = 200_000;
+        let lines = expanded_card(&t, &cx);
+        let row = lines
+            .iter()
+            .find(|line| line.first().is_some_and(|span| span.text.trim() == "5h"))
+            .expect("5h window");
+        let text: String = row.iter().map(|span| span.text.as_str()).collect();
+
+        assert!(text.contains("19%") && text.contains("ended"), "{text}");
+        assert!(
+            !text.contains("resets"),
+            "an expired window must not say {text}"
+        );
+        assert!(row.iter().any(|span| {
+            span.text.contains("ended") && span.style.semantic == Some(Semantic::Warn)
+        }));
+    }
+
+    #[test]
+    fn no_plan_window_draws_no_plan_context_divider() {
+        let app = appearances();
+        let lines = expanded_card(&claude_expanded(), &ctx(&app, W));
+
+        assert!(!lines
+            .iter()
+            .flatten()
+            .any(|span| span.style.role == Role::Rule));
     }
 
     #[test]

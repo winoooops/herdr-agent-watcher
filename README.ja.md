@@ -363,6 +363,15 @@ cargo test --test e2e_real_herdr -- --ignored
       02:23、プロセス開始が 8 月 17 日 06:51 だった。凍結 port の変更を
       `PORT-SURFACE.md` に登録し、`env_logger` は既定で error だけを表示するため、原因を隠す
       bind 失敗を `warn!` から `error!` に引き上げる
+- [ ] Codex の現在のプラン使用量を復旧する。locator は `logs.feedback_log_body` から
+      `x-codex-primary-used-percent` を検索するが、観測された該当行はすべて 61 日前の
+      6 月 17 日に書かれ、1 つの完了済み thread に属していた。現在の Codex はイベント名
+      `account/rateLimits/updated` だけを payload なしで記録するため、カードはその期限切れの
+      スナップショットを `ended` と表示するしかない。ラベルは最初から正しく、primary
+      window は 300 分（5 時間）、secondary は 10080 分（7 日）である。secondary の
+      used-percent header も存在したが、parser は `secondary-reset-at` も必須とするため
+      `sevenDay` は null になる。Codex が現在どこに制限値を公開しているかを特定する必要が
+      ある。修正では凍結された `src/agent/**` に触れるため、`PORT-SURFACE.md` への登録も必要
 - [x] リリースごとにビルド済みバイナリを公開し、インストールに `cargo` を不要にする。
       `[[build]]` は `scripts/fetch-or-build.sh` を実行し、プラットフォームに合うアセットを
       取得して SHA256 を検証、失敗時はコンパイルにフォールバックする

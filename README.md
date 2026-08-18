@@ -354,6 +354,15 @@ Run all regular tests with `cargo test`.
       its process started Aug 17 at 06:51. Register the frozen-port change in
       `PORT-SURFACE.md`, and promote the bind failure from `warn!` to `error!` because
       `env_logger` defaults to errors and otherwise hides the cause
+- [ ] Restore current Codex plan usage. The locator queries `logs.feedback_log_body` for
+      `x-codex-primary-used-percent`, but every matching row observed was written on 17 June,
+      61 days ago, and belongs to one finished thread. Codex now logs only the event name
+      `account/rateLimits/updated` with no payload, so the card can only show that expired
+      snapshot as `ended`. The labels were never wrong: the primary window is 300 minutes
+      (5 hours) and the secondary is 10080 minutes (7 days). The secondary used-percent header
+      was present too; `sevenDay` is null because the parser also requires `secondary-reset-at`.
+      Find where Codex publishes these limits now. A fix touches frozen `src/agent/**` and needs
+      a `PORT-SURFACE.md` entry
 - [x] Publish a prebuilt binary per release so `cargo` is not required to install.
       `[[build]]` runs `scripts/fetch-or-build.sh`, which fetches the asset matching the
       platform, verifies its SHA256, and compiles instead on any failure

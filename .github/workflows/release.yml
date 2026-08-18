@@ -78,6 +78,8 @@ jobs:
     needs: [guard, build]
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+        continue-on-error: true
       - uses: actions/download-artifact@v4
         with:
           path: assets
@@ -96,8 +98,17 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          notes_args=()
+          if notes=$(git log -1 --format=%b "$GITHUB_REF_NAME" 2>/dev/null) \
+            && [ -n "${notes//[[:space:]]/}" ]; then
+            notes_file=$(mktemp) \
+              && printf '%s\n' "$notes" > "$notes_file" \
+              && notes_args=(--notes-file "$notes_file") \
+              || true
+          fi
           gh release create "$GITHUB_REF_NAME" \
             --repo "$GITHUB_REPOSITORY" \
             --title "$GITHUB_REF_NAME" \
             --generate-notes \
+            "${notes_args[@]}" \
             assets/*

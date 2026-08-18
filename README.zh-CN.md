@@ -325,6 +325,14 @@ cargo test --test e2e_real_herdr -- --ignored
       路径还会接受 `session_resume_at`；实测会话创建于 8 月 11 日 02:23，进程启动于 8 月 17 日
       06:51。冻结 port 的改动须登记到 `PORT-SURFACE.md`，同时把 bind 失败从 `warn!` 提升为
       `error!`，因为 `env_logger` 默认只显示 error，否则真正原因不可见
+- [ ] 恢复 Codex 的当前套餐用量。locator 会在 `logs.feedback_log_body` 中查询
+      `x-codex-primary-used-percent`，但实测所有匹配行都写于 6 月 17 日，即 61 天前，并且全都
+      属于同一个已结束的 thread。Codex 现在只记录事件名 `account/rateLimits/updated`，不带
+      payload，因此卡片只能把那份过期快照显示为 `ended`。标签从未出错：primary window 是
+      300 分钟（5 小时），secondary 是 10080 分钟（7 天）。secondary used-percent header 也
+      存在；`sevenDay` 之所以是 null，是因为 parser 还要求 `secondary-reset-at`。需要先找出
+      Codex 现在在哪里发布这些限制。修复会改动冻结的 `src/agent/**`，必须登记一条
+      `PORT-SURFACE.md` 记录
 - [x] 每个 release 发布预编译二进制，让安装不再需要 `cargo`。`[[build]]` 现在跑
       `scripts/fetch-or-build.sh`：下载匹配平台的产物、校验 SHA256，任何一步失败就改为编译
 - [x] sidebar 内的设置面板与 doctor 面板，让最常用的配置和最常用的诊断都不必离开这个 pane
