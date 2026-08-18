@@ -23,6 +23,20 @@ pub(crate) struct Record {
     pub key: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BindingState {
+    pub key: String,
+    pub status: BindingStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum BindingStatus {
+    Bound,
+    NotBound,
+    Taken(String),
+    Unreadable(String),
+}
+
 /// `\r\n` only when the file is unambiguously CRLF; a file we create is `\n`.
 fn line_ending(existing: &str) -> &'static str {
     if existing.contains("\r\n") && !existing.replace("\r\n", "").contains('\n') {
@@ -133,6 +147,33 @@ fn command_entries(text: &str) -> Result<Vec<toml::Value>, String> {
         .unwrap_or_default())
 }
 
+fn state_from_text(key: &str, defaults: &str, current: &str) -> Result<BindingStatus, String> {
+    let entries = command_entries(current)?;
+    let managed = current.contains(MARKER)
+        && entries.iter().any(|entry| {
+            entry.get("key").and_then(toml::Value::as_str) == Some(key)
+                && entry.get("type").and_then(toml::Value::as_str) == Some("plugin_action")
+                && entry.get("command").and_then(toml::Value::as_str) == Some("open-sidebar")
+        });
+    if managed {
+        return Ok(BindingStatus::Bound);
+    }
+    Ok(match taken_by(defaults, current, key) {
+        Some(holder) => BindingStatus::Taken(holder),
+        None => BindingStatus::NotBound,
+    })
+}
+
+/// The same occupancy decision `bind` enforces, shared with the read-only
+/// panel query so they cannot disagree about whether a key is available.
+fn taken_by(defaults: &str, current: &str, key: &str) -> Option<String> {
+    crate::agents::keys::holder(defaults, current, key).or_else(|| {
+        crate::agents::keys::occupied(defaults, current)
+            .contains(key)
+            .then(|| "another binding".to_string())
+    })
+}
+
 /// The same discipline as `bridge_settings::write_settings`, with the re-read
 /// moved to just before the rename.
 ///
@@ -230,6 +271,31 @@ pub(crate) fn herdr_config_path() -> Result<PathBuf, String> {
     Ok(base.join("herdr").join("config.toml"))
 }
 
+pub(crate) fn state() -> BindingState {
+    let key = crate::sidebar::config::Loaded::load().open_sidebar_key;
+    let unreadable = |error| BindingState {
+        key: key.clone(),
+        status: BindingStatus::Unreadable(error),
+    };
+    let config_path = match herdr_config_path() {
+        Ok(path) => path,
+        Err(error) => return unreadable(error),
+    };
+    let current = match std::fs::read_to_string(&config_path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return unreadable(format!("cannot read {}: {error}", config_path.display())),
+    };
+    let defaults = match herdr(&["--default-config"]) {
+        Ok(defaults) => defaults,
+        Err(error) => return unreadable(error),
+    };
+    match state_from_text(&key, &defaults, &current) {
+        Ok(status) => BindingState { key, status },
+        Err(error) => unreadable(format!("cannot read {}: {error}", config_path.display())),
+    }
+}
+
 fn record_path() -> Result<PathBuf, String> {
     Ok(crate::agents::claude_bridge::resolve_state_dir(None)?.join("keybinding-install.json"))
 }
@@ -247,8 +313,21 @@ pub fn cli_bind(_args: &[String]) -> i32 {
     }
 }
 
-fn bind() -> Result<String, String> {
+pub(crate) fn bind() -> Result<String, String> {
     let key = crate::sidebar::config::Loaded::load().open_sidebar_key;
+    bind_key(&key)
+}
+
+struct PreparedBinding {
+    key: String,
+    config_path: PathBuf,
+    existing: Option<String>,
+    candidate: String,
+    record_path: PathBuf,
+    record_body: String,
+}
+
+fn bind_key(key: &str) -> Result<String, String> {
     let config_path = herdr_config_path()?;
     let existing = match std::fs::read_to_string(&config_path) {
         Ok(text) => Some(text),
@@ -299,39 +378,62 @@ fn bind() -> Result<String, String> {
         }
     }
 
-    let defaults = herdr(&["--default-config"])?;
-    if let Some(holder) = crate::agents::keys::holder(&defaults, &current, &key) {
+    install_binding(prepare_binding(key, config_path, existing)?)
+}
+
+fn prepare_binding(
+    key: &str,
+    config_path: PathBuf,
+    existing: Option<String>,
+) -> Result<PreparedBinding, String> {
+    let current = existing.as_deref().unwrap_or_default();
+    if !current.is_empty() && current.parse::<toml::Value>().is_err() {
         return Err(format!(
-            "{key} is already bound to {holder}; set [keys] open_sidebar in the plugin's \
-             config.toml to something else, or free {key} in Herdr's config"
+            "{} is not valid TOML; refusing to append to a file whose shape I cannot confirm",
+            config_path.display()
         ));
     }
-    if crate::agents::keys::occupied(&defaults, &current).contains(&key) {
-        return Err(format!("{key} is already bound in Herdr's config"));
-    }
-    ambiguity_check()?;
+    check_bindable(key, current)?;
+    let (candidate, appended) = append_block(current, key);
+    let record_path = record_path()?;
+    let record_body = serde_json::to_string_pretty(&Record {
+        config_path: config_path.clone(),
+        appended,
+        created_file: existing.is_none(),
+        key: key.to_string(),
+    })
+    .map_err(|error| format!("serialize record: {error}"))?;
+    Ok(PreparedBinding {
+        key: key.into(),
+        config_path,
+        existing,
+        candidate,
+        record_path,
+        record_body,
+    })
+}
 
-    let (candidate, appended) = append_block(&current, &key);
-    validate(&candidate)?;
+fn install_binding(prepared: PreparedBinding) -> Result<String, String> {
+    let PreparedBinding {
+        key,
+        config_path,
+        existing,
+        candidate,
+        record_path,
+        record_body,
+    } = prepared;
 
     // The record goes down FIRST, as the Claude bridge does
     // (`bridge_settings.rs:151-166`). A full or read-only state directory must
     // not be able to change the operator's config and leave nothing that knows
     // how to change it back.
-    let body = serde_json::to_string_pretty(&Record {
-        config_path: config_path.clone(),
-        appended,
-        created_file: existing.is_none(),
-        key: key.clone(),
-    })
-    .map_err(|error| format!("serialize record: {error}"))?;
-    std::fs::write(&record, body)
-        .map_err(|error| format!("write {}: {error}", record.display()))?;
+    std::fs::write(&record_path, record_body)
+        .map_err(|error| format!("write {}: {error}", record_path.display()))?;
 
     if let Err(error) = write_config(&config_path, &candidate, existing.as_deref()) {
         // Nothing was installed, so the record must not survive to claim
         // otherwise.
-        let _ = std::fs::remove_file(&record);
+        let _ = std::fs::remove_file(&record_path);
         return Err(error);
     }
 
@@ -342,6 +444,24 @@ fn bind() -> Result<String, String> {
          outlives it",
         config_path.display()
     ))
+}
+
+fn check_bindable(key: &str, current: &str) -> Result<(), String> {
+    let defaults = herdr(&["--default-config"])?;
+    if let Some(holder) = taken_by(&defaults, current, key) {
+        if holder == "another binding" {
+            return Err(format!("{key} is already bound in Herdr's config"));
+        }
+        return Err(format!(
+            "{key} is already bound to {holder}; set [keys] open_sidebar in the plugin's \
+             config.toml to something else, or free {key} in Herdr's config"
+        ));
+    }
+    ambiguity_check()?;
+
+    let (candidate, _) = append_block(current, key);
+    validate(&candidate)?;
+    Ok(())
 }
 
 /// Herdr cannot tell which plugin an ambiguous action id means, and its own
@@ -405,6 +525,117 @@ fn validate(candidate: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn preflight_key_change(key: &str, was_bound: bool) -> Result<PreparedBinding, String> {
+    let config_path = herdr_config_path()?;
+    let existing = match std::fs::read_to_string(&config_path) {
+        Ok(text) => Some(text),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(format!("cannot read {}: {error}", config_path.display())),
+    };
+    let current = existing.clone().unwrap_or_default();
+    let record_path = record_path()?;
+    let record = match std::fs::read_to_string(&record_path) {
+        Ok(text) => Some(
+            serde_json::from_str::<Record>(&text)
+                .map_err(|error| format!("{} is unreadable ({error})", record_path.display()))?,
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(format!("cannot read {}: {error}", record_path.display())),
+    };
+    let available = match (was_bound, record) {
+        (true, Some(installed)) if installed.config_path == config_path => {
+            let remainder = remove_block(&current, &installed.appended)?;
+            if installed.created_file && remainder.trim().is_empty() {
+                None
+            } else {
+                Some(remainder)
+            }
+        }
+        (true, Some(installed)) => {
+            return Err(format!(
+                "the current binding is recorded in {}, not {}",
+                installed.config_path.display(),
+                config_path.display()
+            ))
+        }
+        (true, None) => {
+            return Err(format!(
+                "the key is bound but {} has no install record; unbind it by hand first",
+                record_path.display()
+            ))
+        }
+        (false, Some(_)) => {
+            return Err("a managed keybinding is already recorded; unbind it first".into())
+        }
+        (false, None) => existing,
+    };
+    prepare_binding(key, config_path, available)
+}
+
+fn rollback_key_change(was_bound: bool) -> String {
+    if let Err(error) = unbind() {
+        return format!("removing the new binding also failed: {error}");
+    }
+    if was_bound {
+        bind()
+            .map(|_| "the old binding was restored".to_string())
+            .unwrap_or_else(|error| format!("restoring the old binding failed: {error}"))
+    } else {
+        "the incomplete new binding was removed".into()
+    }
+}
+
+/// Change the plugin-owned key and install it in Herdr. All deterministic
+/// refusals run before either real config is touched; the plugin write comes
+/// last so rollback can still read and reinstall the old key.
+pub(crate) fn change_key(key: &str, was_bound: bool) -> Result<(String, String), String> {
+    let prepared = preflight_key_change(key, was_bound)?;
+
+    let path = crate::sidebar::config::config_path()
+        .ok_or_else(|| "HERDR_PLUGIN_CONFIG_DIR is not set".to_string())?;
+    let existing = match std::fs::read_to_string(&path) {
+        Ok(text) => Some(text),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(format!("read {}: {error}", path.display())),
+    };
+    let body = crate::sidebar::settings_file::edit_open_sidebar(
+        existing.as_deref().unwrap_or_default(),
+        key,
+    )?;
+
+    if was_bound {
+        if let Err(error) = unbind() {
+            let restored = bind()
+                .map(|_| "the old binding is still installed".to_string())
+                .unwrap_or_else(|restore| {
+                    format!("restoring the old binding also failed: {restore}")
+                });
+            return Err(format!("{error}\n{restored}"));
+        }
+    }
+
+    if let Err(error) = install_binding(prepared) {
+        let restored = rollback_key_change(was_bound);
+        return Err(format!("{error}\n{restored}"));
+    }
+
+    // This write is deliberately last: syntax, ambiguity and occupancy have
+    // all accepted the key, and a failed write can remove the new binding and
+    // restore the old one without first reconstructing the old plugin file.
+    let expected = match existing.as_ref() {
+        Some(text) => crate::sidebar::settings_file::Expected::Contents(text.clone()),
+        None => crate::sidebar::settings_file::Expected::Missing,
+    };
+    if let Err(error) = crate::sidebar::settings_file::save(&path, expected, &body) {
+        let restored = rollback_key_change(was_bound);
+        return Err(format!("{error}\n{restored}"));
+    }
+    Ok((
+        format!("open sidebar key changed to {key}\n{key} works now"),
+        body,
+    ))
+}
+
 /// Diagnostics are a failure, not a footnote (§4). The block is written and
 /// valid by this point, so the caller reports what happened and exits
 /// non-zero rather than claiming a binding that is not live.
@@ -441,7 +672,7 @@ pub fn cli_unbind(_args: &[String]) -> i32 {
     }
 }
 
-fn unbind() -> Result<String, String> {
+pub(crate) fn unbind() -> Result<String, String> {
     let record = record_path()?;
     let text = match std::fs::read_to_string(&record) {
         Ok(text) => text,
@@ -520,6 +751,50 @@ fn unbind() -> Result<String, String> {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    const DEFAULT_CONFIG: &str = include_str!("../../tests/fixtures/herdr-default-config.toml");
+
+    #[test]
+    fn binding_state_reports_the_managed_block_as_bound() {
+        let (config, _) = append_block("", "prefix+a");
+        assert_eq!(
+            state_from_text("prefix+a", DEFAULT_CONFIG, &config).unwrap(),
+            BindingStatus::Bound
+        );
+    }
+
+    #[test]
+    fn binding_state_reports_a_free_key_as_not_bound() {
+        assert_eq!(
+            state_from_text("prefix+a", DEFAULT_CONFIG, "").unwrap(),
+            BindingStatus::NotBound
+        );
+    }
+
+    #[test]
+    fn binding_state_names_what_has_taken_the_key() {
+        assert_eq!(
+            state_from_text("prefix+b", DEFAULT_CONFIG, "").unwrap(),
+            BindingStatus::Taken("toggle_sidebar".into())
+        );
+    }
+
+    #[test]
+    fn binding_state_keeps_an_unreadable_config_distinct_from_not_bound() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = crate::test_env::with_env(
+            &[
+                // A directory cannot be read as config text on Unix.
+                ("HERDR_CONFIG_PATH", Some(dir.path().into())),
+                ("HERDR_PLUGIN_CONFIG_DIR", Some(dir.path().into())),
+                ("HERDR_PLUGIN_STATE_DIR", Some(dir.path().into())),
+                ("XDG_CONFIG_HOME", Some(dir.path().into())),
+                ("HOME", Some(dir.path().into())),
+            ],
+            state,
+        );
+        assert!(matches!(state.status, BindingStatus::Unreadable(_)));
+    }
 
     #[test]
     fn a_block_is_appended_after_one_blank_line() {

@@ -36,6 +36,24 @@ fn item_for(live: &Live, setting: Setting) -> Item {
     }
 }
 
+fn set(doc: &mut DocumentMut, table: &str, key: &str, item: Item) -> Result<(), String> {
+    if doc.get(table).is_none() {
+        // `doc[table][key] = …` would create an INLINE table at the top of
+        // the file, which is not what a hand writes.
+        let mut created = Table::new();
+        created.set_implicit(false);
+        doc.insert(table, Item::Table(created));
+    }
+    let Some(section) = doc.get_mut(table).and_then(Item::as_table_like_mut) else {
+        return Err(format!(
+            "[{table}] in config.toml is not a table, so this cannot write {table}.{key} \
+             without destroying it"
+        ));
+    };
+    section.insert(key, item);
+    Ok(())
+}
+
 /// The document with `dirty` applied, or why it will not be.
 pub fn edit(current: &str, live: &Live, dirty: &[Setting]) -> Result<String, String> {
     let mut doc: DocumentMut = current
@@ -44,21 +62,18 @@ pub fn edit(current: &str, live: &Live, dirty: &[Setting]) -> Result<String, Str
 
     for setting in dirty {
         let (table, key) = table_and_key(*setting);
-        if doc.get(table).is_none() {
-            // `doc[table][key] = …` would create an INLINE table at the top of
-            // the file, which is not what a hand writes.
-            let mut created = Table::new();
-            created.set_implicit(false);
-            doc.insert(table, Item::Table(created));
-        }
-        let Some(section) = doc.get_mut(table).and_then(Item::as_table_like_mut) else {
-            return Err(format!(
-                "[{table}] in config.toml is not a table, so this cannot write {table}.{key} \
-                 without destroying it"
-            ));
-        };
-        section.insert(key, item_for(live, *setting));
+        set(&mut doc, table, key, item_for(live, *setting))?;
     }
+    Ok(doc.to_string())
+}
+
+/// Change only the sidebar-opening key, preserving the rest of the plugin's
+/// config exactly as the settings panel does for its own rows.
+pub fn edit_open_sidebar(current: &str, key: &str) -> Result<String, String> {
+    let mut doc: DocumentMut = current
+        .parse()
+        .map_err(|error| format!("config.toml is not valid TOML: {error}"))?;
+    set(&mut doc, "keys", "open_sidebar", value(key))?;
     Ok(doc.to_string())
 }
 
@@ -222,6 +237,16 @@ sort = \"position\"
             "an unchanged row must not be inserted: {out}"
         );
         assert!(!out.contains("trace_lines"), "{out}");
+    }
+
+    #[test]
+    fn changing_the_sidebar_key_preserves_everything_else() {
+        let out = edit_open_sidebar(EXISTING, "prefix+x").expect("edit key");
+        assert!(out.starts_with(EXISTING), "{out}");
+        assert!(
+            out.ends_with("[keys]\nopen_sidebar = \"prefix+x\"\n"),
+            "{out}"
+        );
     }
 
     #[test]

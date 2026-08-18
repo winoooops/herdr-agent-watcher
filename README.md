@@ -79,9 +79,13 @@ the steps below; the default is `prefix+a`, which is `ctrl+b` then `a` with Herd
 prefix. Cards show agent state, agent/model, title, context use, cache hit rate, cost, tool
 count, and the three newest tool traces.
 Use `j`/`k` or PageUp/PageDown to scroll, `o`/`↵` to expand, `z` to hide idle agents,
-`x` to open the menu, `?` to list every key, and `q`/`Esc` or Ctrl-C to close.
+`x` to open the menu, `?` to list the card-list keys, and `q`/`Esc` or Ctrl-C to close.
+Each panel lists its own controls in its footer.
 
-To open it with a key:
+To open it with a key, open **Settings**: its first row shows the configured key and whether
+it is bound. Select that row and press `o` or `↵` to open **Keybindings**, where `↵` edits
+the key and `b` binds or unbinds it immediately. Herdr validates edits before they are
+written. For scripts, the same operation remains available as:
 
 ```sh
 herdr plugin action invoke bind-sidebar-key --plugin herdr-agent-watcher
@@ -98,9 +102,9 @@ binary it is executing. A linked working directory is told to `git pull` instead
 refuses to install over a link, and the tree belongs to whoever is editing it.
 
 > [!WARNING]
-> `unbind-sidebar-key` takes the binding back out. Run it **before uninstalling the
-> plugin** — Herdr runs nothing on uninstall, so otherwise the binding outlives the action
-> it points at.
+> Open **Keybindings** from the first row in **Settings** and unbind the key there, or run
+> `unbind-sidebar-key`, **before uninstalling the plugin**. Herdr runs nothing on uninstall,
+> so otherwise the binding outlives the action it points at.
 
 If the daemon is unavailable when the sidebar opens, the pane says so and waits for a key.
 If it disconnects while the sidebar is open — usually the restart the settings panel just

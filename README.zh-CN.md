@@ -76,10 +76,12 @@ herdr plugin action invoke open-sidebar --plugin herdr-agent-watcher
 `prefix+a`，配合 Herdr 自身的默认前缀就是先按 `ctrl+b` 再按 `a`。
 卡片显示 agent 状态、agent/模型、标题、上下文用量、
 缓存命中率、成本、工具调用数，以及最近三条工具调用记录。`j`/`k` 或 PageUp/PageDown 滚动，
-`o`/`↵` 展开，`z` 隐藏空闲 agent，`x` 打开菜单，`?` 列出所有按键，`q`/`Esc` 或
-Ctrl-C 关闭。
+`o`/`↵` 展开，`z` 隐藏空闲 agent，`x` 打开菜单，`?` 列出卡片列表可用的按键，
+`q`/`Esc` 或 Ctrl-C 关闭。各面板自己的按键会显示在各自的页脚中。
 
-要用快捷键打开它：
+要用快捷键打开它，请打开**设置**：第一行会显示配置的快捷键及其绑定状态。选中这一行并按
+`o` 或 `↵` 会打开 **Keybindings**；在那里按 `↵` 编辑按键，按 `b` 立即绑定或解绑。
+Herdr 会在写入前验证修改。脚本仍可调用同一项操作：
 
 ```sh
 herdr plugin action invoke bind-sidebar-key --plugin herdr-agent-watcher
@@ -94,8 +96,8 @@ herdr plugin action invoke bind-sidebar-key --plugin herdr-agent-watcher
 工作目录，它会改为提示你 `git pull` —— herdr 拒绝覆盖链接，而那棵树属于正在编辑它的人。
 
 > [!WARNING]
-> `unbind-sidebar-key` 会移除该绑定。请在**卸载插件之前**运行它 —— Herdr 卸载插件时不会
-> 运行任何命令，否则这个绑定会比它指向的 action 存留得更久。
+> 请从**设置**的第一行打开 **Keybindings** 并在那里解绑，或运行 `unbind-sidebar-key`，然后再
+> **卸载插件**。Herdr 卸载插件时不会运行任何命令，否则这个绑定会比它指向的 action 存留得更久。
 
 sidebar 打开时若 daemon 不可用，面板会说明并等待按键。若是在 sidebar 打开期间断开 ——
 通常正是设置面板刚刚要求的那次重启 —— 卡片会留在屏幕上，提示会显示已等待的秒数，sidebar

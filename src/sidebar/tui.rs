@@ -79,13 +79,62 @@ fn subscribe(socket: &std::path::Path) -> Result<Receiver<WireEvent>, String> {
 /// only thing still waiting is a daemon that died.
 const RECONNECT_FOR: Duration = Duration::from_secs(60);
 const RECONNECT_EVERY: Duration = Duration::from_millis(400);
+const INPUT_POLL_EVERY: Duration = Duration::from_millis(100);
+
+fn terminal_is_gone(revents: i16) -> bool {
+    revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0
+}
+
+/// Wait on the tty itself before asking Crossterm to parse pending input.
+/// Crossterm 0.29 loops internally when a pty reports EOF as readable, so its
+/// timeout cannot protect us after the master disappears.
+fn poll_terminal(timeout: Duration) -> std::io::Result<bool> {
+    use std::os::fd::AsRawFd;
+
+    let mut input = libc::pollfd {
+        fd: std::io::stdin().as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let timeout_ms = timeout.as_millis().min(i32::MAX as u128) as i32;
+    // SAFETY: `input` is one initialized pollfd, its stdin fd stays open for
+    // the call, and the count matches the one-element buffer.
+    let ready = unsafe { libc::poll(&mut input, 1, timeout_ms) };
+    if ready < 0 {
+        let error = std::io::Error::last_os_error();
+        if error.kind() != std::io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+    }
+    if terminal_is_gone(input.revents) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::BrokenPipe,
+            "terminal input is gone",
+        ));
+    }
+    // Zero cannot trap us in Crossterm's EOF loop because HUP/ERR was handled
+    // above; it also lets Crossterm deliver resize signals after our wait.
+    crossterm::event::poll(Duration::ZERO)
+}
+
+fn keep_polling(result: &std::io::Result<bool>) -> bool {
+    matches!(result, Ok(false))
+}
 
 fn wait_any_key() {
     loop {
-        if matches!(crossterm::event::poll(Duration::from_secs(3600)), Ok(true))
-            && matches!(crossterm::event::read(), Ok(Event::Key(_)))
-        {
+        let polled = poll_terminal(INPUT_POLL_EVERY);
+        if keep_polling(&polled) {
+            continue;
+        }
+        // A poll or read error means the terminal is gone. Returning lets the
+        // caller exit normally and keeps TerminalGuard on the unwind path.
+        if polled.is_err() {
             return;
+        }
+        match crossterm::event::read() {
+            Ok(Event::Key(_)) | Err(_) => return,
+            Ok(_) => {}
         }
     }
 }
@@ -218,6 +267,40 @@ enum KeyOutcome {
     Handled,
 }
 
+#[derive(Debug)]
+pub(crate) struct KeyBindingResult {
+    state: crate::agents::keybinding::BindingState,
+    message: Result<String, String>,
+    plugin_source: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum KeyBindingAction {
+    OpenSidebar,
+}
+
+impl KeyBindingAction {
+    fn label(self) -> &'static str {
+        match self {
+            Self::OpenSidebar => "open sidebar",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct KeyBindingView {
+    action: KeyBindingAction,
+    state: crate::agents::keybinding::BindingState,
+    working: bool,
+    message: Option<Result<String, String>>,
+}
+
+pub(crate) struct KeyBindingEdit {
+    binding: usize,
+    value: String,
+    replace_on_type: bool,
+}
+
 /// The daemon-owned settings as they were when the panel opened. The daemon
 /// reads them once at startup, so changing one without restarting leaves a
 /// value that looks applied and is not.
@@ -246,6 +329,7 @@ pub(crate) enum Dialog {
     },
     Settings {
         cursor: usize,
+        binding: KeyBindingView,
         dirty: Vec<crate::sidebar::live::Setting>,
         path: Option<std::path::PathBuf>,
         source: Result<Option<String>, String>,
@@ -257,6 +341,13 @@ pub(crate) enum Dialog {
         /// panel rather than a dialog of its own, because answering it may
         /// have to write the file, and the file is here.
         confirm: Option<usize>,
+    },
+    Keybindings {
+        parent: Box<Dialog>,
+        offset: usize,
+        bindings: Vec<KeyBindingView>,
+        editing: Option<KeyBindingEdit>,
+        pending: Option<(usize, std::sync::mpsc::Receiver<KeyBindingResult>)>,
     },
     /// Checking GitHub for a newer release, and what came back. `pending`
     /// holds the thread's end of the channel: the loop polls it rather than
@@ -288,9 +379,12 @@ impl Dialog {
     /// `None` for a panel that scrolls instead of selecting.
     fn cursor_mut(&mut self) -> Option<&mut usize> {
         match self {
-            Dialog::Menu { cursor } | Dialog::Keys { cursor } => Some(cursor),
+            Dialog::Menu { cursor } | Dialog::Keys { cursor, .. } => Some(cursor),
             Dialog::Settings { cursor, .. } => Some(cursor),
-            Dialog::Doctor { .. } | Dialog::Update { .. } | Dialog::Bridges { .. } => None,
+            Dialog::Doctor { .. }
+            | Dialog::Update { .. }
+            | Dialog::Bridges { .. }
+            | Dialog::Keybindings { .. } => None,
         }
     }
 
@@ -298,7 +392,8 @@ impl Dialog {
         match self {
             Dialog::Doctor { offset, .. }
             | Dialog::Update { offset, .. }
-            | Dialog::Bridges { offset, .. } => Some(offset),
+            | Dialog::Bridges { offset, .. }
+            | Dialog::Keybindings { offset, .. } => Some(offset),
             _ => None,
         }
     }
@@ -308,10 +403,13 @@ impl Dialog {
         match self {
             Dialog::Menu { .. } => MENU.len(),
             Dialog::Keys { .. } => KEYS.len(),
-            Dialog::Settings { .. } => crate::sidebar::live::SETTINGS.len(),
+            Dialog::Settings { .. } => crate::sidebar::live::SETTINGS.len() + 1,
             // These scroll; they have no selectable rows, so no cursor to
             // bound.
-            Dialog::Doctor { .. } | Dialog::Update { .. } | Dialog::Bridges { .. } => 0,
+            Dialog::Doctor { .. }
+            | Dialog::Update { .. }
+            | Dialog::Bridges { .. }
+            | Dialog::Keybindings { .. } => 0,
         }
     }
 
@@ -324,6 +422,9 @@ impl Dialog {
                 .map(|report| doctor_rows(report).len())
                 .unwrap_or(1),
             Dialog::Bridges { view, .. } => bridge_rows(view).len(),
+            Dialog::Keybindings {
+                bindings, editing, ..
+            } => keybinding_rows(bindings, editing.as_ref()).len(),
             other => other.len(),
         }
     }
@@ -335,7 +436,11 @@ fn cycle_selected(dialog: &mut Dialog, live: &mut crate::sidebar::live::Live, ba
     let Dialog::Settings { cursor, dirty, .. } = dialog else {
         return;
     };
-    let Some(setting) = crate::sidebar::live::SETTINGS.get(*cursor).copied() else {
+    let Some(setting) = cursor
+        .checked_sub(1)
+        .and_then(|index| crate::sidebar::live::SETTINGS.get(index))
+        .copied()
+    else {
         return;
     };
     // Read here, not in `live.rs`, which stays pure and takes the workspace as
@@ -358,6 +463,181 @@ fn update_dialog() -> Dialog {
         check: crate::sidebar::release::Check::Checking,
         offset: 0,
         pending: Some(crate::sidebar::release::check()),
+    }
+}
+
+fn keys_dialog() -> Dialog {
+    Dialog::Keys { cursor: 0 }
+}
+
+fn keybindings_dialog(parent: Dialog) -> Dialog {
+    let binding = match &parent {
+        Dialog::Settings { binding, .. } => binding.clone(),
+        _ => KeyBindingView {
+            action: KeyBindingAction::OpenSidebar,
+            state: crate::agents::keybinding::state(),
+            working: false,
+            message: None,
+        },
+    };
+    Dialog::Keybindings {
+        parent: Box::new(parent),
+        offset: 0,
+        bindings: vec![binding],
+        editing: None,
+        pending: None,
+    }
+}
+
+fn keybindings_working(dialog: &Dialog) -> bool {
+    matches!(dialog, Dialog::Keybindings { bindings, .. } if bindings.iter().any(|binding| binding.working))
+}
+
+fn take_keybindings_parent(dialog: &mut Dialog) -> Option<Dialog> {
+    let Dialog::Keybindings {
+        mut parent,
+        bindings,
+        ..
+    } = std::mem::replace(dialog, Dialog::menu())
+    else {
+        return None;
+    };
+    if let (Dialog::Settings { binding, .. }, Some(current)) =
+        (parent.as_mut(), bindings.into_iter().next())
+    {
+        *binding = current;
+    }
+    Some(*parent)
+}
+
+fn start_keybinding(
+    binding: usize,
+    bindings: &mut [KeyBindingView],
+    pending: &mut Option<(usize, std::sync::mpsc::Receiver<KeyBindingResult>)>,
+) {
+    use crate::agents::keybinding::BindingStatus;
+    let Some(view) = bindings.get_mut(binding) else {
+        return;
+    };
+    if view.working || matches!(view.state.status, BindingStatus::Unreadable(_)) {
+        return;
+    }
+    let action = view.action;
+    let unbind = matches!(view.state.status, BindingStatus::Bound);
+    let key = view.state.key.clone();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let operation = match (action, unbind) {
+            (KeyBindingAction::OpenSidebar, true) => crate::agents::keybinding::unbind(),
+            (KeyBindingAction::OpenSidebar, false) => crate::agents::keybinding::bind(),
+        };
+        let state = match action {
+            KeyBindingAction::OpenSidebar => crate::agents::keybinding::state(),
+        };
+        let message = operation.map(|message| {
+            if !unbind
+                && state.key == key
+                && matches!(
+                    state.status,
+                    crate::agents::keybinding::BindingStatus::Bound
+                )
+            {
+                format!("{message}\n{key} works now")
+            } else {
+                message
+            }
+        });
+        let _ = sender.send(KeyBindingResult {
+            state,
+            message,
+            plugin_source: None,
+        });
+    });
+    view.working = true;
+    view.message = None;
+    *pending = Some((binding, receiver));
+}
+
+fn start_key_edit(
+    binding: usize,
+    key: String,
+    bindings: &mut [KeyBindingView],
+    pending: &mut Option<(usize, std::sync::mpsc::Receiver<KeyBindingResult>)>,
+) {
+    let Some(view) = bindings.get_mut(binding) else {
+        return;
+    };
+    if view.working {
+        return;
+    }
+    let action = view.action;
+    let was_bound = matches!(
+        view.state.status,
+        crate::agents::keybinding::BindingStatus::Bound
+    );
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let operation = match action {
+            KeyBindingAction::OpenSidebar => crate::agents::keybinding::change_key(&key, was_bound),
+        };
+        let (message, plugin_source) = match operation {
+            Ok((message, source)) => (Ok(message), Some(source)),
+            Err(error) => (Err(error), None),
+        };
+        let state = match action {
+            KeyBindingAction::OpenSidebar => crate::agents::keybinding::state(),
+        };
+        let _ = sender.send(KeyBindingResult {
+            state,
+            message,
+            plugin_source,
+        });
+    });
+    view.working = true;
+    view.message = None;
+    *pending = Some((binding, receiver));
+}
+
+fn poll_keybinding(dialog: &mut Option<Dialog>) -> bool {
+    let Some(Dialog::Keybindings {
+        parent,
+        bindings,
+        pending,
+        ..
+    }) = dialog.as_mut()
+    else {
+        return false;
+    };
+    let Some((binding, receiver)) = pending else {
+        return false;
+    };
+    match receiver.try_recv() {
+        Ok(result) => {
+            let view = &mut bindings[*binding];
+            view.state = result.state;
+            view.message = Some(result.message);
+            view.working = false;
+            if let Some(source) = result.plugin_source {
+                if let Dialog::Settings {
+                    source: current, ..
+                } = parent.as_mut()
+                {
+                    *current = Ok(Some(source));
+                }
+            }
+            *pending = None;
+            true
+        }
+        Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+            let view = &mut bindings[*binding];
+            view.message = Some(Err(
+                "the keybinding operation stopped without a result".into()
+            ));
+            view.working = false;
+            *pending = None;
+            true
+        }
+        Err(std::sync::mpsc::TryRecvError::Empty) => false,
     }
 }
 
@@ -443,6 +723,14 @@ fn settings_dialog(daemon_at_open: DaemonSettings) -> Dialog {
     };
     Dialog::Settings {
         cursor: 0,
+        // Read while opening so the first frame has an answer. Only the
+        // mutation goes to the worker thread.
+        binding: KeyBindingView {
+            action: KeyBindingAction::OpenSidebar,
+            state: crate::agents::keybinding::state(),
+            working: false,
+            message: None,
+        },
         daemon_at_open,
         confirm: None,
         dirty: Vec::new(),
@@ -671,6 +959,73 @@ fn bridge_rows(view: &crate::sidebar::bridges::View) -> Vec<crate::sidebar::dial
     rows
 }
 
+fn keybinding_status(status: &crate::agents::keybinding::BindingStatus) -> String {
+    use crate::agents::keybinding::BindingStatus;
+    match status {
+        BindingStatus::Bound => "bound".into(),
+        BindingStatus::NotBound => "not bound".into(),
+        BindingStatus::Taken(holder) => format!("taken by {holder}"),
+        BindingStatus::Unreadable(_) => "cannot read Herdr's config".into(),
+    }
+}
+
+fn key_meaning(key: &str) -> String {
+    key.strip_prefix("prefix+")
+        .map(|key| format!("with Herdr's default prefix: ctrl+b then {key}"))
+        .unwrap_or_else(|| "a direct key, without Herdr's prefix".into())
+}
+
+fn keybinding_rows(
+    bindings: &[KeyBindingView],
+    editing: Option<&KeyBindingEdit>,
+) -> Vec<crate::sidebar::dialog::Row> {
+    use crate::agents::keybinding::BindingStatus;
+    use crate::sidebar::dialog::Row;
+    let mut rows = Vec::new();
+    for (index, binding) in bindings.iter().enumerate() {
+        let edit = editing.filter(|edit| edit.binding == index);
+        let key = edit
+            .map(|edit| edit.value.as_str())
+            .unwrap_or(&binding.state.key);
+        rows.push(Row::Entry {
+            label: binding.action.label().into(),
+            value: if edit.is_some() {
+                format!("{key} · editing")
+            } else {
+                format!("{key} · {}", keybinding_status(&binding.state.status))
+            },
+            enabled: true,
+        });
+        // Replies come immediately after the binding so even the shortest
+        // allowed panel shows the refusal instead of hiding it below notes.
+        // Keep every line: bind/change errors name the operator's remedy.
+        if let Some(message) = &binding.message {
+            match message {
+                Ok(message) => rows.extend(message.lines().map(|line| Row::Note(line.into()))),
+                Err(error) => rows.extend(error.lines().map(|line| Row::Warn(line.into()))),
+            }
+        }
+        rows.push(Row::Note(key_meaning(key)));
+        if edit.is_some() {
+            rows.push(Row::Note(format!(
+                "currently {} · {}",
+                binding.state.key,
+                keybinding_status(&binding.state.status)
+            )));
+        }
+        if let BindingStatus::Unreadable(error) = &binding.state.status {
+            rows.push(Row::Warn(error.clone()));
+        }
+        if binding.working {
+            rows.push(Row::Note("updating configs…".into()));
+        }
+        if index + 1 < bindings.len() {
+            rows.push(Row::Rule);
+        }
+    }
+    rows
+}
+
 const MENU: [(&str, &str); 4] = [
     ("Settings", "s"),
     ("Doctor", "d"),
@@ -685,157 +1040,44 @@ const MENU_SETTINGS: usize = 0;
 const MENU_BRIDGES: usize = 2;
 const MENU_UPDATE: usize = 3;
 
-/// One inventory. The sheet is built from it, and the test presses every entry
-/// through the router. Descriptions say where a key means something, because
-/// `s` and `r` mean different things inside a panel and outside one.
-const KEYS: [(&str, &str); 16] = [
+/// One inventory. The sheet is reachable from the card list, so it describes
+/// only keys that work there; each panel carries its own controls in its
+/// footer.
+const KEYS: [(&str, &str); 9] = [
     ("j / ↓", "move down"),
     ("k / ↑", "move up"),
-    ("o / ↵", "expand a card · change a setting"),
-    ("h / l · ← / →", "change a setting, back and forward"),
+    ("o / ↵", "expand a card"),
     ("z", "hide idle agents"),
     ("PageUp / PageDown", "scroll"),
     ("x", "menu"),
     ("?", "this sheet"),
-    ("s", "settings, in a panel · save, in the settings panel"),
-    ("d", "doctor, in a panel"),
-    ("b", "bridges, in a panel"),
-    ("p", "prune removable bridges, in the bridges panel"),
-    ("r", "reread bridges · rebuild doctor · recheck update"),
-    ("u", "update, in a panel · install it, in the update panel"),
     ("q / esc", "close a panel, or the sidebar"),
     ("ctrl-c", "close the sidebar"),
 ];
 
-/// Each key, and the state it needs in order to do anything.
+/// Each key, and a card-list cursor from which it does something.
 ///
 /// The starting cursor is per key and not a constant: with two cards, `j`
 /// from the last one correctly does nothing and `k` from the first correctly
 /// does nothing. A single start makes one of them look like an ignored key.
 ///
-/// `r` only means something with the doctor panel open, `↵` only inside
-/// settings, and `s`/`d` only once a panel is up at all -- from the cards
-/// they are deliberately dead. Each arrives with the state that gives it
-/// meaning.
-/// A function rather than a `const`: one of these starting states holds a
-/// version string, which cannot be built in a constant.
 #[cfg(test)]
-fn routed() -> [(
-    &'static str,
-    KeyCode,
-    KeyModifiers,
-    &'static str,
-    Option<Dialog>,
-); 16] {
+fn routed() -> [(&'static str, KeyCode, KeyModifiers, &'static str); 9] {
     [
-        ("j / ↓", KeyCode::Char('j'), KeyModifiers::NONE, "a", None),
-        ("k / ↑", KeyCode::Char('k'), KeyModifiers::NONE, "b", None),
-        ("o / ↵", KeyCode::Char('o'), KeyModifiers::NONE, "a", None),
-        (
-            "h / l · ← / →",
-            KeyCode::Char('l'),
-            KeyModifiers::NONE,
-            "a",
-            Some(Dialog::Settings {
-                cursor: 0,
-                dirty: Vec::new(),
-                path: None,
-                source: Ok(None),
-                daemon_at_open: DaemonSettings {
-                    interval_ms: 1000,
-                    prune_after_days: crate::daemon::prune::DEFAULT_RETENTION_DAYS,
-                },
-                confirm: None,
-            }),
-        ),
-        ("z", KeyCode::Char('z'), KeyModifiers::NONE, "a", None),
+        ("j / ↓", KeyCode::Char('j'), KeyModifiers::NONE, "a"),
+        ("k / ↑", KeyCode::Char('k'), KeyModifiers::NONE, "b"),
+        ("o / ↵", KeyCode::Char('o'), KeyModifiers::NONE, "a"),
+        ("z", KeyCode::Char('z'), KeyModifiers::NONE, "a"),
         (
             "PageUp / PageDown",
             KeyCode::PageDown,
             KeyModifiers::NONE,
             "a",
-            None,
         ),
-        ("x", KeyCode::Char('x'), KeyModifiers::NONE, "a", None),
-        ("?", KeyCode::Char('?'), KeyModifiers::NONE, "a", None),
-        (
-            "s",
-            KeyCode::Char('s'),
-            KeyModifiers::NONE,
-            "a",
-            Some(Dialog::Menu { cursor: 0 }),
-        ),
-        (
-            "d",
-            KeyCode::Char('d'),
-            KeyModifiers::NONE,
-            "a",
-            Some(Dialog::Menu { cursor: 0 }),
-        ),
-        (
-            "b",
-            KeyCode::Char('b'),
-            KeyModifiers::NONE,
-            "a",
-            Some(Dialog::Menu { cursor: 0 }),
-        ),
-        (
-            "p",
-            KeyCode::Char('p'),
-            KeyModifiers::NONE,
-            "a",
-            Some(Dialog::Bridges {
-                offset: 0,
-                root: Ok("/does/not/exist".into()),
-                retention: Some(std::time::Duration::from_secs(1)),
-                view: crate::sidebar::bridges::View::Ready(crate::sidebar::bridges::Snapshot {
-                    entries: Vec::new(),
-                    total_bytes: 0,
-                    stale_count: 1,
-                    removed: None,
-                }),
-                pending: None,
-            }),
-        ),
-        (
-            "u",
-            KeyCode::Char('u'),
-            KeyModifiers::NONE,
-            "a",
-            Some(Dialog::Update {
-                check: crate::sidebar::release::Check::Ready {
-                    // Newer than anything this crate will be: `u` is dead unless
-                    // an upgrade is genuinely on offer, so a bare version here
-                    // would make a working key look ignored.
-                    latest: "v99.0.0".into(),
-                    source: crate::sidebar::release::Source::Github,
-                },
-                offset: 0,
-                pending: None,
-            }),
-        ),
-        (
-            "r",
-            KeyCode::Char('r'),
-            KeyModifiers::NONE,
-            "a",
-            Some(Dialog::Doctor {
-                offset: 0,
-                report: Ok(crate::agents::doctor::Report {
-                    checks: Vec::new(),
-                    panes: Vec::new(),
-                }),
-                taken_at: 0,
-            }),
-        ),
-        ("q / esc", KeyCode::Esc, KeyModifiers::NONE, "a", None),
-        (
-            "ctrl-c",
-            KeyCode::Char('c'),
-            KeyModifiers::CONTROL,
-            "a",
-            None,
-        ),
+        ("x", KeyCode::Char('x'), KeyModifiers::NONE, "a"),
+        ("?", KeyCode::Char('?'), KeyModifiers::NONE, "a"),
+        ("q / esc", KeyCode::Esc, KeyModifiers::NONE, "a"),
+        ("ctrl-c", KeyCode::Char('c'), KeyModifiers::CONTROL, "a"),
     ]
 }
 
@@ -887,6 +1129,65 @@ fn route(
             }
             return KeyOutcome::Handled;
         }
+
+        // Text input owns printable keys before the panel router sees them.
+        // Otherwise typing `b`, `p`, or `q` would run a panel command instead
+        // of becoming part of the key being edited.
+        if matches!(
+            dialog,
+            Dialog::Keybindings {
+                editing: Some(_),
+                ..
+            }
+        ) {
+            let mut commit = None;
+            if let Dialog::Keybindings {
+                editing: Some(edit),
+                ..
+            } = dialog
+            {
+                match (key.code, key.modifiers) {
+                    (KeyCode::Char('c'), modifiers)
+                        if modifiers.contains(KeyModifiers::CONTROL) =>
+                    {
+                        return KeyOutcome::Quit
+                    }
+                    (KeyCode::Esc, _) => {}
+                    (KeyCode::Enter, _) => {
+                        commit = Some((edit.binding, std::mem::take(&mut edit.value)));
+                    }
+                    (KeyCode::Backspace, _) => {
+                        edit.replace_on_type = false;
+                        edit.value.pop();
+                        return KeyOutcome::Handled;
+                    }
+                    (KeyCode::Char(character), modifiers)
+                        if !modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                    {
+                        if edit.replace_on_type {
+                            edit.value.clear();
+                            edit.replace_on_type = false;
+                        }
+                        edit.value.push(character);
+                        return KeyOutcome::Handled;
+                    }
+                    _ => return KeyOutcome::Handled,
+                }
+            }
+            if let Dialog::Keybindings {
+                bindings,
+                editing,
+                pending,
+                ..
+            } = dialog
+            {
+                *editing = None;
+                if let Some((binding, value)) = commit {
+                    start_key_edit(binding, value, bindings, pending);
+                }
+            }
+            return KeyOutcome::Handled;
+        }
         match (key.code, key.modifiers) {
             (KeyCode::Char('c'), m) if m.contains(KeyModifiers::CONTROL) => {
                 return KeyOutcome::Quit
@@ -895,6 +1196,12 @@ fn route(
             // returns to it. One reached with `s` or `d` was never under a
             // menu, and dropping into one you did not open is not going back.
             (KeyCode::Esc, _) | (KeyCode::Char('q'), _) => {
+                if matches!(dialog, Dialog::Keybindings { .. }) {
+                    if !keybindings_working(dialog) {
+                        *open = take_keybindings_parent(dialog);
+                    }
+                    return KeyOutcome::Handled;
+                }
                 if let Dialog::Settings {
                     daemon_at_open,
                     confirm,
@@ -951,6 +1258,14 @@ fn route(
             }
             (KeyCode::Char('d'), _) if !matches!(dialog, Dialog::Doctor { .. }) => {
                 *open = Some(doctor_dialog());
+            }
+            (KeyCode::Char('b'), _) if matches!(dialog, Dialog::Keybindings { .. }) => {
+                if let Dialog::Keybindings {
+                    bindings, pending, ..
+                } = dialog
+                {
+                    start_keybinding(0, bindings, pending);
+                }
             }
             (KeyCode::Char('b'), _) if !matches!(dialog, Dialog::Bridges { .. }) => {
                 *open = Some(bridges_dialog(it.live_panes.clone(), live.prune_after_days));
@@ -1029,7 +1344,27 @@ fn route(
                 }
             }
             (KeyCode::Enter, _) | (KeyCode::Char('o'), _) => {
-                cycle_selected(dialog, live, false);
+                if matches!(dialog, Dialog::Settings { cursor: 0, .. }) {
+                    let parent = std::mem::replace(dialog, Dialog::menu());
+                    *dialog = keybindings_dialog(parent);
+                } else if matches!(key.code, KeyCode::Enter) {
+                    if let Dialog::Keybindings {
+                        bindings, editing, ..
+                    } = dialog
+                    {
+                        if let Some(binding) = bindings.first().filter(|binding| !binding.working) {
+                            *editing = Some(KeyBindingEdit {
+                                binding: 0,
+                                value: binding.state.key.clone(),
+                                replace_on_type: true,
+                            });
+                        }
+                    } else {
+                        cycle_selected(dialog, live, false);
+                    }
+                } else {
+                    cycle_selected(dialog, live, false);
+                }
                 if let Dialog::Menu { cursor } = dialog {
                     *open = Some(match *cursor {
                         MENU_SETTINGS => settings_dialog(DaemonSettings::from(&*live)),
@@ -1059,7 +1394,7 @@ fn route(
                 return KeyOutcome::Handled;
             }
             *open = Some(match key.code {
-                KeyCode::Char('?') => Dialog::Keys { cursor: 0 },
+                KeyCode::Char('?') => keys_dialog(),
                 _ => Dialog::menu(),
             });
             KeyOutcome::Handled
@@ -1139,24 +1474,37 @@ fn panel_for(
                     enabled: false,
                 })
                 .collect(),
-            footer: "j/k move · esc close".into(),
+            footer: "j/k scroll · esc close".into(),
             cursor: Some(*cursor),
             offset: 0,
         },
         Dialog::Settings {
             cursor,
+            binding,
             confirm,
             daemon_at_open,
             ..
         } => {
-            let rows: Vec<Row> = crate::sidebar::live::SETTINGS
-                .iter()
-                .map(|setting| Row::Entry {
-                    label: setting.label().into(),
-                    value: live.value(*setting),
-                    enabled: true,
-                })
-                .collect();
+            let mut rows = vec![Row::Entry {
+                label: binding.action.label().into(),
+                value: format!(
+                    "{} · {}",
+                    binding.state.key,
+                    keybinding_status(&binding.state.status)
+                ),
+                enabled: true,
+            }];
+            rows.push(Row::Rule);
+            let settings_start = rows.len();
+            rows.extend(
+                crate::sidebar::live::SETTINGS
+                    .iter()
+                    .map(|setting| Row::Entry {
+                        label: setting.label().into(),
+                        value: live.value(*setting),
+                        enabled: true,
+                    }),
+            );
             // No standing warning: daemon settings only need explaining when
             // you try to leave with one changed.
             if let Some(choice) = confirm {
@@ -1188,9 +1536,39 @@ fn panel_for(
             Panel {
                 title: "Settings".into(),
                 rows,
-                footer: "j/k row · h/l value · s save · esc back".into(),
-                cursor: Some(*cursor),
+                footer: "j/k · o/↵ open/change · h/l value · s save · esc back".into(),
+                cursor: Some(if *cursor == 0 {
+                    0
+                } else {
+                    settings_start + *cursor - 1
+                }),
                 offset: 0,
+            }
+        }
+        Dialog::Keybindings {
+            offset,
+            bindings,
+            editing,
+            ..
+        } => {
+            use crate::agents::keybinding::BindingStatus;
+            let footer = if editing.is_some() {
+                "type a key · backspace delete · ↵ validate · esc cancel"
+            } else if bindings.iter().any(|binding| binding.working) {
+                "updating configs…"
+            } else {
+                match bindings.first().map(|binding| &binding.state.status) {
+                    Some(BindingStatus::Bound) => "↵ edit · b unbind · j/k scroll · esc back",
+                    Some(BindingStatus::Unreadable(_)) => "↵ edit · j/k scroll · esc back",
+                    _ => "↵ edit · b bind · j/k scroll · esc back",
+                }
+            };
+            Panel {
+                title: "Keybindings".into(),
+                rows: keybinding_rows(bindings, editing.as_ref()),
+                footer: footer.into(),
+                cursor: None,
+                offset: *offset,
             }
         }
         Dialog::Update { check, offset, .. } => {
@@ -1464,6 +1842,10 @@ pub fn run() -> i32 {
     let mut dirty = true;
 
     loop {
+        if poll_keybinding(&mut open) {
+            dirty = true;
+        }
+
         // The update panel's thread, if one is running. Polled, never waited
         // on: the check and the install both take seconds, and this is the
         // loop that also draws and reads the keyboard.
@@ -1689,28 +2071,34 @@ pub fn run() -> i32 {
             dirty = false;
         }
 
-        if crossterm::event::poll(Duration::from_millis(100)).unwrap_or(false) {
-            match crossterm::event::read() {
-                Ok(Event::Key(key)) => {
-                    dirty = true;
-                    it.live_panes = state.panes.keys().cloned().collect();
-                    if let KeyOutcome::Quit = route(
-                        key,
-                        &mut open,
-                        &mut it,
-                        &mut live,
-                        &last_rendered,
-                        viewport,
-                        total,
-                        frame_size.width,
-                        frame_size.height,
-                    ) {
-                        return 0;
-                    }
+        let polled = poll_terminal(INPUT_POLL_EVERY);
+        if keep_polling(&polled) {
+            continue;
+        }
+        if polled.is_err() {
+            return 0;
+        }
+        match crossterm::event::read() {
+            Ok(Event::Key(key)) => {
+                dirty = true;
+                it.live_panes = state.panes.keys().cloned().collect();
+                if let KeyOutcome::Quit = route(
+                    key,
+                    &mut open,
+                    &mut it,
+                    &mut live,
+                    &last_rendered,
+                    viewport,
+                    total,
+                    frame_size.width,
+                    frame_size.height,
+                ) {
+                    return 0;
                 }
-                Ok(Event::Resize(_, _)) => dirty = true,
-                _ => {}
             }
+            Ok(Event::Resize(_, _)) => dirty = true,
+            Err(_) => return 0,
+            Ok(_) => {}
         }
     }
 }
@@ -1752,12 +2140,38 @@ mod tests {
         crate::sidebar::live::Live::from(&crate::sidebar::config::Loaded::from_missing())
     }
 
+    fn key_binding_view(status: crate::agents::keybinding::BindingStatus) -> KeyBindingView {
+        KeyBindingView {
+            action: KeyBindingAction::OpenSidebar,
+            state: crate::agents::keybinding::BindingState {
+                key: "prefix+a".into(),
+                status,
+            },
+            working: false,
+            message: None,
+        }
+    }
+
     #[test]
     fn the_age_tick_fires_once_a_minute_and_not_before() {
         assert!(!age_tick_due(0, 59_999));
         assert!(age_tick_due(0, 60_000));
         assert!(!age_tick_due(60_000, 90_000));
         assert!(!age_tick_due(90_000, 0));
+    }
+
+    #[test]
+    fn no_event_keeps_polling_but_a_broken_terminal_stops() {
+        // These used to be indistinguishable, turning an immediate terminal
+        // error into a hot loop.
+        assert!(keep_polling(&Ok(false)));
+        assert!(!keep_polling(&Err(std::io::Error::other("pty is gone"))));
+    }
+
+    #[test]
+    fn a_tty_hangup_is_not_readable_input() {
+        assert!(terminal_is_gone(libc::POLLHUP));
+        assert!(!terminal_is_gone(libc::POLLIN));
     }
 
     #[test]
@@ -1965,6 +2379,7 @@ mod tests {
         let live = live_default();
         let mut dialog = Dialog::Settings {
             cursor: 0,
+            binding: key_binding_view(crate::agents::keybinding::BindingStatus::NotBound),
             daemon_at_open: DaemonSettings::from(&live),
             confirm: None,
             dirty: vec![crate::sidebar::live::Setting::Sort],
@@ -1986,6 +2401,7 @@ mod tests {
         let live = live_default();
         let mut dialog = Dialog::Settings {
             cursor: 0,
+            binding: key_binding_view(crate::agents::keybinding::BindingStatus::NotBound),
             daemon_at_open: DaemonSettings::from(&live),
             confirm: None,
             dirty: vec![crate::sidebar::live::Setting::Sort],
@@ -2003,6 +2419,7 @@ mod tests {
     ) -> Dialog {
         Dialog::Settings {
             cursor: 0,
+            binding: key_binding_view(crate::agents::keybinding::BindingStatus::NotBound),
             dirty: Vec::new(),
             path: None,
             source: Ok(None),
@@ -2295,7 +2712,7 @@ mod tests {
     #[test]
     fn every_key_the_sheet_describes_does_something() {
         let r = two_cards();
-        for (key, code, modifiers, start, context) in routed() {
+        for (key, code, modifiers, start) in routed() {
             let mut it = Interaction {
                 follow: true,
                 offset: 5,
@@ -2303,7 +2720,7 @@ mod tests {
                 ..Default::default()
             };
             let mut live = live_default();
-            let mut open = context;
+            let mut open = None;
             let before = (
                 it.offset,
                 it.cursor.clone(),
@@ -2404,7 +2821,8 @@ mod tests {
         // The panel's ↵ on the sort row, through the router.
         let mut it = Interaction::default();
         let mut open = Some(Dialog::Settings {
-            cursor: 0,
+            cursor: 1,
+            binding: key_binding_view(crate::agents::keybinding::BindingStatus::NotBound),
             daemon_at_open: DaemonSettings::from(&live),
             confirm: None,
             dirty: Vec::new(),
@@ -2457,6 +2875,481 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    fn settings_with_binding(status: crate::agents::keybinding::BindingStatus) -> Dialog {
+        let live = live_default();
+        Dialog::Settings {
+            cursor: 0,
+            binding: key_binding_view(status),
+            dirty: Vec::new(),
+            path: None,
+            source: Ok(None),
+            daemon_at_open: DaemonSettings::from(&live),
+            confirm: None,
+        }
+    }
+
+    #[test]
+    fn settings_shows_one_binding_row_and_opens_it_without_toggling() {
+        let live = live_default();
+        let dialog = settings_with_binding(crate::agents::keybinding::BindingStatus::NotBound);
+        let panel = panel_for(
+            &dialog,
+            &live,
+            &crate::sidebar::config::Loaded::from_missing(),
+            0,
+        );
+        let text = rows_text(&panel.rows);
+        assert!(text.contains("open sidebar prefix+a"), "{text}");
+        assert!(text.contains("not bound"), "{text}");
+        assert!(matches!(
+            panel.rows.get(1),
+            Some(crate::sidebar::dialog::Row::Rule)
+        ));
+        assert!(panel.footer.contains("o/↵ open"), "{}", panel.footer);
+        assert!(panel.footer.contains("s save"), "{}", panel.footer);
+
+        for code in [KeyCode::Enter, KeyCode::Char('o')] {
+            let mut open = Some(settings_with_binding(
+                crate::agents::keybinding::BindingStatus::NotBound,
+            ));
+            route(
+                press(code),
+                &mut open,
+                &mut Interaction::default(),
+                &mut live_default(),
+                &two_cards(),
+                10,
+                40,
+                60,
+                24,
+            );
+            let Some(Dialog::Keybindings { bindings, .. }) = open else {
+                panic!("{code:?} did not open the binding panel")
+            };
+            assert_eq!(
+                bindings[0].state.status,
+                crate::agents::keybinding::BindingStatus::NotBound,
+                "opening the row must not toggle it"
+            );
+        }
+    }
+
+    #[test]
+    fn bind_is_inert_when_herdrs_config_cannot_be_read() {
+        let mut open = Some(keybindings_dialog(settings_with_binding(
+            crate::agents::keybinding::BindingStatus::Unreadable("permission denied".into()),
+        )));
+        route(
+            press(KeyCode::Char('b')),
+            &mut open,
+            &mut Interaction::default(),
+            &mut live_default(),
+            &two_cards(),
+            10,
+            40,
+            60,
+            24,
+        );
+        assert!(matches!(
+            open,
+            Some(Dialog::Keybindings { pending: None, .. })
+        ));
+    }
+
+    #[test]
+    fn keybinding_replies_scroll_to_the_last_line() {
+        let mut dialog = keybindings_dialog(settings_with_binding(
+            crate::agents::keybinding::BindingStatus::NotBound,
+        ));
+        let lines = (0..30)
+            .map(|line| format!("reply line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        if let Dialog::Keybindings { bindings, .. } = &mut dialog {
+            bindings[0].message = Some(Err(lines));
+        }
+        let mut open = Some(dialog);
+        for _ in 0..30 {
+            route(
+                press(KeyCode::Char('j')),
+                &mut open,
+                &mut Interaction::default(),
+                &mut live_default(),
+                &two_cards(),
+                10,
+                40,
+                60,
+                20,
+            );
+        }
+        let panel = panel_for(
+            open.as_ref().expect("keybindings"),
+            &live_default(),
+            &crate::sidebar::config::Loaded::from_missing(),
+            0,
+        );
+        let drawn = crate::sidebar::dialog::render(&panel, 60, 20)
+            .iter()
+            .flat_map(|line| line.iter().map(|span| span.text.as_str()))
+            .collect::<String>();
+        assert!(
+            drawn.contains("reply line 29"),
+            "last reply is unreachable: {drawn}"
+        );
+    }
+
+    #[test]
+    fn editing_owns_command_characters_and_escape_restores_the_key() {
+        let mut open = Some(keybindings_dialog(settings_with_binding(
+            crate::agents::keybinding::BindingStatus::NotBound,
+        )));
+        let mut it = Interaction::default();
+        let mut live = live_default();
+        let rendered = two_cards();
+        for code in [
+            KeyCode::Enter,
+            KeyCode::Char('b'),
+            KeyCode::Char('p'),
+            KeyCode::Char('q'),
+        ] {
+            route(
+                press(code),
+                &mut open,
+                &mut it,
+                &mut live,
+                &rendered,
+                10,
+                40,
+                60,
+                24,
+            );
+        }
+        let Some(Dialog::Keybindings {
+            bindings,
+            editing: Some(edit),
+            pending: None,
+            ..
+        }) = &open
+        else {
+            panic!("command characters escaped the editor")
+        };
+        assert_eq!(edit.value, "bpq");
+        assert_eq!(bindings[0].state.key, "prefix+a", "editing is not a write");
+
+        route(
+            press(KeyCode::Backspace),
+            &mut open,
+            &mut it,
+            &mut live,
+            &rendered,
+            10,
+            40,
+            60,
+            24,
+        );
+        assert!(matches!(
+            &open,
+            Some(Dialog::Keybindings {
+                editing: Some(KeyBindingEdit { value, .. }),
+                ..
+            }) if value == "bp"
+        ));
+
+        route(
+            press(KeyCode::Esc),
+            &mut open,
+            &mut it,
+            &mut live,
+            &rendered,
+            10,
+            40,
+            60,
+            24,
+        );
+        assert!(matches!(
+            open,
+            Some(Dialog::Keybindings { editing: None, .. })
+        ));
+        let text = rows_text(
+            &panel_for(
+                open.as_ref().unwrap(),
+                &live,
+                &crate::sidebar::config::Loaded::from_missing(),
+                0,
+            )
+            .rows,
+        );
+        assert!(
+            text.contains("prefix+a"),
+            "escape did not restore the key: {text}"
+        );
+    }
+
+    #[test]
+    fn b_still_opens_bridges_from_settings() {
+        let mut open = Some(settings_with_binding(
+            crate::agents::keybinding::BindingStatus::NotBound,
+        ));
+        route(
+            press(KeyCode::Char('b')),
+            &mut open,
+            &mut Interaction::default(),
+            &mut live_default(),
+            &two_cards(),
+            10,
+            40,
+            60,
+            24,
+        );
+        assert!(matches!(open, Some(Dialog::Bridges { .. })));
+    }
+
+    #[test]
+    fn the_panel_binds_migrates_unbinds_and_rejects_bad_edits_off_the_router() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let herdr = temp.path().join("herdr");
+        std::fs::write(
+            &herdr,
+            "#!/bin/sh\ncase \"$1\" in\n  --default-config) cat \"$KEYBIND_TEST_DEFAULTS\" ;;\n  config)\n    if grep -q 'key = \"bad\"' \"$HERDR_CONFIG_PATH\"; then\n      printf 'bad key from Herdr\\n' >&2\n      exit 1\n    fi\n    printf 'config: ok\\n'\n    ;;\n  server) printf '{\"result\":{\"status\":\"applied\",\"diagnostics\":[]}}\\n' ;;\n  plugin) cat \"$KEYBIND_TEST_ACTIONS\" ;;\nesac\n",
+        )
+        .expect("fake herdr");
+        std::fs::set_permissions(&herdr, std::fs::Permissions::from_mode(0o755))
+            .expect("executable fake");
+        let defaults = temp.path().join("defaults.toml");
+        std::fs::write(
+            &defaults,
+            include_str!("../../tests/fixtures/herdr-default-config.toml"),
+        )
+        .expect("defaults");
+        let actions = temp.path().join("actions.json");
+        std::fs::write(
+            &actions,
+            r#"{"result":{"actions":[{"action_id":"open-sidebar","plugin_id":"herdr-agent-watcher"}]}}"#,
+        )
+        .expect("actions");
+        let herdr_config = temp.path().join("herdr-config.toml");
+        std::fs::write(&herdr_config, "[ui]\n").expect("Herdr config");
+        let plugin_config = temp.path().join("plugin-config");
+        let state_dir = temp.path().join("state");
+        std::fs::create_dir_all(&plugin_config).expect("plugin config dir");
+        std::fs::create_dir_all(&state_dir).expect("state dir");
+        std::fs::write(
+            plugin_config.join("config.toml"),
+            "[keys]\nopen_sidebar = \"prefix+a\"\n",
+        )
+        .expect("plugin config");
+
+        crate::test_env::with_env(
+            &[
+                ("HERDR_CONFIG_PATH", Some(herdr_config.clone().into())),
+                (
+                    "HERDR_PLUGIN_CONFIG_DIR",
+                    Some(plugin_config.clone().into()),
+                ),
+                ("HERDR_PLUGIN_STATE_DIR", Some(state_dir.into())),
+                ("HERDR_BIN_PATH", Some(herdr.into())),
+                ("KEYBIND_TEST_DEFAULTS", Some(defaults.into())),
+                ("KEYBIND_TEST_ACTIONS", Some(actions.clone().into())),
+                ("XDG_CONFIG_HOME", Some(temp.path().join("xdg").into())),
+                ("HOME", Some(temp.path().join("home").into())),
+            ],
+            || {
+                let rendered = two_cards();
+                let mut it = Interaction::default();
+                let mut live = live_default();
+                let mut open = Some(settings_dialog(DaemonSettings::from(&live)));
+                let wait = |open: &mut Option<Dialog>| {
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+                    while !poll_keybinding(open) {
+                        assert!(
+                            std::time::Instant::now() < deadline,
+                            "keybinding worker timed out"
+                        );
+                        std::thread::yield_now();
+                    }
+                };
+
+                let send = |code,
+                            open: &mut Option<Dialog>,
+                            it: &mut Interaction,
+                            live: &mut crate::sidebar::live::Live| {
+                    route(press(code), open, it, live, &rendered, 10, 40, 60, 24);
+                };
+
+                send(KeyCode::Enter, &mut open, &mut it, &mut live);
+                assert!(matches!(open, Some(Dialog::Keybindings { .. })));
+                send(KeyCode::Char('b'), &mut open, &mut it, &mut live);
+                wait(&mut open);
+                let Some(Dialog::Keybindings { bindings, .. }) = &open else {
+                    panic!("still in keybindings")
+                };
+                assert_eq!(
+                    bindings[0].state.status,
+                    crate::agents::keybinding::BindingStatus::Bound
+                );
+                assert!(
+                    matches!(&bindings[0].message, Some(Ok(message)) if message.contains("prefix+a works now"))
+                );
+                assert!(std::fs::read_to_string(&herdr_config)
+                    .unwrap()
+                    .contains(crate::agents::keybinding::MARKER));
+                // Editing a live key migrates it: remove the old binding,
+                // write the plugin key, then install the new binding.
+                send(KeyCode::Enter, &mut open, &mut it, &mut live);
+                for character in "prefix+y".chars() {
+                    send(KeyCode::Char(character), &mut open, &mut it, &mut live);
+                }
+                send(KeyCode::Enter, &mut open, &mut it, &mut live);
+                wait(&mut open);
+                let Some(Dialog::Keybindings { bindings, .. }) = &open else {
+                    panic!("still in keybindings")
+                };
+                assert_eq!(
+                    bindings[0].state,
+                    crate::agents::keybinding::BindingState {
+                        key: "prefix+y".into(),
+                        status: crate::agents::keybinding::BindingStatus::Bound,
+                    }
+                );
+                let herdr_text = std::fs::read_to_string(&herdr_config).unwrap();
+                assert!(herdr_text.contains("key = \"prefix+y\""), "{herdr_text}");
+                assert!(!herdr_text.contains("key = \"prefix+a\""), "{herdr_text}");
+                assert!(std::fs::read_to_string(plugin_config.join("config.toml"))
+                    .unwrap()
+                    .contains("open_sidebar = \"prefix+y\""));
+
+                // A deterministic refusal is found before either config is
+                // touched, and the complete reason is visible even in the
+                // shortest panel the router permits.
+                let plugin_path = plugin_config.join("config.toml");
+                let plugin_before = std::fs::read(&plugin_path).unwrap();
+                std::fs::write(
+                    &actions,
+                    r#"{"result":{"actions":[{"action_id":"open-sidebar","plugin_id":"herdr-agent-watcher"},{"action_id":"open-sidebar","plugin_id":"herdr-dynamic-island"}]}}"#,
+                )
+                .expect("ambiguous actions");
+                send(KeyCode::Enter, &mut open, &mut it, &mut live);
+                for character in "prefix+u".chars() {
+                    send(KeyCode::Char(character), &mut open, &mut it, &mut live);
+                }
+                send(KeyCode::Enter, &mut open, &mut it, &mut live);
+                wait(&mut open);
+                assert_eq!(
+                    std::fs::read(&plugin_path).unwrap(),
+                    plugin_before,
+                    "a refused key edit changed the plugin config"
+                );
+                let Some(Dialog::Keybindings { bindings, .. }) = &open else {
+                    panic!("still in keybindings")
+                };
+                assert_eq!(
+                    bindings[0].state,
+                    crate::agents::keybinding::BindingState {
+                        key: "prefix+y".into(),
+                        status: crate::agents::keybinding::BindingStatus::Bound,
+                    },
+                    "a preflight refusal disturbed the live binding"
+                );
+                let panel = panel_for(
+                    open.as_ref().expect("keybindings"),
+                    &live,
+                    &crate::sidebar::config::Loaded::from_missing(),
+                    0,
+                );
+                let drawn = crate::sidebar::dialog::render(&panel, 60, 6)
+                    .iter()
+                    .flat_map(|line| line.iter().map(|span| span.text.as_str()))
+                    .collect::<String>();
+                assert!(
+                    drawn.contains("more than one"),
+                    "the refusal is below the visible panel: {drawn}"
+                );
+
+                std::fs::write(
+                    &actions,
+                    r#"{"result":{"actions":[{"action_id":"open-sidebar","plugin_id":"herdr-agent-watcher"}]}}"#,
+                )
+                .expect("unambiguous actions");
+
+                send(KeyCode::Char('b'), &mut open, &mut it, &mut live);
+                wait(&mut open);
+                let Some(Dialog::Keybindings { bindings, .. }) = &open else {
+                    panic!("still in keybindings")
+                };
+                assert_eq!(
+                    bindings[0].state.status,
+                    crate::agents::keybinding::BindingStatus::NotBound
+                );
+
+                // Committing from an unbound state means "use this key", not
+                // merely "remember this key".
+                send(KeyCode::Enter, &mut open, &mut it, &mut live);
+                for character in "prefix+d".chars() {
+                    send(KeyCode::Char(character), &mut open, &mut it, &mut live);
+                }
+                send(KeyCode::Enter, &mut open, &mut it, &mut live);
+                wait(&mut open);
+                let Some(Dialog::Keybindings { bindings, .. }) = &open else {
+                    panic!("still in keybindings")
+                };
+                assert_eq!(
+                    bindings[0].state,
+                    crate::agents::keybinding::BindingState {
+                        key: "prefix+d".into(),
+                        status: crate::agents::keybinding::BindingStatus::Bound,
+                    }
+                );
+                let herdr_text = std::fs::read_to_string(&herdr_config).unwrap();
+                assert!(herdr_text.contains("key = \"prefix+d\""), "{herdr_text}");
+
+                send(KeyCode::Char('b'), &mut open, &mut it, &mut live);
+                wait(&mut open);
+
+                // Herdr's validator is authoritative. Its rejection leaves
+                // the plugin config and displayed binding on prefix+d.
+                send(KeyCode::Enter, &mut open, &mut it, &mut live);
+                for character in "bad".chars() {
+                    send(KeyCode::Char(character), &mut open, &mut it, &mut live);
+                }
+                send(KeyCode::Enter, &mut open, &mut it, &mut live);
+                wait(&mut open);
+                let Some(Dialog::Keybindings { bindings, .. }) = &open else {
+                    panic!("still in keybindings")
+                };
+                assert_eq!(bindings[0].state.key, "prefix+d");
+                assert!(matches!(
+                    &bindings[0].message,
+                    Some(Err(error)) if error.contains("bad key from Herdr")
+                ));
+                let plugin_text =
+                    std::fs::read_to_string(plugin_config.join("config.toml")).unwrap();
+                assert!(
+                    plugin_text.contains("open_sidebar = \"prefix+d\""),
+                    "{plugin_text}"
+                );
+                let panel = panel_for(
+                    open.as_ref().expect("keybindings"),
+                    &live,
+                    &crate::sidebar::config::Loaded::from_missing(),
+                    0,
+                );
+                assert!(
+                    rows_text(&panel.rows).contains("bad key from Herdr"),
+                    "Herdr's refusal must be printed verbatim"
+                );
+
+                send(KeyCode::Esc, &mut open, &mut it, &mut live);
+                let Some(Dialog::Settings { binding, dirty, .. }) = &open else {
+                    panic!("esc did not return to settings")
+                };
+                assert_eq!(binding.state.key, "prefix+d");
+                assert!(dirty.is_empty(), "the key is not a daemon setting");
+            },
+        );
     }
 
     /// A mapper that drops pane findings passes every other test here.
@@ -2717,7 +3610,8 @@ mod tests {
             .iter()
             .position(|s| matches!(s, crate::sidebar::live::Setting::IntervalMs))
             .expect("an interval row");
-        for _ in 0..interval {
+        // The first selectable row is the immediate Herdr key binding.
+        for _ in 0..=interval {
             go(KeyCode::Char('j'), &mut open, &mut live, &mut it);
         }
         let before = live.interval_ms;
