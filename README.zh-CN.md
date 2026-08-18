@@ -130,7 +130,7 @@ herdr plugin action invoke stop-daemon --plugin herdr-agent-watcher
 | `cards.auto_expand` | `none`、`all` | `none` | 卡片默认展开 |
 | `cards.tool_calls` | `bars`、`jar` | `bars` | 上下文用量条的画法 |
 | `cards.trace_lines` | `1`–`20` | `5` | 展开后显示几条记录。超范围是夹到边界，不是拒绝 |
-| `cards.plan_usage` | `true`、`false` | `true` | 在展开的卡片上显示套餐用量 |
+| `cards.plan_usage` \* | `true`、`false` | `true` | 在展开的卡片上显示套餐用量 |
 | `list.sort` | `position`、`smart`、`group` | `position` | 卡片排序：Herdr 的布局顺序、按紧急程度、或按 agent 分组。默认用 `position`，因为只有它不会在你眼皮下移动 |
 | `list.hide_idle` | `true`、`false` | `false` | 隐藏空闲 agent，同按 `z` |
 | `list.scope` | `all`、`workspace` | `all` | `workspace` 需要 `HERDR_WORKSPACE_ID`，没有则退回 `all` |
@@ -138,6 +138,9 @@ herdr plugin action invoke stop-daemon --plugin herdr-agent-watcher
 | `agent.<id>.color` | `#rrggbb` | 内置 | 覆盖某个 agent 的颜色 |
 | `agent.<id>.label` | 任意字符串 | 内置 | 覆盖它在卡片上的名字 |
 | `agent.<id>.symbol` | 任意字符串 | 内置 | `agent_mark = "symbol"` 时用的标记 |
+
+\* Claude 和 Codex 无需设置就会上报套餐用量。Kimi 只有在启用[用量上报同意](#kimi-用量上报同意)后
+才会上报，因为数据来自网络请求；OpenCode 尚不提供。
 
 设置放在**插件自己的** `config.toml` 里，不是 Herdr 的那个。Herdr 会忽略它不认识的表，
 所以把 `[daemon]` 写进 `~/.config/herdr/config.toml` 不会有任何效果，只会让

@@ -144,7 +144,7 @@ herdr plugin action invoke stop-daemon --plugin herdr-agent-watcher
 | `cards.auto_expand` | `none`、`all` | `none` | カードを最初から展開する |
 | `cards.tool_calls` | `bars`、`jar` | `bars` | コンテキストメーターの描き方 |
 | `cards.trace_lines` | `1`–`20` | `5` | 展開時のトレース本数。範囲外は拒否ではなくクランプ |
-| `cards.plan_usage` | `true`、`false` | `true` | 展開したカードにプラン使用量を表示 |
+| `cards.plan_usage` \* | `true`、`false` | `true` | 展開したカードにプラン使用量を表示 |
 | `list.sort` | `position`、`smart`、`group` | `position` | カードの並び順：Herdr のレイアウト順、緊急度順、エージェントごと。既定が `position` なのは、見ている間に動かない唯一の順序だから |
 | `list.hide_idle` | `true`、`false` | `false` | アイドルを隠す。`z` と同じ |
 | `list.scope` | `all`、`workspace` | `all` | `workspace` は `HERDR_WORKSPACE_ID` が必要。無ければ `all` に戻る |
@@ -152,6 +152,9 @@ herdr plugin action invoke stop-daemon --plugin herdr-agent-watcher
 | `agent.<id>.color` | `#rrggbb` | 組み込み | エージェントの色を上書き |
 | `agent.<id>.label` | 任意の文字列 | 組み込み | カード上の名前を上書き |
 | `agent.<id>.symbol` | 任意の文字列 | 組み込み | `agent_mark = "symbol"` のときの印 |
+
+\* Claude と Codex は設定なしでプラン使用量を報告します。Kimi はネットワーク取得を使うため、
+[使用量レポートへの同意](#kimi-使用量レポートの同意)を有効にした場合だけ報告し、OpenCode はまだ報告しません。
 
 設定は **プラグイン自身の** `config.toml` に置きます。Herdr のものではありません。
 Herdr は認識できないテーブルを無視するため、`~/.config/herdr/config.toml` に `[daemon]` を

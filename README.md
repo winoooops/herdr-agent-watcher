@@ -139,7 +139,7 @@ setting rather than the plugin.
 | `cards.auto_expand` | `none`, `all` | `none` | Start cards expanded |
 | `cards.tool_calls` | `bars`, `jar` | `bars` | How the context meter is drawn |
 | `cards.trace_lines` | `1`–`20` | `5` | Traces per expanded card. Out of range clamps, it does not reject |
-| `cards.plan_usage` | `true`, `false` | `true` | Show plan usage on expanded cards |
+| `cards.plan_usage` \* | `true`, `false` | `true` | Show plan usage on expanded cards |
 | `list.sort` | `position`, `smart`, `group` | `position` | Card order: Herdr's layout, urgency, or grouped by agent. `position` is the default because it is the only one that does not move under you |
 | `list.hide_idle` | `true`, `false` | `false` | Hide idle agents, as `z` does |
 | `list.scope` | `all`, `workspace` | `all` | `workspace` needs `HERDR_WORKSPACE_ID`; without it, falls back to `all` |
@@ -147,6 +147,9 @@ setting rather than the plugin.
 | `agent.<id>.color` | `#rrggbb` | built-in | Override an agent's colour |
 | `agent.<id>.label` | any string | built-in | Override its name on cards |
 | `agent.<id>.symbol` | any string | built-in | Its mark when `agent_mark = "symbol"` |
+
+\* Claude and Codex supply plan usage without setup. Kimi supplies it only after
+[usage consent](#kimi-usage-consent) enables its network fetch; OpenCode does not supply it yet.
 
 Settings live in **the plugin's own** `config.toml` — not Herdr's. Herdr ignores tables it
 does not recognise, so `[daemon]` placed in `~/.config/herdr/config.toml` does nothing
