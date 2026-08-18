@@ -196,6 +196,7 @@ fn view_input<'a>(
         auto_expand: live.auto_expand,
         agent_mark: live.agent_mark,
         tool_calls: live.tool_calls,
+        plan_usage: live.plan_usage,
         theme: live.theme,
         trace_lines: live.trace_lines,
         agents: &cfg.appearances,
@@ -3468,7 +3469,7 @@ mod tests {
     fn every_config_key_reaches_the_view_input_the_shell_builds() {
         let cfg = crate::sidebar::config::Loaded::from_toml(
             "[appearance]\ntheme = \"lumon\"\nagent_mark = \"initial\"\n\n\
-             [cards]\nauto_expand = \"all\"\ntool_calls = \"jar\"\ntrace_lines = 9\n\n\
+             [cards]\nauto_expand = \"all\"\ntool_calls = \"jar\"\ntrace_lines = 9\nplan_usage = false\n\n\
              [list]\nsort = \"group\"\nhide_idle = true\n",
         );
         assert_eq!(cfg.status.problems, 0, "the fixture itself must be valid");
@@ -3481,6 +3482,7 @@ mod tests {
         assert_eq!(v.auto_expand, crate::sidebar::config::AutoExpand::All);
         assert_eq!(v.tool_calls, crate::sidebar::config::ToolCallStyle::Jar);
         assert_eq!(v.trace_lines, 9);
+        assert!(!v.plan_usage);
         assert_eq!(v.sort, crate::sidebar::view::Sort::Group);
         assert!(v.hide_idle);
         assert_eq!(v.cursor, Some("p1"));

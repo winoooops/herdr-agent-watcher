@@ -682,6 +682,7 @@ fn non_default_config_reaches_what_is_drawn() {
         auto_expand: cfg.auto_expand,
         agent_mark: cfg.agent_mark,
         tool_calls: cfg.tool_calls,
+        plan_usage: cfg.plan_usage,
         theme: cfg.theme,
         trace_lines: cfg.trace_lines,
         agents: &cfg.appearances,

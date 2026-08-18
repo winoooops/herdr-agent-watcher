@@ -80,7 +80,8 @@ herdr plugin action invoke open-sidebar --plugin herdr-agent-watcher
 いません（手順は下記）。既定は `prefix+a` で、Herdr の既定プレフィックスなら `ctrl+b` の
 あと `a` です。カードにはエージェントの状態、
 エージェント/モデル、タイトル、コンテキスト使用量、キャッシュヒット率、コスト、ツール呼び出し
-回数、最新 3 件のツールトレースが表示されます。`j`/`k` または PageUp/PageDown でスクロール、
+回数、最新 3 件のツールトレースが表示されます。エージェントが報告している場合、展開した
+カードにはプラン使用量も表示されます。`j`/`k` または PageUp/PageDown でスクロール、
 `o`/`↵` で展開、`z` でアイドル状態のエージェントを隠し、`x` でメニューを開き、`?` で
 カード一覧で使えるキーを表示し、`q`/`Esc` または Ctrl-C で閉じます。各パネル固有の操作は
 それぞれのフッターに表示されます。
@@ -143,6 +144,7 @@ herdr plugin action invoke stop-daemon --plugin herdr-agent-watcher
 | `cards.auto_expand` | `none`、`all` | `none` | カードを最初から展開する |
 | `cards.tool_calls` | `bars`、`jar` | `bars` | コンテキストメーターの描き方 |
 | `cards.trace_lines` | `1`–`20` | `5` | 展開時のトレース本数。範囲外は拒否ではなくクランプ |
+| `cards.plan_usage` | `true`、`false` | `true` | 展開したカードにプラン使用量を表示 |
 | `list.sort` | `position`、`smart`、`group` | `position` | カードの並び順：Herdr のレイアウト順、緊急度順、エージェントごと。既定が `position` なのは、見ている間に動かない唯一の順序だから |
 | `list.hide_idle` | `true`、`false` | `false` | アイドルを隠す。`z` と同じ |
 | `list.scope` | `all`、`workspace` | `all` | `workspace` は `HERDR_WORKSPACE_ID` が必要。無ければ `all` に戻る |

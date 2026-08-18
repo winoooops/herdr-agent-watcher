@@ -77,7 +77,8 @@ herdr plugin action invoke open-sidebar --plugin herdr-agent-watcher
 Each invocation intentionally opens another split. No key opens it until you bind one with
 the steps below; the default is `prefix+a`, which is `ctrl+b` then `a` with Herdr's own
 prefix. Cards show agent state, agent/model, title, context use, cache hit rate, cost, tool
-count, and the three newest tool traces.
+count, and the three newest tool traces. Expanded cards also show plan usage when the agent
+reports it.
 Use `j`/`k` or PageUp/PageDown to scroll, `o`/`↵` to expand, `z` to hide idle agents,
 `x` to open the menu, `?` to list the card-list keys, and `q`/`Esc` or Ctrl-C to close.
 Each panel lists its own controls in its footer.
@@ -138,6 +139,7 @@ setting rather than the plugin.
 | `cards.auto_expand` | `none`, `all` | `none` | Start cards expanded |
 | `cards.tool_calls` | `bars`, `jar` | `bars` | How the context meter is drawn |
 | `cards.trace_lines` | `1`–`20` | `5` | Traces per expanded card. Out of range clamps, it does not reject |
+| `cards.plan_usage` | `true`, `false` | `true` | Show plan usage on expanded cards |
 | `list.sort` | `position`, `smart`, `group` | `position` | Card order: Herdr's layout, urgency, or grouped by agent. `position` is the default because it is the only one that does not move under you |
 | `list.hide_idle` | `true`, `false` | `false` | Hide idle agents, as `z` does |
 | `list.scope` | `all`, `workspace` | `all` | `workspace` needs `HERDR_WORKSPACE_ID`; without it, falls back to `all` |

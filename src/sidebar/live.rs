@@ -19,6 +19,7 @@ pub struct Live {
     pub auto_expand: AutoExpand,
     pub tool_calls: ToolCallStyle,
     pub trace_lines: u8,
+    pub plan_usage: bool,
     pub theme: Theme,
     pub agent_mark: AgentMark,
     /// The daemon's, not the sidebar's. Editable and saveable, but it cannot
@@ -87,6 +88,7 @@ impl Live {
             auto_expand: cfg.auto_expand,
             tool_calls: cfg.tool_calls,
             trace_lines: cfg.trace_lines,
+            plan_usage: cfg.plan_usage,
             theme: cfg.theme,
             agent_mark: cfg.agent_mark,
             interval_ms: daemon_interval_ms,
@@ -116,19 +118,21 @@ pub enum Setting {
     AutoExpand,
     ToolCalls,
     TraceLines,
+    PlanUsage,
     Theme,
     AgentMark,
     IntervalMs,
     PruneAfterDays,
 }
 
-pub const SETTINGS: [Setting; 10] = [
+pub const SETTINGS: [Setting; 11] = [
     Setting::Sort,
     Setting::Scope,
     Setting::HideIdle,
     Setting::AutoExpand,
     Setting::ToolCalls,
     Setting::TraceLines,
+    Setting::PlanUsage,
     Setting::Theme,
     Setting::AgentMark,
     Setting::IntervalMs,
@@ -144,6 +148,7 @@ impl Setting {
             Setting::AutoExpand => "auto expand",
             Setting::ToolCalls => "tool calls",
             Setting::TraceLines => "trace lines",
+            Setting::PlanUsage => "plan usage",
             Setting::Theme => "theme",
             Setting::AgentMark => "agent mark",
             Setting::IntervalMs => "interval ms",
@@ -178,6 +183,7 @@ impl Live {
             }
             .into(),
             Setting::TraceLines => self.trace_lines.to_string(),
+            Setting::PlanUsage => if self.plan_usage { "yes" } else { "no" }.into(),
             Setting::Theme => match self.theme {
                 Theme::Inherit => "inherit",
                 Theme::Lumon => "lumon",
@@ -235,6 +241,7 @@ impl Live {
             }
             // Clamped, not wrapped: a held key must not jump 20 → 1.
             Setting::TraceLines => self.trace_lines = (self.trace_lines + 1).min(20),
+            Setting::PlanUsage => self.plan_usage = !self.plan_usage,
             Setting::IntervalMs => {
                 self.interval_ms = step_ladder(&INTERVALS_MS, self.interval_ms, 1)
             }
@@ -285,6 +292,7 @@ mod tests {
         cfg.sort = Sort::Smart;
         cfg.hide_idle = true;
         cfg.trace_lines = 9;
+        cfg.plan_usage = false;
         cfg.scope = Scope::Workspace;
         cfg.workspace_id = Some("w4".into());
         cfg.prune_after_days = 30;
@@ -293,6 +301,7 @@ mod tests {
         assert_eq!(live.sort, Sort::Smart);
         assert!(live.hide_idle);
         assert_eq!(live.trace_lines, 9);
+        assert!(!live.plan_usage);
         assert_eq!(live.scope, Scope::Workspace);
         assert_eq!(live.workspace.as_deref(), Some("w4"));
         assert_eq!(live.prune_after_days, 30);

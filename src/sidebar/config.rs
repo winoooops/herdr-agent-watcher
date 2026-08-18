@@ -56,6 +56,7 @@ pub struct Loaded {
     pub auto_expand: AutoExpand,
     pub tool_calls: ToolCallStyle,
     pub trace_lines: u8,
+    pub plan_usage: bool,
     pub sort: Sort,
     pub hide_idle: bool,
     pub scope: Scope,
@@ -83,6 +84,7 @@ impl Default for Loaded {
             auto_expand: AutoExpand::default(),
             tool_calls: ToolCallStyle::default(),
             trace_lines: 5,
+            plan_usage: true,
             sort: Sort::default(),
             hide_idle: false,
             scope: Scope::default(),
@@ -273,6 +275,10 @@ impl Loaded {
                     }
                     None => self.problem("invalid value for cards.trace_lines".into()),
                 },
+                "plan_usage" => match val.as_bool() {
+                    Some(enabled) => self.plan_usage = enabled,
+                    None => self.problem("invalid value for cards.plan_usage".into()),
+                },
                 other => self.problem(format!("unknown key cards.{other}")),
             }
         }
@@ -429,6 +435,7 @@ mod tests {
         assert_eq!(l.status.problems, 0);
         assert_eq!(l.sort, crate::sidebar::select::Sort::Position);
         assert!(!l.hide_idle);
+        assert!(l.plan_usage);
     }
 
     #[test]
@@ -595,6 +602,15 @@ mod tests {
         let l = load_str("[cards]\ntrace_lines = 99\n");
         assert_eq!(l.trace_lines, 20);
         assert_eq!(l.status.problems, 1);
+    }
+
+    #[test]
+    fn plan_usage_defaults_on_and_reads_a_boolean() {
+        assert!(load_str("").plan_usage);
+        assert!(!load_str("[cards]\nplan_usage = false\n").plan_usage);
+        let invalid = load_str("[cards]\nplan_usage = \"no\"\n");
+        assert!(invalid.plan_usage, "a bad value falls back to on");
+        assert_eq!(invalid.status.problems, 1);
     }
 
     #[test]

@@ -75,7 +75,8 @@ herdr plugin action invoke open-sidebar --plugin herdr-agent-watcher
 每次调用都会**有意**新开一个分屏。在你绑定之前它没有快捷键 —— 绑定步骤见下文；默认是
 `prefix+a`，配合 Herdr 自身的默认前缀就是先按 `ctrl+b` 再按 `a`。
 卡片显示 agent 状态、agent/模型、标题、上下文用量、
-缓存命中率、成本、工具调用数，以及最近三条工具调用记录。`j`/`k` 或 PageUp/PageDown 滚动，
+缓存命中率、成本、工具调用数，以及最近三条工具调用记录。agent 有上报时，展开的卡片还会显示
+套餐用量。`j`/`k` 或 PageUp/PageDown 滚动，
 `o`/`↵` 展开，`z` 隐藏空闲 agent，`x` 打开菜单，`?` 列出卡片列表可用的按键，
 `q`/`Esc` 或 Ctrl-C 关闭。各面板自己的按键会显示在各自的页脚中。
 
@@ -129,6 +130,7 @@ herdr plugin action invoke stop-daemon --plugin herdr-agent-watcher
 | `cards.auto_expand` | `none`、`all` | `none` | 卡片默认展开 |
 | `cards.tool_calls` | `bars`、`jar` | `bars` | 上下文用量条的画法 |
 | `cards.trace_lines` | `1`–`20` | `5` | 展开后显示几条记录。超范围是夹到边界，不是拒绝 |
+| `cards.plan_usage` | `true`、`false` | `true` | 在展开的卡片上显示套餐用量 |
 | `list.sort` | `position`、`smart`、`group` | `position` | 卡片排序：Herdr 的布局顺序、按紧急程度、或按 agent 分组。默认用 `position`，因为只有它不会在你眼皮下移动 |
 | `list.hide_idle` | `true`、`false` | `false` | 隐藏空闲 agent，同按 `z` |
 | `list.scope` | `all`、`workspace` | `all` | `workspace` 需要 `HERDR_WORKSPACE_ID`，没有则退回 `all` |

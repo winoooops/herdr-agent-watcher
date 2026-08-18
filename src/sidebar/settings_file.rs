@@ -17,6 +17,7 @@ fn table_and_key(setting: Setting) -> (&'static str, &'static str) {
         Setting::AutoExpand => ("cards", "auto_expand"),
         Setting::ToolCalls => ("cards", "tool_calls"),
         Setting::TraceLines => ("cards", "trace_lines"),
+        Setting::PlanUsage => ("cards", "plan_usage"),
         Setting::Theme => ("appearance", "theme"),
         Setting::AgentMark => ("appearance", "agent_mark"),
         // The daemon's table. The sidebar's loader skips it entirely, which is
@@ -29,6 +30,7 @@ fn table_and_key(setting: Setting) -> (&'static str, &'static str) {
 fn item_for(live: &Live, setting: Setting) -> Item {
     match setting {
         Setting::HideIdle => value(live.hide_idle),
+        Setting::PlanUsage => value(live.plan_usage),
         Setting::TraceLines => value(i64::from(live.trace_lines)),
         Setting::IntervalMs => value(i64::from(live.interval_ms)),
         Setting::PruneAfterDays => value(i64::from(live.prune_after_days)),
@@ -228,6 +230,20 @@ sort = \"position\"
     }
 
     #[test]
+    fn changing_plan_usage_writes_only_that_sidebar_setting() {
+        let mut live = live_with(
+            crate::sidebar::select::Sort::Position,
+            crate::sidebar::config::Scope::All,
+        );
+        live.plan_usage = false;
+        let out = edit(EXISTING, &live, &[Setting::PlanUsage]).expect("edit");
+
+        assert!(out.starts_with(EXISTING), "{out}");
+        assert!(out.ends_with("[cards]\nplan_usage = false\n"), "{out}");
+        assert!(!crate::sidebar::config::Loaded::from_toml(&out).plan_usage);
+    }
+
+    #[test]
     fn an_untouched_setting_is_not_written_at_all() {
         use crate::sidebar::select::Sort;
         let live = live_with(Sort::Smart, crate::sidebar::config::Scope::All);
@@ -237,6 +253,7 @@ sort = \"position\"
             "an unchanged row must not be inserted: {out}"
         );
         assert!(!out.contains("trace_lines"), "{out}");
+        assert!(!out.contains("plan_usage"), "{out}");
     }
 
     #[test]

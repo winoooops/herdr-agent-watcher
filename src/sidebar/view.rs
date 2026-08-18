@@ -22,6 +22,7 @@ pub struct CardCtx<'a> {
     pub mark: AgentMark,
     pub tool_calls: ToolCallStyle,
     pub trace_lines: u8,
+    pub plan_usage: bool,
     pub cwd_label: Option<&'a str>,
     pub width: u16,
     pub selected: bool,
@@ -583,6 +584,50 @@ fn jar_rows(top: &[(String, u64)], total_reported: u64, width: u16) -> Vec<Line>
     vec![band, legend]
 }
 
+fn plan_usage_rows(t: &PaneTelemetry, cx: &CardCtx<'_>) -> Vec<Line> {
+    if !cx.plan_usage {
+        return Vec::new();
+    }
+    let Some(limits) = t
+        .status
+        .as_ref()
+        .and_then(|status| status.get("rateLimits"))
+    else {
+        return Vec::new();
+    };
+    // At the minimum width this leaves seven cells for the gauge and reserves
+    // enough room for ` 99+% · resets 99d+`.
+    let cells = GAUGE_MAX_CELLS.min(cx.width.saturating_sub(27)).max(6);
+
+    [("5h", "fiveHour"), ("7d", "sevenDay")]
+        .into_iter()
+        .filter_map(|(label, key)| {
+            let window = limits.get(key)?;
+            let resets_at = window.get("resetsAt")?.as_u64()?;
+            let pct = window.get("usedPercentage")?.as_f64()?;
+            if resets_at == 0 || !pct.is_finite() || pct < 0.0 {
+                return None;
+            }
+            let used = (pct.clamp(0.0, 100.0) * 1_000.0).round() as u64;
+            Some(label_row(
+                label,
+                vec![
+                    Span::new(
+                        bars::gauge(bars::gauge_pct(pct), used, 100_000, cells),
+                        Style::semantic(Role::Body, Semantic::Accent),
+                    ),
+                    Span::body(format!(
+                        " {} · resets {}",
+                        format::percent(pct),
+                        format::age(cx.now_unix_ms, resets_at.saturating_mul(1_000))
+                    )),
+                ],
+                cx.width,
+            ))
+        })
+        .collect()
+}
+
 pub fn expanded_card(t: &PaneTelemetry, cx: &CardCtx<'_>) -> Vec<Line> {
     let width = cx.width;
     let mut lines = vec![header(t, cx, true), task_line(t, cx)];
@@ -646,6 +691,12 @@ pub fn expanded_card(t: &PaneTelemetry, cx: &CardCtx<'_>) -> Vec<Line> {
         }
     }
     lines.push(blank());
+
+    let usage = plan_usage_rows(t, cx);
+    if !usage.is_empty() {
+        lines.extend(usage);
+        lines.push(blank());
+    }
 
     match t
         .status
@@ -793,6 +844,7 @@ pub struct ViewInput<'a> {
     pub auto_expand: crate::sidebar::config::AutoExpand,
     pub agent_mark: crate::sidebar::config::AgentMark,
     pub tool_calls: crate::sidebar::config::ToolCallStyle,
+    pub plan_usage: bool,
     pub theme: crate::sidebar::config::Theme,
     pub trace_lines: u8,
     pub agents: &'a AgentAppearances,
@@ -845,6 +897,7 @@ pub fn render(
             mark: view.agent_mark,
             tool_calls: view.tool_calls,
             trace_lines: view.trace_lines,
+            plan_usage: view.plan_usage,
             cwd_label: labels.get(id.as_str()).map(String::as_str),
             width,
             selected: view.cursor == Some(id.as_str()),
@@ -1006,6 +1059,7 @@ mod tests {
             mark: AgentMark::default(),
             tool_calls: crate::sidebar::config::ToolCallStyle::default(),
             trace_lines: 5,
+            plan_usage: true,
             cwd_label: None,
             width: width.max(MIN_WIDTH),
             selected: false,
@@ -1302,6 +1356,92 @@ mod tests {
             e[2], "  Sonnet 4.5",
             "line 3 diverges: model, not the gauge"
         );
+    }
+
+    #[test]
+    fn an_expanded_card_draws_both_real_plan_windows() {
+        let app = appearances();
+        let mut t = claude_expanded();
+        t.status.as_mut().expect("status")["rateLimits"] = json!({
+            "fiveHour": {"usedPercentage": 19.0, "resetsAt": 1_700_003_600_u64},
+            "sevenDay": {"usedPercentage": 7.0, "resetsAt": 1_700_604_800_u64}
+        });
+        let mut cx = ctx(&app, W);
+        cx.now_unix_ms = 1_700_000_000_000;
+        let lines = plain(&expanded_card(&t, &cx));
+        let five = lines
+            .iter()
+            .find(|line| line.trim_start().starts_with("5h"))
+            .expect("5h window");
+        let seven = lines
+            .iter()
+            .find(|line| line.trim_start().starts_with("7d"))
+            .expect("7d window");
+
+        assert!(five.contains("19%") && five.contains("resets 1h"), "{five}");
+        assert!(
+            seven.contains("7%") && seven.contains("resets 7d"),
+            "{seven}"
+        );
+    }
+
+    #[test]
+    fn a_zero_reset_placeholder_draws_no_plan_window() {
+        let app = appearances();
+        let mut t = claude_expanded();
+        t.status.as_mut().expect("status")["rateLimits"] = json!({
+            "fiveHour": {"usedPercentage": 0.0, "resetsAt": 0},
+            "sevenDay": {"usedPercentage": 0.0, "resetsAt": 0}
+        });
+        let lines = plain(&expanded_card(&t, &ctx(&app, W)));
+
+        assert!(
+            !lines
+                .iter()
+                .any(|line| matches!(line.split_whitespace().next(), Some("5h" | "7d"))),
+            "the keys exist, but resetsAt=0 means placeholder: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn a_codex_shaped_status_draws_only_its_real_five_hour_window() {
+        let app = appearances();
+        let mut t = claude_expanded();
+        t.agent = Some("codex".into());
+        t.status.as_mut().expect("status")["rateLimits"] = json!({
+            "fiveHour": {"usedPercentage": 22.0, "resetsAt": 3_600},
+            "sevenDay": null
+        });
+        let lines = plain(&expanded_card(&t, &ctx(&app, W)));
+
+        assert!(lines
+            .iter()
+            .any(|line| line.contains("5h") && line.contains("22%")));
+        assert!(!lines.iter().any(|line| line.trim_start().starts_with("7d")));
+    }
+
+    #[test]
+    fn plan_usage_can_be_hidden_and_never_reaches_a_compact_card() {
+        let app = appearances();
+        let mut t = claude_expanded();
+        t.status.as_mut().expect("status")["rateLimits"] = json!({
+            "fiveHour": {"usedPercentage": 19.0, "resetsAt": 3_600},
+            "sevenDay": {"usedPercentage": 7.0, "resetsAt": 604_800}
+        });
+        let mut cx = ctx(&app, W);
+        cx.plan_usage = false;
+        let hidden = plain(&expanded_card(&t, &cx));
+        cx.plan_usage = true;
+        let compact = plain(&compact_card(&t, &cx));
+
+        for lines in [hidden, compact] {
+            assert!(
+                !lines
+                    .iter()
+                    .any(|line| matches!(line.split_whitespace().next(), Some("5h" | "7d"))),
+                "plan usage must stay off these cards: {lines:?}"
+            );
+        }
     }
 
     #[test]
@@ -1914,6 +2054,7 @@ mod tests {
             auto_expand: crate::sidebar::config::AutoExpand::default(),
             agent_mark: AgentMark::default(),
             tool_calls: crate::sidebar::config::ToolCallStyle::default(),
+            plan_usage: true,
             theme: crate::sidebar::config::Theme::default(),
             trace_lines: 5,
             agents,
