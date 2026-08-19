@@ -558,6 +558,7 @@ pub fn cli_generate_scripts(args: &[String]) -> i32 {
     match crate::agents::bridge_scripts::generate(
         Path::new(&bin),
         Path::new(&aw),
+        &["claude-bridge"],
         Path::new(&socket),
         get("--downstream").as_deref(),
     ) {
@@ -569,15 +570,14 @@ pub fn cli_generate_scripts(args: &[String]) -> i32 {
     }
 }
 
-fn bridge_paths() -> Result<(PathBuf, PathBuf, PathBuf, PathBuf), String> {
-    let state = resolve_state_dir(None)?;
+fn bridge_paths(state: &Path) -> (PathBuf, PathBuf, PathBuf, PathBuf) {
     let bin = state.join("bin");
-    Ok((
+    (
         bin.join("statusline.sh"),
         bin.join("attention.sh"),
         state.join("bridge-install.json"),
         bin,
-    ))
+    )
 }
 
 /// A `claude` interceptor left in our own `bin/` by the removed PATH shim.
@@ -619,6 +619,69 @@ fn remove_stale_shim(bin: &Path) {
     }
 }
 
+fn install_at(
+    settings: &Path,
+    executable: &Path,
+    argument_prefix: &[&str],
+    state_dir: &Path,
+) -> Result<(), String> {
+    let (statusline, attention, sidecar, bin) = bridge_paths(state_dir);
+    let current = std::fs::read_to_string(settings)
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok());
+    let current_command = current
+        .as_ref()
+        .and_then(|value| value["statusLine"]["command"].as_str());
+    let downstream = if current_command
+        .is_some_and(|command| command.contains(&*statusline.to_string_lossy()))
+    {
+        let record = std::fs::read_to_string(&sidecar)
+            .map_err(|error| {
+                format!("bridge is installed but its install record is unavailable: {error}")
+            })
+            .and_then(|text| {
+                serde_json::from_str::<crate::agents::bridge_settings::Sidecar>(&text)
+                    .map_err(|error| format!("bridge install record is unreadable: {error}"))
+            })?;
+        record
+            .previous_status_line
+            .and_then(|value| value["command"].as_str().map(str::to_string))
+    } else {
+        current_command.map(str::to_string)
+    };
+    crate::agents::bridge_scripts::generate(
+        &bin,
+        executable,
+        argument_prefix,
+        &crate::daemon::DaemonOptions::new(state_dir).state_socket_path(),
+        downstream.as_deref(),
+    )?;
+    remove_stale_shim(&bin);
+    crate::agents::bridge_settings::enable(
+        settings,
+        &sidecar,
+        &statusline.to_string_lossy(),
+        &attention.to_string_lossy(),
+    )
+}
+
+pub fn install_claude_bridge(
+    executable: &Path,
+    argument_prefix: &[&str],
+    state_dir: &Path,
+) -> Result<PathBuf, String> {
+    let settings = crate::agents::bridge_settings::user_settings_path()?;
+    install_at(&settings, executable, argument_prefix, state_dir)?;
+    Ok(settings)
+}
+
+pub fn uninstall_claude_bridge(state_dir: &Path) -> Result<PathBuf, String> {
+    let settings = crate::agents::bridge_settings::user_settings_path()?;
+    let (_, _, sidecar, _) = bridge_paths(state_dir);
+    crate::agents::bridge_settings::disable(&settings, &sidecar)?;
+    Ok(settings)
+}
+
 pub fn cli_enable(_args: &[String]) -> i32 {
     let settings = match crate::agents::bridge_settings::user_settings_path() {
         Ok(path) => path,
@@ -627,8 +690,8 @@ pub fn cli_enable(_args: &[String]) -> i32 {
             return 1;
         }
     };
-    let (statusline, attention, sidecar, bin) = match bridge_paths() {
-        Ok(paths) => paths,
+    let state = match resolve_state_dir(None) {
+        Ok(state) => state,
         Err(error) => {
             eprintln!("{error}");
             return 1;
@@ -641,60 +704,12 @@ pub fn cli_enable(_args: &[String]) -> i32 {
             return 1;
         }
     };
-    let current = std::fs::read_to_string(&settings)
-        .ok()
-        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok());
-    let current_command = current
-        .as_ref()
-        .and_then(|value| value["statusLine"]["command"].as_str());
-    let downstream = if current_command
-        .is_some_and(|command| command.contains(&*statusline.to_string_lossy()))
-    {
-        let record = match std::fs::read_to_string(&sidecar)
-            .map_err(|error| {
-                format!("bridge is installed but its install record is unavailable: {error}")
-            })
-            .and_then(|text| {
-                serde_json::from_str::<crate::agents::bridge_settings::Sidecar>(&text)
-                    .map_err(|error| format!("bridge install record is unreadable: {error}"))
-            }) {
-            Ok(record) => record,
-            Err(error) => {
-                eprintln!("{error}");
-                return 1;
-            }
-        };
-        record
-            .previous_status_line
-            .and_then(|value| value["command"].as_str().map(str::to_string))
-    } else {
-        current_command.map(str::to_string)
-    };
-    if let Err(error) = crate::agents::bridge_scripts::generate(
-        &bin,
-        &me,
-        &crate::daemon::state_socket_path(),
-        downstream.as_deref(),
-    ) {
+    if let Err(error) = install_at(&settings, &me, &["claude-bridge"], &state) {
         eprintln!("{error}");
         return 1;
     }
-    remove_stale_shim(&bin);
-    match crate::agents::bridge_settings::enable(
-        &settings,
-        &sidecar,
-        &statusline.to_string_lossy(),
-        &attention.to_string_lossy(),
-    ) {
-        Ok(()) => {
-            println!("{}", settings.display());
-            0
-        }
-        Err(error) => {
-            eprintln!("{error}");
-            1
-        }
-    }
+    println!("{}", settings.display());
+    0
 }
 
 pub fn cli_disable(_args: &[String]) -> i32 {
@@ -705,13 +720,14 @@ pub fn cli_disable(_args: &[String]) -> i32 {
             return 1;
         }
     };
-    let (_, _, sidecar, _) = match bridge_paths() {
-        Ok(paths) => paths,
+    let state = match resolve_state_dir(None) {
+        Ok(state) => state,
         Err(error) => {
             eprintln!("{error}");
             return 1;
         }
     };
+    let (_, _, sidecar, _) = bridge_paths(&state);
     match crate::agents::bridge_settings::disable(&settings, &sidecar) {
         Ok(()) => {
             println!("{}", settings.display());
@@ -730,7 +746,8 @@ pub fn cli_disable(_args: &[String]) -> i32 {
 pub(crate) fn doctor_report() -> Result<crate::agents::doctor::Report, String> {
     use crate::agents::doctor;
     let settings = crate::agents::bridge_settings::user_settings_path()?;
-    let (statusline, attention, _, _) = bridge_paths()?;
+    let state = resolve_state_dir(None)?;
+    let (statusline, attention, _, _) = bridge_paths(&state);
     let me = std::env::current_exe().unwrap_or_default();
     let socket = crate::daemon::state_socket_path();
     let client = crate::herdr::client::HerdrClient::from_env();
@@ -1032,6 +1049,29 @@ mod tests {
             err.contains("--state-dir"),
             "the error must name the fix, got {err:?}"
         );
+    }
+
+    #[test]
+    fn bridge_install_uses_a_custom_argument_prefix() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let state = root.path().join("state");
+        let claude = root.path().join("claude");
+        with_env(
+            &[("CLAUDE_CONFIG_DIR", Some(claude.into_os_string()))],
+            || {
+                install_claude_bridge(
+                    Path::new("/opt/Vimeflow Terminal/herdr"),
+                    &["watcher", "claude-bridge"],
+                    &state,
+                )
+                .expect("install");
+            },
+        );
+        let statusline = std::fs::read_to_string(state.join("bin/statusline.sh")).expect("read");
+        assert!(statusline.contains("'/opt/Vimeflow Terminal/herdr' watcher claude-bridge --write"));
+        let attention = std::fs::read_to_string(state.join("bin/attention.sh")).expect("read");
+        assert!(attention
+            .contains("'/opt/Vimeflow Terminal/herdr' watcher claude-bridge --write-attention"));
     }
 
     #[test]

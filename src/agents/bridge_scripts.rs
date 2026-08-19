@@ -11,9 +11,22 @@ fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', r"'\''"))
 }
 
+fn shell_arg(value: &str) -> String {
+    if !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        value.to_string()
+    } else {
+        shell_quote(value)
+    }
+}
+
 pub(crate) fn generate(
     bin_dir: &Path,
     agent_watcher: &Path,
+    argument_prefix: &[&str],
     state_socket: &Path,
     downstream: Option<&str>,
 ) -> Result<Scripts, String> {
@@ -21,6 +34,10 @@ pub(crate) fn generate(
         .map_err(|error| format!("create {}: {error}", bin_dir.display()))?;
     let statusline = bin_dir.join("statusline.sh");
     let attention = bin_dir.join("attention.sh");
+    let invocation = std::iter::once(shell_quote(&agent_watcher.to_string_lossy()))
+        .chain(argument_prefix.iter().map(|argument| shell_arg(argument)))
+        .collect::<Vec<_>>()
+        .join(" ");
 
     crate::agents::claude_bridge::write_atomic(
         &statusline,
@@ -30,14 +47,14 @@ pub(crate) fn generate(
              set +e +u\n\
              payload=$(cat)\n\
              if [ -n \"${{HERDR_PANE_ID:-}}\" ]; then\n\
-             \x20 printf '%s' \"$payload\" | {aw} claude-bridge --write \\\n\
+             \x20 printf '%s' \"$payload\" | {invocation} --write \\\n\
              \x20   --pane \"$HERDR_PANE_ID\" --socket {socket} >/dev/null 2>&1\n\
              fi\n\
              downstream={baked}\n\
              if [ \"${{1:-}}\" = '--' ]; then downstream=${{2-}}; fi\n\
              [ -n \"$downstream\" ] && printf '%s' \"$payload\" | sh -c \"$downstream\"\n\
              exit 0\n",
-            aw = shell_quote(&agent_watcher.to_string_lossy()),
+            invocation = invocation,
             socket = shell_quote(&state_socket.to_string_lossy()),
             baked = shell_quote(downstream.unwrap_or_default()),
         ),
@@ -52,12 +69,12 @@ pub(crate) fn generate(
              set +e +u\n\
              payload=$(cat)\n\
              if [ -n \"${{HERDR_PANE_ID:-}}\" ]; then\n\
-             \x20 printf '%s' \"$payload\" | {aw} claude-bridge --write-attention \\\n\
+             \x20 printf '%s' \"$payload\" | {invocation} --write-attention \\\n\
              \x20   --pane \"$HERDR_PANE_ID\" --socket {socket} \\\n\
              \x20   --event \"${{1:-Unknown}}\" --mode \"${{2:-append}}\" >/dev/null 2>&1\n\
              fi\n\
              exit 0\n",
-            aw = shell_quote(&agent_watcher.to_string_lossy()),
+            invocation = invocation,
             socket = shell_quote(&state_socket.to_string_lossy()),
         ),
         0o755,
