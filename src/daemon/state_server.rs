@@ -1,9 +1,10 @@
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::RecvTimeoutError;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
@@ -13,7 +14,8 @@ use crate::daemon::store::TelemetryStore;
 pub const HEARTBEAT_MS: u64 = 5_000;
 
 pub struct StateServer {
-    _thread: std::thread::JoinHandle<()>,
+    shutdown: Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
 }
 
 impl StateServer {
@@ -22,7 +24,16 @@ impl StateServer {
         store: Arc<TelemetryStore>,
         routes: crate::daemon::routes::BridgeRoutes,
     ) -> std::io::Result<Self> {
-        Self::start_with_heartbeat(path, store, routes, HEARTBEAT_MS)
+        Self::start_with_shutdown(path, store, routes, Arc::new(AtomicBool::new(false)))
+    }
+
+    pub(crate) fn start_with_shutdown(
+        path: &Path,
+        store: Arc<TelemetryStore>,
+        routes: crate::daemon::routes::BridgeRoutes,
+        shutdown: Arc<AtomicBool>,
+    ) -> std::io::Result<Self> {
+        Self::start_inner(path, store, routes, HEARTBEAT_MS, shutdown)
     }
 
     fn start_with_heartbeat(
@@ -30,6 +41,22 @@ impl StateServer {
         store: Arc<TelemetryStore>,
         routes: crate::daemon::routes::BridgeRoutes,
         heartbeat_ms: u64,
+    ) -> std::io::Result<Self> {
+        Self::start_inner(
+            path,
+            store,
+            routes,
+            heartbeat_ms,
+            Arc::new(AtomicBool::new(false)),
+        )
+    }
+
+    fn start_inner(
+        path: &Path,
+        store: Arc<TelemetryStore>,
+        routes: crate::daemon::routes::BridgeRoutes,
+        heartbeat_ms: u64,
+        shutdown: Arc<AtomicBool>,
     ) -> std::io::Result<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -40,17 +67,54 @@ impl StateServer {
             Err(error) => return Err(error),
         }
         let listener = UnixListener::bind(path)?;
+        listener.set_nonblocking(true)?;
+        let socket = path.to_path_buf();
+        let stop = shutdown.clone();
         let thread = std::thread::spawn(move || {
-            for stream in listener.incoming() {
-                let Ok(stream) = stream else {
-                    break;
-                };
-                let store = store.clone();
-                let routes = routes.clone();
-                std::thread::spawn(move || handle_connection(stream, store, routes, heartbeat_ms));
+            let mut workers = Vec::new();
+            while !stop.load(Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        let _ = stream.set_nonblocking(false);
+                        let store = store.clone();
+                        let routes = routes.clone();
+                        let stop = stop.clone();
+                        workers.push(std::thread::spawn(move || {
+                            handle_connection(stream, store, routes, heartbeat_ms, stop)
+                        }));
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(_) => break,
+                }
+                let mut index = 0;
+                while index < workers.len() {
+                    if workers[index].is_finished() {
+                        let _ = workers.swap_remove(index).join();
+                    } else {
+                        index += 1;
+                    }
+                }
             }
+            for worker in workers {
+                let _ = worker.join();
+            }
+            let _ = std::fs::remove_file(socket);
         });
-        Ok(Self { _thread: thread })
+        Ok(Self {
+            shutdown,
+            thread: Some(thread),
+        })
+    }
+}
+
+impl Drop for StateServer {
+    fn drop(&mut self) {
+        self.shutdown.store(true, Ordering::Relaxed);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
     }
 }
 
@@ -59,8 +123,10 @@ fn handle_connection(
     store: Arc<TelemetryStore>,
     routes: crate::daemon::routes::BridgeRoutes,
     heartbeat_ms: u64,
+    shutdown: Arc<AtomicBool>,
 ) {
     let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
+    let _ = stream.set_write_timeout(Some(Duration::from_millis(500)));
     let Ok(reader_stream) = stream.try_clone() else {
         return;
     };
@@ -121,8 +187,13 @@ fn handle_connection(
             )
             .is_ok()
             {
-                loop {
-                    match receiver.recv_timeout(Duration::from_millis(heartbeat_ms)) {
+                let heartbeat = Duration::from_millis(heartbeat_ms);
+                let mut next_heartbeat = Instant::now() + heartbeat;
+                while !shutdown.load(Ordering::Relaxed) {
+                    let timeout = next_heartbeat
+                        .saturating_duration_since(Instant::now())
+                        .min(Duration::from_millis(100));
+                    match receiver.recv_timeout(timeout) {
                         Ok(update) => {
                             if write_json_line(
                                 &mut stream,
@@ -138,12 +209,15 @@ fn handle_connection(
                             }
                         }
                         Err(RecvTimeoutError::Timeout) => {
-                            if stream
-                                .write_all(b"\n")
-                                .and_then(|_| stream.flush())
-                                .is_err()
-                            {
-                                break;
+                            if Instant::now() >= next_heartbeat {
+                                if stream
+                                    .write_all(b"\n")
+                                    .and_then(|_| stream.flush())
+                                    .is_err()
+                                {
+                                    break;
+                                }
+                                next_heartbeat = Instant::now() + heartbeat;
                             }
                         }
                         Err(RecvTimeoutError::Disconnected) => break,

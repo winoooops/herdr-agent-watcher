@@ -3,10 +3,7 @@
 use std::path::{Path, PathBuf};
 
 pub fn consent_path() -> PathBuf {
-    std::env::var_os("HERDR_PLUGIN_STATE_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
-        .join("kimi-usage-consent.json")
+    crate::daemon::DaemonOptions::from_env().kimi_consent_path()
 }
 
 pub fn set_and_persist(path: &Path, enabled: bool) -> std::io::Result<()> {

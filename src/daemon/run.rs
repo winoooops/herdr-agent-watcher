@@ -49,7 +49,7 @@ fn spawn_sweeper(
     root: std::path::PathBuf,
     retention: Duration,
     stop: Arc<std::sync::atomic::AtomicBool>,
-) {
+) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         while !stop.load(std::sync::atomic::Ordering::Relaxed) {
             let (removed, bytes) =
@@ -64,20 +64,9 @@ fn spawn_sweeper(
                 );
             }
             // In slices, so shutdown does not wait a day to be noticed.
-            let wake = std::time::Instant::now() + SWEEP_EVERY;
-            while std::time::Instant::now() < wake
-                && !stop.load(std::sync::atomic::Ordering::Relaxed)
-            {
-                std::thread::sleep(Duration::from_secs(1));
-            }
+            crate::daemon::singleton::sleep_interruptible(&stop, SWEEP_EVERY);
         }
-    });
-}
-
-fn app_data_dir() -> std::path::PathBuf {
-    std::env::var_os("HERDR_PLUGIN_STATE_DIR")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
+    })
 }
 
 /// Identity BEFORE the watcher starts, and no half-bound card if it does not (§1.3a).
@@ -143,12 +132,59 @@ fn rebind(
     bound
 }
 
+pub struct DaemonHandle {
+    shutdown: Arc<std::sync::atomic::AtomicBool>,
+    thread: Option<std::thread::JoinHandle<i32>>,
+}
+
+impl DaemonHandle {
+    pub fn shutdown(&self) {
+        self.shutdown
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn join(mut self) -> std::thread::Result<i32> {
+        self.thread
+            .take()
+            .expect("daemon thread already joined")
+            .join()
+    }
+}
+
+impl Drop for DaemonHandle {
+    fn drop(&mut self) {
+        self.shutdown
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+pub fn start(options: crate::daemon::DaemonOptions) -> DaemonHandle {
+    let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stop = shutdown.clone();
+    let thread = std::thread::spawn(move || run_with_options(options, stop));
+    DaemonHandle {
+        shutdown,
+        thread: Some(thread),
+    }
+}
+
 pub fn run() -> i32 {
-    let Some(singleton) = crate::daemon::singleton::claim() else {
+    start(crate::daemon::DaemonOptions::from_env())
+        .join()
+        .unwrap_or(1)
+}
+
+fn run_with_options(
+    options: crate::daemon::DaemonOptions,
+    shutdown: Arc<std::sync::atomic::AtomicBool>,
+) -> i32 {
+    let Some(singleton) = crate::daemon::singleton::claim_with(&options, shutdown.clone()) else {
         return 1;
     };
-    let mut consent =
-        crate::daemon::consent::ConsentReloader::new(crate::agents::consent::consent_path());
+    let mut consent = crate::daemon::consent::ConsentReloader::new(options.kimi_consent_path());
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
@@ -159,10 +195,11 @@ pub fn run() -> i32 {
     let routes = crate::daemon::routes::BridgeRoutes::with_watchers(
         crate::agent::adapter::AgentWatcherState::default(),
     );
-    let _state_server = match crate::daemon::state_server::StateServer::start(
-        &crate::daemon::state_socket_path(),
+    let _state_server = match crate::daemon::state_server::StateServer::start_with_shutdown(
+        &options.state_socket_path(),
         store.clone(),
         routes.clone(),
+        shutdown.clone(),
     ) {
         Ok(server) => server,
         Err(error) => {
@@ -179,7 +216,7 @@ pub fn run() -> i32 {
         pty_state.clone(),
         events,
         runtime.handle().clone(),
-        app_data_dir(),
+        options.daemon_data_dir(),
         routes,
     ))]);
     let mut bindings = Bindings::default();
@@ -196,10 +233,17 @@ pub fn run() -> i32 {
         // on.
         log::error!("[daemon] config.toml: {problem}");
     }
-    if let Some(retention) = crate::daemon::config::DaemonConfig::load().prune_after {
-        spawn_sweeper(app_data_dir(), retention, singleton.shutdown.clone());
-    }
+    let sweeper = crate::daemon::config::DaemonConfig::load()
+        .prune_after
+        .map(|retention| {
+            spawn_sweeper(
+                options.daemon_data_dir(),
+                retention,
+                singleton.shutdown.clone(),
+            )
+        });
 
+    let mut herdr_unavailable = false;
     while !singleton
         .shutdown
         .load(std::sync::atomic::Ordering::Relaxed)
@@ -284,13 +328,22 @@ pub fn run() -> i32 {
             }
             Err(HerdrClientError::Connect { .. }) => {
                 log::info!("[daemon] herdr unavailable; exiting");
-                return 0;
+                herdr_unavailable = true;
+                break;
             }
             Err(error) => log::warn!("[daemon] pane.list failed: {error}"),
         }
         crate::daemon::singleton::sleep_interruptible(&singleton.shutdown, interval);
     }
-    log::info!("[daemon] shutdown requested; exiting");
+    singleton
+        .shutdown
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    if let Some(sweeper) = sweeper {
+        let _ = sweeper.join();
+    }
+    if !herdr_unavailable {
+        log::info!("[daemon] shutdown requested; exiting");
+    }
     0
 }
 
@@ -376,6 +429,105 @@ mod startup_config_tests {
             ],
             || assert_eq!(startup_config().0, Duration::from_millis(5000)),
         );
+    }
+}
+
+#[cfg(test)]
+mod service_tests {
+    use super::*;
+    use crate::test_env::with_env;
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::{UnixListener, UnixStream};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    fn wait_for(mut condition: impl FnMut() -> bool) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while std::time::Instant::now() < deadline {
+            if condition() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("timed out waiting for daemon state");
+    }
+
+    #[test]
+    fn start_stop_start_reuses_one_root_without_leaks() {
+        let temporary = tempfile::tempdir().expect("tempdir");
+        let herdr_socket = temporary.path().join("herdr.sock");
+        let listener = UnixListener::bind(&herdr_socket).expect("bind fake herdr");
+        listener.set_nonblocking(true).expect("nonblocking");
+        let fake_shutdown = Arc::new(AtomicBool::new(false));
+        let fake_stop = fake_shutdown.clone();
+        let fake = std::thread::spawn(move || {
+            while !fake_stop.load(Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        let _ = stream.set_nonblocking(false);
+                        let mut request = String::new();
+                        if BufReader::new(stream.try_clone().expect("clone"))
+                            .read_line(&mut request)
+                            .is_err()
+                        {
+                            continue;
+                        }
+                        let request: serde_json::Value =
+                            serde_json::from_str(&request).expect("request");
+                        let mut stream = stream;
+                        let response = serde_json::json!({
+                            "id": request["id"],
+                            "result": { "panes": [] },
+                        });
+                        let _ = writeln!(stream, "{response}");
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        let state = temporary.path().join("state");
+        let config = temporary.path().join("config");
+        std::fs::create_dir_all(&config).expect("config dir");
+        std::fs::write(config.join("config.toml"), "[daemon]\ninterval_ms = 25\n").expect("config");
+
+        with_env(
+            &[
+                ("HERDR_SOCKET_PATH", Some(herdr_socket.into_os_string())),
+                ("HERDR_PLUGIN_CONFIG_DIR", Some(config.into_os_string())),
+                ("AGENT_WATCHER_INTERVAL_MS", None),
+            ],
+            || {
+                let options = crate::daemon::DaemonOptions::new(&state);
+                for _ in 0..2 {
+                    let handle = start(options.clone());
+                    wait_for(|| {
+                        options.control_socket_path().exists()
+                            && options.state_socket_path().exists()
+                    });
+
+                    let mut subscriber =
+                        UnixStream::connect(options.state_socket_path()).expect("subscribe");
+                    subscriber
+                        .write_all(b"{\"method\":\"subscribe\"}\n")
+                        .expect("request");
+                    let mut hello = String::new();
+                    BufReader::new(subscriber.try_clone().expect("clone subscriber"))
+                        .read_line(&mut hello)
+                        .expect("hello");
+                    assert!(!hello.is_empty());
+
+                    handle.shutdown();
+                    assert_eq!(handle.join().expect("daemon thread"), 0);
+                    assert!(!options.control_socket_path().exists());
+                    assert!(!options.state_socket_path().exists());
+                }
+            },
+        );
+
+        fake_shutdown.store(true, Ordering::Relaxed);
+        fake.join().expect("fake herdr thread");
     }
 }
 
