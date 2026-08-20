@@ -1075,6 +1075,29 @@ mod tests {
     }
 
     #[test]
+    fn generated_scripts_use_the_standalone_argument_prefix() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let bin = root.path().join("bin");
+        let executable = root.path().join("Agent Watcher/agent-watcher");
+        let socket = root.path().join("state.sock");
+        let args = vec![
+            "--bin-dir".to_string(),
+            bin.display().to_string(),
+            "--herdr-agent-watcher".to_string(),
+            executable.display().to_string(),
+            "--socket".to_string(),
+            socket.display().to_string(),
+        ];
+
+        assert_eq!(cli_generate_scripts(&args), 0);
+        let invocation = format!("'{}' claude-bridge", executable.display());
+        let statusline = std::fs::read_to_string(bin.join("statusline.sh")).expect("read");
+        assert!(statusline.contains(&format!("{invocation} --write")));
+        let attention = std::fs::read_to_string(bin.join("attention.sh")).expect("read");
+        assert!(attention.contains(&format!("{invocation} --write-attention")));
+    }
+
+    #[test]
     fn a_relative_state_dir_becomes_absolute() {
         let got = resolve_state_dir(Some(Path::new("relative/state"))).expect("resolves");
         assert!(

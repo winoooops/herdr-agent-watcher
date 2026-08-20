@@ -444,7 +444,31 @@ mod service_tests {
     use crate::test_env::with_env;
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::{UnixListener, UnixStream};
+    use std::process::{Child, Command};
     use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct ChildGuard(Child);
+
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    struct FakeHerdrGuard {
+        stop: Arc<AtomicBool>,
+        thread: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl Drop for FakeHerdrGuard {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::Relaxed);
+            if let Some(thread) = self.thread.take() {
+                let _ = thread.join();
+            }
+        }
+    }
 
     fn wait_for(mut condition: impl FnMut() -> bool) {
         let deadline = std::time::Instant::now() + Duration::from_secs(3);
@@ -455,6 +479,21 @@ mod service_tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         panic!("timed out waiting for daemon state");
+    }
+
+    fn bound_status_path(path: &std::path::Path) -> Option<String> {
+        let mut client = UnixStream::connect(path).ok()?;
+        client.set_read_timeout(Some(Duration::from_secs(1))).ok()?;
+        client
+            .write_all(
+                b"{\"method\":\"status-path\",\"pane_id\":\"p1\",\"session_id\":\"sess-1\"}\n",
+            )
+            .ok()?;
+        let mut line = String::new();
+        BufReader::new(client).read_line(&mut line).ok()?;
+        serde_json::from_str::<serde_json::Value>(&line).ok()?["path"]
+            .as_str()
+            .map(str::to_string)
     }
 
     #[test]
@@ -536,6 +575,133 @@ mod service_tests {
 
         fake_shutdown.store(true, Ordering::Relaxed);
         fake.join().expect("fake herdr thread");
+    }
+
+    #[test]
+    fn shutdown_finishes_after_a_real_agent_watcher_was_bound() {
+        let temporary = tempfile::tempdir().expect("tempdir");
+        let state = temporary.path().join("state");
+        let config = temporary.path().join("config");
+        let cwd = temporary.path().join("repo");
+        let claude = temporary.path().join("claude");
+        let transcript_dir = claude.join("projects/demo");
+        std::fs::create_dir_all(&config).expect("config dir");
+        std::fs::create_dir_all(&cwd).expect("cwd");
+        std::fs::create_dir_all(&transcript_dir).expect("transcript dir");
+        std::fs::write(config.join("config.toml"), "[daemon]\ninterval_ms = 25\n").expect("config");
+        std::fs::write(
+            transcript_dir.join("sess-1.jsonl"),
+            format!(
+                "{{\"type\":\"user\",\"sessionId\":\"sess-1\",\"timestamp\":\"2026-08-10T00:00:00Z\",\"message\":{{\"content\":\"demo prompt\"}},\"cwd\":{}}}\n",
+                serde_json::to_string(&cwd.to_string_lossy()).expect("cwd json")
+            ),
+        )
+        .expect("transcript");
+
+        let bin = temporary.path().join("bin");
+        std::fs::create_dir_all(&bin).expect("bin dir");
+        std::os::unix::fs::symlink("/bin/sleep", bin.join("claude")).expect("claude symlink");
+        let agent = ChildGuard(
+            Command::new(bin.join("claude"))
+                .arg("300")
+                .spawn()
+                .expect("claude process"),
+        );
+
+        let herdr_socket = temporary.path().join("herdr.sock");
+        let listener = UnixListener::bind(&herdr_socket).expect("bind fake herdr");
+        listener.set_nonblocking(true).expect("nonblocking");
+        let fake_stop = Arc::new(AtomicBool::new(false));
+        let stop_from_fake = fake_stop.clone();
+        let shell_pid = agent.0.id();
+        let pane_result = serde_json::json!({
+            "panes": [{
+                "pane_id": "p1",
+                "workspace_id": "w1",
+                "agent": "claude",
+                "agent_session": {
+                    "source": "herdr:claude",
+                    "agent": "claude",
+                    "kind": "id",
+                    "value": "sess-1",
+                },
+                "cwd": cwd,
+            }],
+        });
+        let fake_thread = std::thread::spawn(move || {
+            while !stop_from_fake.load(Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        let _ = stream.set_nonblocking(false);
+                        let mut request = String::new();
+                        if BufReader::new(stream.try_clone().expect("clone"))
+                            .read_line(&mut request)
+                            .is_err()
+                        {
+                            continue;
+                        }
+                        let request: serde_json::Value =
+                            serde_json::from_str(&request).expect("request");
+                        let result = match request["method"].as_str() {
+                            Some("pane.list") => pane_result.clone(),
+                            Some("pane.process_info") => serde_json::json!({
+                                "type": "pane_process_info",
+                                "process_info": { "shell_pid": shell_pid },
+                            }),
+                            _ => serde_json::json!({ "type": "ok" }),
+                        };
+                        let mut stream = stream;
+                        let response = serde_json::json!({
+                            "id": request["id"],
+                            "result": result,
+                        });
+                        let _ = writeln!(stream, "{response}");
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        let _fake = FakeHerdrGuard {
+            stop: fake_stop,
+            thread: Some(fake_thread),
+        };
+
+        with_env(
+            &[
+                ("HERDR_SOCKET_PATH", Some(herdr_socket.into_os_string())),
+                ("HERDR_PLUGIN_CONFIG_DIR", Some(config.into_os_string())),
+                ("AGENT_WATCHER_INTERVAL_MS", None),
+                ("CLAUDE_CONFIG_DIR", Some(claude.into_os_string())),
+            ],
+            || {
+                let options = crate::daemon::DaemonOptions::new(&state);
+                let handle = start(options.clone());
+
+                // The route is installed only after watcher startup and the
+                // agent-type check, so it proves a live watcher before shutdown.
+                wait_for(|| bound_status_path(&options.state_socket_path()).is_some());
+
+                handle.shutdown();
+                let (finished, result) = std::sync::mpsc::sync_channel(1);
+                std::thread::spawn(move || {
+                    let _ = finished.send(handle.join());
+                });
+                // Five seconds is deliberately wider than the watcher's 100 ms
+                // shutdown poll while still turning a leaked thread into a failure.
+                let exit = result
+                    .recv_timeout(Duration::from_secs(5))
+                    .unwrap_or_else(|_| {
+                        panic!("daemon join did not finish after the bound watcher was shut down")
+                    });
+
+                assert_eq!(exit.expect("daemon thread"), 0);
+                assert!(!options.control_socket_path().exists());
+                assert!(!options.state_socket_path().exists());
+            },
+        );
     }
 }
 

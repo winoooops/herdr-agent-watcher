@@ -59,6 +59,39 @@ fn doctor_takes_the_state_dir_its_own_error_tells_you_to_pass() {
     );
 }
 
+#[test]
+fn enable_claude_bridge_installs_the_standalone_invocation() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let claude = root.path().join("claude");
+    let state = root.path().join("state");
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_herdr-agent-watcher"))
+        .arg("enable-claude-bridge")
+        .env("CLAUDE_CONFIG_DIR", &claude)
+        .env("HERDR_PLUGIN_STATE_DIR", &state)
+        .env("HERDR_PLUGIN_CONFIG_DIR", root.path().join("plugin-config"))
+        .env("XDG_CONFIG_HOME", root.path().join("xdg"))
+        .env("HOME", root.path().join("home"))
+        .output()
+        .expect("run enable-claude-bridge");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let executable = std::fs::canonicalize(env!("CARGO_BIN_EXE_herdr-agent-watcher"))
+        .expect("canonical executable");
+    let invocation = format!(
+        "'{}' claude-bridge",
+        executable.to_string_lossy().replace('\'', r"'\''")
+    );
+    let statusline = std::fs::read_to_string(state.join("bin/statusline.sh")).expect("read");
+    assert!(statusline.contains(&format!("{invocation} --write")));
+    let attention = std::fs::read_to_string(state.join("bin/attention.sh")).expect("read");
+    assert!(attention.contains(&format!("{invocation} --write-attention")));
+    assert!(claude.join("settings.json").is_file());
+}
+
 fn fake_state_socket(dir: &std::path::Path, reply: Option<&str>) -> std::path::PathBuf {
     use std::io::{BufRead, BufReader, Write};
     let socket = dir.join("state.sock");
