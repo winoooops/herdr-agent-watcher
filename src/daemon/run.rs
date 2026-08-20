@@ -138,6 +138,12 @@ pub struct DaemonHandle {
 }
 
 impl DaemonHandle {
+    pub fn is_finished(&self) -> bool {
+        self.thread
+            .as_ref()
+            .is_none_or(std::thread::JoinHandle::is_finished)
+    }
+
     pub fn shutdown(&self) {
         self.shutdown
             .store(true, std::sync::atomic::Ordering::Relaxed);
@@ -506,6 +512,7 @@ mod service_tests {
                         options.control_socket_path().exists()
                             && options.state_socket_path().exists()
                     });
+                    assert!(!handle.is_finished());
 
                     let mut subscriber =
                         UnixStream::connect(options.state_socket_path()).expect("subscribe");
@@ -519,6 +526,7 @@ mod service_tests {
                     assert!(!hello.is_empty());
 
                     handle.shutdown();
+                    wait_for(|| handle.is_finished());
                     assert_eq!(handle.join().expect("daemon thread"), 0);
                     assert!(!options.control_socket_path().exists());
                     assert!(!options.state_socket_path().exists());
