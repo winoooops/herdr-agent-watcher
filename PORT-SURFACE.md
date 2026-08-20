@@ -99,3 +99,18 @@ resumed session but the fallback only accepted sessions created by the current p
 affected live session was absent from the index, so only the disagreeing fallback was
 reachable. This makes the two resolution paths agree rather than adding new resume
 behaviour. Future sidecar merges must reconcile this locator change by hand.
+
+### Codex rate-limit window routing — `src/agent/adapter/codex/{locator,parser}.rs`
+
+Account rate limits read from Codex response-header logs are routed by their published
+window length instead of assuming primary means five hours and secondary means seven days.
+Windows shorter than one day fill `five_hour`; longer windows fill `seven_day`, while zero
+or missing lengths mean that window is absent. Rows from older Codex builds with neither
+window-length header retain the original positional mapping. Future sidecar merges must
+reconcile these locator and parser changes by hand.
+
+Rollout DTOs now retain `window_minutes` and apply the same duration rule, including the
+legacy positional fallback and the existing null-primary placeholder / absent-secondary
+semantics. The log lookup also scans at most 20 newest name-matching rows and accepts the
+first one the header parser can decode; this skips Codex echoing source text into its own
+thread log without depending on Codex's internal `target` module names.

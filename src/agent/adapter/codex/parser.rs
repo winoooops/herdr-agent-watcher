@@ -206,6 +206,8 @@ struct RateLimitWindowDto {
     #[serde(default, deserialize_with = "lenient_f64")]
     used_percent: Option<f64>,
     #[serde(default, deserialize_with = "lenient_u64")]
+    window_minutes: Option<u64>,
+    #[serde(default, deserialize_with = "lenient_u64")]
     resets_at: Option<u64>,
 }
 
@@ -386,25 +388,59 @@ fn token_count_info_from_dto(dto: TokenCountInfoDto) -> TokenCountInfo {
 }
 
 fn rate_limits_from_dto(dto: RateLimitsPayloadDto) -> RateLimits {
-    // Pre-A-status default behavior: missing/null `primary` yields a
-    // (0.0, 0) `RateLimitInfo`. The DTO field is `Option<...>` so
-    // `unwrap_or_default()` gives us the same shape.
-    let primary = dto.primary.unwrap_or_default();
-    let five_hour = RateLimitInfo {
-        used_percentage: primary.used_percent.unwrap_or(0.0),
-        resets_at: primary.resets_at.unwrap_or(0),
-    };
-
-    // `secondary` distinguishes null/missing → `None` from
-    // present-with-fields → `Some(_)`. The DTO's
-    // `secondary: Option<RateLimitWindowDto>` does that directly.
-    let seven_day = dto.secondary.map(|s| RateLimitInfo {
-        used_percentage: s.used_percent.unwrap_or(0.0),
-        resets_at: s.resets_at.unwrap_or(0),
+    let primary_minutes = dto
+        .primary
+        .as_ref()
+        .and_then(|window| window.window_minutes);
+    let secondary_minutes = dto
+        .secondary
+        .as_ref()
+        .and_then(|window| window.window_minutes);
+    let primary = dto.primary.map(|window| RateLimitInfo {
+        used_percentage: window.used_percent.unwrap_or(0.0),
+        resets_at: window.resets_at.unwrap_or(0),
+    });
+    let secondary = dto.secondary.map(|window| RateLimitInfo {
+        used_percentage: window.used_percent.unwrap_or(0.0),
+        resets_at: window.resets_at.unwrap_or(0),
     });
 
+    // The legacy path keeps both old guarantees: null/missing primary
+    // becomes the short-window placeholder, while null/missing secondary
+    // remains `None` rather than a fabricated long window.
+    if primary_minutes.is_none() && secondary_minutes.is_none() {
+        return RateLimits {
+            five_hour: primary.unwrap_or(RateLimitInfo {
+                used_percentage: 0.0,
+                resets_at: 0,
+            }),
+            seven_day: secondary,
+        };
+    }
+
+    let mut five_hour = None;
+    let mut seven_day = None;
+    for (minutes, limit) in [(primary_minutes, primary), (secondary_minutes, secondary)] {
+        let (Some(minutes), Some(limit)) = (minutes, limit) else {
+            continue;
+        };
+        if minutes == 0 {
+            continue;
+        }
+        if minutes < 24 * 60 {
+            five_hour = Some(limit);
+        } else {
+            seven_day = Some(limit);
+        }
+    }
+
     RateLimits {
-        five_hour,
+        // The duration-aware path preserves the same two guarantees when a
+        // classified short or long window is absent.
+        five_hour: five_hour.unwrap_or(RateLimitInfo {
+            used_percentage: 0.0,
+            resets_at: 0,
+        }),
         seven_day,
     }
 }
@@ -424,6 +460,72 @@ mod tests {
 
         std::fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("read fixture {}: {}", path.display(), e))
+    }
+
+    fn rate_limits(json: &str) -> RateLimits {
+        let dto = serde_json::from_str(json).expect("rate-limit payload");
+        rate_limits_from_dto(dto)
+    }
+
+    #[test]
+    fn a_rollout_primary_weekly_window_routes_to_seven_day_and_leaves_the_short_placeholder() {
+        let rate_limits = rate_limits(
+            r#"{"primary":{"used_percent":23.0,"window_minutes":10080,"resets_at":1787196799},"secondary":null}"#,
+        );
+
+        assert_eq!(rate_limits.five_hour.used_percentage, 0.0);
+        assert_eq!(rate_limits.five_hour.resets_at, 0);
+        let seven_day = rate_limits.seven_day.expect("weekly limit");
+        assert_eq!(seven_day.used_percentage, 23.0);
+        assert_eq!(seven_day.resets_at, 1787196799);
+    }
+
+    #[test]
+    fn rollout_short_primary_and_weekly_secondary_route_by_duration() {
+        let rate_limits = rate_limits(
+            r#"{"primary":{"used_percent":10.0,"window_minutes":300,"resets_at":100},"secondary":{"used_percent":50.0,"window_minutes":10080,"resets_at":200}}"#,
+        );
+
+        assert_eq!(rate_limits.five_hour.used_percentage, 10.0);
+        assert_eq!(rate_limits.five_hour.resets_at, 100);
+        let seven_day = rate_limits.seven_day.expect("weekly limit");
+        assert_eq!(seven_day.used_percentage, 50.0);
+        assert_eq!(seven_day.resets_at, 200);
+    }
+
+    #[test]
+    fn nonstandard_rollout_window_lengths_still_route_by_duration() {
+        let rate_limits = rate_limits(
+            r#"{"primary":{"used_percent":70.0,"window_minutes":43200,"resets_at":700},"secondary":{"used_percent":30.0,"window_minutes":360,"resets_at":300}}"#,
+        );
+
+        assert_eq!(rate_limits.five_hour.used_percentage, 30.0);
+        assert_eq!(rate_limits.five_hour.resets_at, 300);
+        let seven_day = rate_limits.seven_day.expect("long limit");
+        assert_eq!(seven_day.used_percentage, 70.0);
+        assert_eq!(seven_day.resets_at, 700);
+    }
+
+    #[test]
+    fn missing_rollout_window_lengths_keep_the_legacy_positional_routing() {
+        let rate_limits = rate_limits(
+            r#"{"primary":{"used_percent":12.0,"resets_at":120},"secondary":{"used_percent":34.0,"resets_at":340}}"#,
+        );
+
+        assert_eq!(rate_limits.five_hour.used_percentage, 12.0);
+        assert_eq!(rate_limits.five_hour.resets_at, 120);
+        let seven_day = rate_limits.seven_day.expect("legacy weekly limit");
+        assert_eq!(seven_day.used_percentage, 34.0);
+        assert_eq!(seven_day.resets_at, 340);
+    }
+
+    #[test]
+    fn a_null_rollout_primary_keeps_the_placeholder_and_an_absent_secondary_stays_none() {
+        let rate_limits = rate_limits(r#"{"primary":null}"#);
+
+        assert_eq!(rate_limits.five_hour.used_percentage, 0.0);
+        assert_eq!(rate_limits.five_hour.resets_at, 0);
+        assert!(rate_limits.seven_day.is_none());
     }
 
     #[test]
