@@ -1,6 +1,3 @@
-use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixStream;
-use std::sync::mpsc::{channel, Receiver};
 use std::time::Duration;
 
 use crate::sidebar::config::Theme;
@@ -10,6 +7,7 @@ use ratatui::widgets::Paragraph;
 
 use crate::sidebar::layout::{clamp_scroll, ensure_visible, reanchor};
 use crate::sidebar::reducer::{apply_line, State};
+use crate::sidebar::state_stream::{Event as WireEvent, StateStream};
 use crate::sidebar::view::{Line, Rendered, Role, Semantic, ViewInput};
 
 struct TerminalGuard;
@@ -34,51 +32,10 @@ impl Drop for TerminalGuard {
     }
 }
 
-enum WireEvent {
-    Line(String),
-    Ended,
-}
-
-fn spawn_reader(stream: UnixStream) -> Receiver<WireEvent> {
-    let (sender, receiver) = channel();
-    std::thread::spawn(move || {
-        let mut reader = BufReader::new(stream);
-        loop {
-            let mut line = String::new();
-            match reader.read_line(&mut line) {
-                Ok(0) | Err(_) => {
-                    let _ = sender.send(WireEvent::Ended);
-                    break;
-                }
-                Ok(_) if sender.send(WireEvent::Line(line)).is_err() => break,
-                Ok(_) => {}
-            }
-        }
-    });
-    receiver
-}
-
-/// Connect and subscribe, or say why not. Separated because the sidebar does
-/// this again every time the daemon goes away -- including when the settings
-/// panel restarts it, which is a disconnect this pane caused on purpose.
-fn subscribe(socket: &std::path::Path) -> Result<Receiver<WireEvent>, String> {
-    let mut stream = UnixStream::connect(socket).map_err(|error| {
-        format!(
-            "herdr-agent-watcher daemon is not running\n(no state socket at {}: {error})",
-            socket.display()
-        )
-    })?;
-    stream
-        .write_all(b"{\"method\":\"subscribe\"}\n")
-        .map_err(|_| "herdr-agent-watcher daemon closed the state socket".to_string())?;
-    Ok(spawn_reader(stream))
-}
-
 /// How long to keep trying before giving up on a daemon that is not coming
 /// back. A restart takes a second or two; a minute is long enough that the
 /// only thing still waiting is a daemon that died.
 const RECONNECT_FOR: Duration = Duration::from_secs(60);
-const RECONNECT_EVERY: Duration = Duration::from_millis(400);
 const INPUT_POLL_EVERY: Duration = Duration::from_millis(100);
 
 fn terminal_is_gone(revents: i16) -> bool {
@@ -1787,12 +1744,11 @@ fn truecolor() -> bool {
 
 pub fn run() -> i32 {
     let socket = crate::daemon::state_socket_path();
-    let mut wire = match subscribe(&socket) {
-        Ok(wire) => Some(wire),
+    let wire = match StateStream::start(socket) {
+        Ok(wire) => wire,
         Err(message) => return draw_message_and_wait(&message),
     };
     let mut lost_at: Option<std::time::Instant> = None;
-    let mut next_try = std::time::Instant::now();
 
     let guard = match TerminalGuard::enter() {
         Ok(guard) => guard,
@@ -1893,42 +1849,8 @@ pub fn run() -> i32 {
             }
         }
 
-        // Retrying is a state of the loop, not a loop of its own: sleeping
-        // inside a reconnect means no redraw and no key handling until it
-        // finishes, which is exactly when the reader most wants to see the
-        // panel is still alive.
-        if wire.is_none() {
-            let now = std::time::Instant::now();
-            if now >= next_try {
-                match subscribe(&socket) {
-                    Ok(fresh) => {
-                        wire = Some(fresh);
-                        lost_at = None;
-                        it.notice = None;
-                        // The state is left alone on purpose: subscribing
-                        // replies with a full snapshot that replaces it, so
-                        // clearing here would only blank the panel in the gap
-                        // before that snapshot lands.
-                    }
-                    Err(_) => next_try = now + RECONNECT_EVERY,
-                }
-                dirty = true;
-            }
-            if let Some(lost) = lost_at {
-                if now.duration_since(lost) > RECONNECT_FOR {
-                    drop(terminal);
-                    drop(guard);
-                    return draw_message_and_wait("herdr-agent-watcher daemon did not come back");
-                }
-                it.notice = Some(format!(
-                    "daemon disconnected; reconnecting… ({}s)",
-                    now.duration_since(lost).as_secs()
-                ));
-            }
-        }
-
-        while let Some(rx) = wire.as_ref() {
-            match rx.try_recv() {
+        loop {
+            match wire.try_recv() {
                 Ok(WireEvent::Line(line)) => match apply_line(&mut state, &line) {
                     Ok(()) => dirty = true,
                     Err(message) => {
@@ -1937,20 +1859,38 @@ pub fn run() -> i32 {
                         return draw_message_and_wait(&message);
                     }
                 },
-                // Not a dead end. The daemon going away is usually a restart
-                // -- and since the settings panel can order one, it is a
-                // disconnect this pane asked for. Drop the wire and let the
-                // loop retry, so the cards stay on screen and keys keep
-                // working while it does.
-                Ok(WireEvent::Ended) | Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    wire = None;
-                    lost_at = Some(std::time::Instant::now());
-                    next_try = std::time::Instant::now();
+                Ok(WireEvent::Disconnected) => {
+                    lost_at.get_or_insert_with(std::time::Instant::now);
                     dirty = true;
-                    break;
+                }
+                Ok(WireEvent::Reconnected) => {
+                    lost_at = None;
+                    it.notice = None;
+                    // The state is left alone on purpose: subscribing replies
+                    // with a full snapshot that replaces it, so clearing here
+                    // would only blank the panel before that snapshot lands.
+                    dirty = true;
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    drop(terminal);
+                    drop(guard);
+                    return draw_message_and_wait("herdr-agent-watcher state client stopped");
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => break,
             }
+        }
+
+        if let Some(lost) = lost_at {
+            let now = std::time::Instant::now();
+            if now.duration_since(lost) > RECONNECT_FOR {
+                drop(terminal);
+                drop(guard);
+                return draw_message_and_wait("herdr-agent-watcher daemon did not come back");
+            }
+            it.notice = Some(format!(
+                "daemon disconnected; reconnecting… ({}s)",
+                now.duration_since(lost).as_secs()
+            ));
         }
 
         let now = now_unix_ms();

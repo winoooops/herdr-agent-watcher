@@ -8,6 +8,9 @@ pub mod reducer;
 pub mod release;
 pub mod view;
 
+#[cfg(unix)]
+pub mod state_stream;
+
 pub(crate) mod bars;
 pub(crate) mod format;
 pub(crate) mod metrics;
