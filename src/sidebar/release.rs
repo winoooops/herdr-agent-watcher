@@ -120,16 +120,113 @@ impl Check {
     }
 }
 
+#[cfg(any(test, all(feature = "runtime", unix)))]
+#[derive(Debug, PartialEq, Eq)]
+enum UpdateDecision {
+    Install(String),
+    Done(String),
+    Refuse(String),
+}
+
+#[cfg(any(test, all(feature = "runtime", unix)))]
+fn update_decision(check: Check, current: &str) -> UpdateDecision {
+    match check {
+        Check::Ready {
+            source: Source::Linked(path),
+            ..
+        } => UpdateDecision::Refuse(format!(
+            "plugin is linked from {path}; run git pull, cargo build --release, then restart-daemon"
+        )),
+        Check::Ready {
+            source: Source::Unknown,
+            ..
+        } => UpdateDecision::Refuse(
+            "herdr did not say how this plugin was installed; refusing to replace it".into(),
+        ),
+        Check::Ready {
+            latest,
+            source: Source::Github,
+        } if is_newer(&latest, current) => UpdateDecision::Install(latest),
+        Check::Ready {
+            latest,
+            source: Source::Github,
+        } => UpdateDecision::Done(format!(
+            "already up to date ({current}; latest {})",
+            version_of_tag(&latest)
+        )),
+        Check::Failed(error) => UpdateDecision::Refuse(error),
+        other => UpdateDecision::Refuse(format!("update check did not finish: {other:?}")),
+    }
+}
+
+#[cfg(any(test, all(feature = "runtime", unix)))]
+enum RestartOutcome {
+    Confirmed(String),
+    Rejected(String),
+    TimedOut(Option<String>),
+}
+
+#[cfg(any(test, all(feature = "runtime", unix)))]
+fn wait_for_build_with(
+    expected: &str,
+    mut read: impl FnMut() -> Option<String>,
+    mut expired: impl FnMut() -> bool,
+    mut pause: impl FnMut(),
+) -> Result<String, Option<String>> {
+    let mut last = None;
+    loop {
+        if let Some(build) = read() {
+            if build == expected {
+                return Ok(build);
+            }
+            last = Some(build);
+        }
+        if expired() {
+            return Err(last);
+        }
+        pause();
+    }
+}
+
+#[cfg(any(test, all(feature = "runtime", unix)))]
+fn finish_upgrade(installed: &str, restarted: RestartOutcome) -> Result<String, String> {
+    let installed = if installed.is_empty() {
+        "plugin installed".to_string()
+    } else {
+        format!("plugin installed: {installed}")
+    };
+    match restarted {
+        RestartOutcome::Confirmed(version) => {
+            Ok(format!("{installed}\ndaemon restarted at {version}"))
+        }
+        RestartOutcome::Rejected(message) => {
+            Err(format!("{installed}\ndaemon restart failed: {message}"))
+        }
+        RestartOutcome::TimedOut(Some(version)) => Err(format!(
+            "{installed}\nrestart was accepted, but the daemon still reports {version}; invoke restart-daemon again"
+        )),
+        RestartOutcome::TimedOut(None) => Err(format!(
+            "{installed}\nrestart was accepted, but no daemon answered with the new version; invoke restart-daemon again"
+        )),
+    }
+}
+
 /// Everything below talks to the network or to `herdr`, so it only exists in
 /// the runtime build. The comparison above stays testable without either.
 #[cfg(all(feature = "runtime", unix))]
 mod io {
     use super::*;
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixStream;
     use std::sync::mpsc::{channel, Receiver};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
     const CALL_TIMEOUT: Duration = Duration::from_secs(10);
+    const RESTART_POLL_EVERY: Duration = Duration::from_millis(250);
+    // A restart took four seconds in a live measurement. Fifteen leaves room
+    // for a loaded machine without making a failed restart look successful.
+    const RESTART_CONFIRM_FOR: Duration = Duration::from_secs(15);
 
     /// Start a check and hand back the end of a channel to poll.
     ///
@@ -139,14 +236,7 @@ mod io {
     pub fn check() -> Receiver<Check> {
         let (sender, receiver) = channel();
         std::thread::spawn(move || {
-            let outcome = match latest_tag() {
-                Ok(latest) => Check::Ready {
-                    latest,
-                    source: installed_source(),
-                },
-                Err(error) => Check::Failed(error),
-            };
-            let _ = sender.send(outcome);
+            let _ = sender.send(check_now());
         });
         receiver
     }
@@ -159,6 +249,39 @@ mod io {
             let _ = sender.send(Check::Finished(install(&tag)));
         });
         receiver
+    }
+
+    pub fn cli_update() -> i32 {
+        match update_decision(check_now(), env!("CARGO_PKG_VERSION")) {
+            UpdateDecision::Install(tag) => match install(&tag) {
+                Ok(message) => {
+                    println!("{message}");
+                    0
+                }
+                Err(error) => {
+                    eprintln!("{error}");
+                    1
+                }
+            },
+            UpdateDecision::Done(message) => {
+                println!("{message}");
+                0
+            }
+            UpdateDecision::Refuse(message) => {
+                eprintln!("{message}");
+                1
+            }
+        }
+    }
+
+    fn check_now() -> Check {
+        match latest_tag() {
+            Ok(latest) => Check::Ready {
+                latest,
+                source: installed_source(),
+            },
+            Err(error) => Check::Failed(error),
+        }
     }
 
     fn latest_tag() -> Result<String, String> {
@@ -200,8 +323,7 @@ mod io {
         let Ok(herdr) = std::env::var("HERDR_BIN_PATH") else {
             return Source::Unknown;
         };
-        let id =
-            std::env::var("HERDR_PLUGIN_ID").unwrap_or_else(|_| "herdr-agent-watcher".to_string());
+        let id = plugin_id();
         let Ok(out) = std::process::Command::new(herdr)
             .args(["plugin", "list", "--json"])
             .output()
@@ -236,31 +358,94 @@ mod io {
         }
     }
 
+    fn plugin_id() -> String {
+        std::env::var("HERDR_PLUGIN_ID").unwrap_or_else(|_| "herdr-agent-watcher".to_string())
+    }
+
+    pub(super) fn restart_command() -> Result<std::process::Command, String> {
+        let herdr =
+            std::env::var("HERDR_BIN_PATH").map_err(|_| "HERDR_BIN_PATH is not set".to_string())?;
+        let mut command = std::process::Command::new(herdr);
+        command.args([
+            "plugin",
+            "action",
+            "invoke",
+            "restart-daemon",
+            "--plugin",
+            &plugin_id(),
+        ]);
+        Ok(command)
+    }
+
+    fn command_output(out: std::process::Output) -> Result<String, String> {
+        let say = |bytes: &[u8]| String::from_utf8_lossy(bytes).trim().to_string();
+        if out.status.success() {
+            Ok(say(&out.stdout))
+        } else {
+            let stderr = say(&out.stderr);
+            Err(if stderr.is_empty() {
+                say(&out.stdout)
+            } else {
+                stderr
+            })
+        }
+    }
+
+    fn reported_build() -> Option<String> {
+        let mut stream = UnixStream::connect(crate::daemon::state_socket_path()).ok()?;
+        stream.set_read_timeout(Some(Duration::from_secs(1))).ok()?;
+        stream.write_all(b"{\"method\":\"snapshot\"}\n").ok()?;
+        let mut line = String::new();
+        BufReader::new(stream).read_line(&mut line).ok()?;
+        let mut state = crate::sidebar::reducer::State::default();
+        crate::sidebar::reducer::apply_line(&mut state, &line).ok()?;
+        state.daemon_build
+    }
+
+    fn wait_for_build(expected: &str) -> Result<String, Option<String>> {
+        let deadline = Instant::now() + RESTART_CONFIRM_FOR;
+        wait_for_build_with(
+            expected,
+            reported_build,
+            || Instant::now() >= deadline,
+            || std::thread::sleep(RESTART_POLL_EVERY),
+        )
+    }
+
     fn install(tag: &str) -> Result<String, String> {
         let herdr =
             std::env::var("HERDR_BIN_PATH").map_err(|_| "HERDR_BIN_PATH is not set".to_string())?;
-        let out = std::process::Command::new(herdr)
+        let installed = std::process::Command::new(herdr)
             .args(["plugin", "install", REPO, "--ref", tag, "--yes"])
             .output()
-            .map_err(|error| format!("cannot run herdr: {error}"))?;
-        let say = |bytes: &[u8]| String::from_utf8_lossy(bytes).trim().to_string();
-        if out.status.success() {
-            // The daemon is replaced by the install; this sidebar is not, and
-            // cannot be -- it is executing the file that was just swapped.
-            Ok(format!("{} — reopen this sidebar", say(&out.stdout)))
-        } else {
-            let said = say(&out.stderr);
-            Err(if said.is_empty() {
-                say(&out.stdout)
-            } else {
-                said
+            .map_err(|error| format!("cannot run herdr install: {error}"))
+            .and_then(command_output)?;
+        let restarted = restart_command()
+            .and_then(|mut command| {
+                command
+                    .output()
+                    .map_err(|error| format!("cannot run herdr restart: {error}"))
             })
-        }
+            .and_then(command_output);
+        let outcome = match restarted {
+            Err(message) => RestartOutcome::Rejected(message),
+            Ok(_) => {
+                // Herdr accepting the action only schedules it. The daemon is
+                // confirmed before the sidebar re-execs, deliberately. Socket
+                // gaps are expected while the old process exits and the new
+                // one binds, so a missed or unreadable reply keeps polling.
+                match wait_for_build(version_of_tag(tag)) {
+                    Ok(version) => RestartOutcome::Confirmed(version),
+                    Err(last) => RestartOutcome::TimedOut(last),
+                }
+            }
+        };
+        finish_upgrade(&installed, outcome)
     }
 }
 
 #[cfg(all(feature = "runtime", unix))]
-pub use io::{check, upgrade};
+pub use io::{check, cli_update, upgrade};
 
 #[cfg(test)]
 mod tests {
@@ -350,5 +535,131 @@ mod tests {
         ] {
             assert_eq!(check.upgradable("0.1.5"), None, "{check:?} has no version");
         }
+    }
+
+    #[test]
+    fn the_restart_command_uses_herdrs_path_and_the_plugin_id_with_its_fallback() {
+        use crate::test_env::with_env;
+
+        for (id, expected) in [
+            (Some("custom-plugin".into()), "custom-plugin"),
+            (None, "herdr-agent-watcher"),
+        ] {
+            with_env(
+                &[
+                    ("HERDR_BIN_PATH", Some("/tmp/fake-herdr".into())),
+                    ("HERDR_PLUGIN_ID", id),
+                ],
+                || {
+                    let command = io::restart_command().expect("restart command");
+                    assert_eq!(command.get_program(), "/tmp/fake-herdr");
+                    assert_eq!(
+                        command.get_args().collect::<Vec<_>>(),
+                        [
+                            "plugin",
+                            "action",
+                            "invoke",
+                            "restart-daemon",
+                            "--plugin",
+                            expected,
+                        ]
+                    );
+                },
+            );
+        }
+    }
+
+    #[test]
+    fn a_linked_update_is_refused_with_its_directory() {
+        let decision = update_decision(
+            Check::Ready {
+                latest: "v99.0.0".into(),
+                source: Source::Linked("/tmp/working-tree".into()),
+            },
+            env!("CARGO_PKG_VERSION"),
+        );
+
+        let UpdateDecision::Refuse(message) = decision else {
+            panic!("a linked checkout must not reach install: {decision:?}")
+        };
+        assert!(message.contains("/tmp/working-tree"), "{message}");
+    }
+
+    #[test]
+    fn an_unknown_install_source_is_refused() {
+        assert!(matches!(
+            update_decision(
+                Check::Ready {
+                    latest: "v99.0.0".into(),
+                    source: Source::Unknown,
+                },
+                env!("CARGO_PKG_VERSION"),
+            ),
+            UpdateDecision::Refuse(_)
+        ));
+    }
+
+    #[test]
+    fn a_release_that_is_not_newer_is_a_no_op() {
+        assert!(matches!(
+            update_decision(
+                Check::Ready {
+                    latest: env!("CARGO_PKG_VERSION").into(),
+                    source: Source::Github,
+                },
+                env!("CARGO_PKG_VERSION"),
+            ),
+            UpdateDecision::Done(_)
+        ));
+    }
+
+    #[test]
+    fn a_restart_failure_says_the_plugin_was_already_installed() {
+        let succeeded = finish_upgrade(
+            "installed release",
+            RestartOutcome::Confirmed("0.2.3".into()),
+        )
+        .expect("both steps succeeded");
+        assert!(succeeded.contains("installed release"), "{succeeded}");
+        assert!(succeeded.contains("0.2.3"), "{succeeded}");
+
+        let failed = finish_upgrade(
+            "installed release",
+            RestartOutcome::Rejected("restart refused".into()),
+        )
+        .expect_err("restart failure");
+        assert!(failed.contains("installed release"), "{failed}");
+        assert!(failed.contains("restart refused"), "{failed}");
+        assert_ne!(failed, succeeded);
+    }
+
+    #[test]
+    fn socket_gaps_keep_waiting_until_the_new_build_answers() {
+        let mut reports = [None, None, Some("0.2.2"), None, Some("0.2.3")].into_iter();
+        let mut pauses = 0;
+
+        let found = wait_for_build_with(
+            "0.2.3",
+            || reports.next().flatten().map(str::to_string),
+            || false,
+            || pauses += 1,
+        )
+        .expect("the new daemon eventually answers");
+
+        assert_eq!(found, "0.2.3");
+        assert_eq!(pauses, 4, "every gap and stale build was retried");
+    }
+
+    #[test]
+    fn an_accepted_restart_that_never_confirms_has_its_own_remedy() {
+        let timed_out = finish_upgrade(
+            "installed release",
+            RestartOutcome::TimedOut(Some("0.2.2".into())),
+        )
+        .expect_err("the old build never changed");
+
+        assert!(timed_out.contains("still reports 0.2.2"), "{timed_out}");
+        assert!(timed_out.contains("restart-daemon"), "{timed_out}");
+        assert!(!timed_out.contains("restart failed"), "{timed_out}");
     }
 }

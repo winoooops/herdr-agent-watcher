@@ -33,6 +33,11 @@ title = "Stop the agents daemon"
 command = ["target/release/herdr-agent-watcher", "stop"]
 
 [[actions]]
+id = "update"
+title = "Install the latest release and restart the daemon"
+command = ["target/release/herdr-agent-watcher", "update"]
+
+[[actions]]
 id = "open-sidebar"
 title = "Open the Agent Watcher sidebar (each invoke opens a new split)"
 command = ["target/release/herdr-agent-watcher", "sidebar-open"]

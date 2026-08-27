@@ -55,6 +55,7 @@ fn main() {
             let args: Vec<String> = std::env::args().skip(2).collect();
             herdr_agent_watcher::agents::claude_bridge::cli_disable(&args)
         }
+        "update" => herdr_agent_watcher::sidebar::release::cli_update(),
         "doctor" => {
             let args: Vec<String> = std::env::args().skip(2).collect();
             herdr_agent_watcher::agents::claude_bridge::cli_doctor(&args)
@@ -69,7 +70,7 @@ fn main() {
         }
         other => {
             eprintln!(
-                "usage: herdr-agent-watcher <daemon|sidebar|sidebar-open|stop|kimi-consent|claude-bridge|enable-claude-bridge|disable-claude-bridge|doctor|bind-sidebar-key|unbind-sidebar-key> (got {other:?})"
+                "usage: herdr-agent-watcher <daemon|sidebar|sidebar-open|stop|update|kimi-consent|claude-bridge|enable-claude-bridge|disable-claude-bridge|doctor|bind-sidebar-key|unbind-sidebar-key> (got {other:?})"
             );
             2
         }

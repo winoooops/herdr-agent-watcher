@@ -58,6 +58,7 @@ Output goes to the plugin log — read the last run with
 | --- | --- | --- |
 | `restart-daemon` | Start or restart the daemon | |
 | `stop-daemon` | Stop the daemon | |
+| `update` | Reinstall the latest release and restart the daemon; refuses a linked checkout | [Sidebar](#sidebar) |
 | `open-sidebar` | Open the live sidebar in a new split | [Sidebar](#sidebar) |
 | `bind-sidebar-key` | Bind a key to open the sidebar | [Sidebar](#sidebar) |
 | `unbind-sidebar-key` | Remove that binding | [Sidebar](#sidebar) |
@@ -98,9 +99,10 @@ naming what holds it. For a different key, set `keys.open_sidebar` before runnin
 `x` also offers **Update**, or `u` from any panel: it asks GitHub for the newest release and says how it compares
 to the build you are running. It asks only when you open it — nothing here contacts the
 network on its own. When a newer release exists and the plugin came from GitHub, `u`
-installs it and then asks you to reopen the sidebar, because no process can replace the
-binary it is executing. A linked working directory is told to `git pull` instead: herdr
-refuses to install over a link, and the tree belongs to whoever is editing it.
+installs it, restarts the daemon, and re-execs the sidebar into the new binary. The `update`
+action performs the reinstall and daemon restart outside the sidebar. Both refuse a linked
+working directory and tell you to `git pull` instead: herdr will not replace a link, and the
+tree belongs to whoever edits it.
 
 > [!WARNING]
 > Open **Keybindings** from the first row in **Settings** and unbind the key there, or run

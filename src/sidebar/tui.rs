@@ -1,3 +1,4 @@
+use std::io::Write;
 use std::time::Duration;
 
 use crate::sidebar::config::Theme;
@@ -10,25 +11,35 @@ use crate::sidebar::reducer::{apply_line, State};
 use crate::sidebar::state_stream::{Event as WireEvent, StateStream};
 use crate::sidebar::view::{Line, Rendered, Role, Semantic, ViewInput};
 
-struct TerminalGuard;
+type DisableRawMode = fn() -> std::io::Result<()>;
+
+struct TerminalGuard<W: Write = std::io::Stdout, D: FnMut() -> std::io::Result<()> = DisableRawMode>
+{
+    output: W,
+    disable_raw_mode: D,
+}
 
 impl TerminalGuard {
     fn enter() -> std::io::Result<Self> {
         crossterm::terminal::enable_raw_mode()?;
+        let mut output = std::io::stdout();
         if let Err(error) =
-            crossterm::execute!(std::io::stdout(), crossterm::terminal::EnterAlternateScreen)
+            crossterm::execute!(&mut output, crossterm::terminal::EnterAlternateScreen)
         {
             let _ = crossterm::terminal::disable_raw_mode();
             return Err(error);
         }
-        Ok(Self)
+        Ok(Self {
+            output,
+            disable_raw_mode: crossterm::terminal::disable_raw_mode,
+        })
     }
 }
 
-impl Drop for TerminalGuard {
+impl<W: Write, D: FnMut() -> std::io::Result<()>> Drop for TerminalGuard<W, D> {
     fn drop(&mut self) {
-        let _ = crossterm::execute!(std::io::stdout(), crossterm::terminal::LeaveAlternateScreen);
-        let _ = crossterm::terminal::disable_raw_mode();
+        let _ = crossterm::execute!(&mut self.output, crossterm::terminal::LeaveAlternateScreen);
+        let _ = (self.disable_raw_mode)();
     }
 }
 
@@ -1742,7 +1753,47 @@ fn truecolor() -> bool {
         .unwrap_or(false)
 }
 
+fn reexec_sidebar(
+    executable: &std::path::Path,
+    arguments: Vec<std::ffi::OsString>,
+) -> Result<(), String> {
+    use std::os::unix::process::CommandExt;
+
+    std::fs::File::open(executable)
+        .map_err(|error| format!("cannot read {}: {error}", executable.display()))?;
+    let error = std::process::Command::new(executable)
+        .args(arguments)
+        .exec();
+    Err(format!("cannot start the updated sidebar: {error}"))
+}
+
+fn reexec_or_fallback(
+    message: &str,
+    executable: Result<&std::path::Path, String>,
+    arguments: Vec<std::ffi::OsString>,
+    restore_terminal: impl FnOnce(),
+    exec: impl FnOnce(&std::path::Path, Vec<std::ffi::OsString>) -> Result<(), String>,
+    fallback: impl FnOnce(&str) -> i32,
+) -> i32 {
+    // A successful exec never runs destructors, so restoration must be an
+    // explicit predecessor of the exec rather than cleanup after it.
+    restore_terminal();
+    let error = match executable {
+        Ok(executable) => match exec(executable, arguments) {
+            Ok(()) => return 0,
+            Err(error) => error,
+        },
+        Err(error) => format!("cannot locate the updated sidebar: {error}"),
+    };
+    fallback(&format!(
+        "{message}\n{error}\nreopen this sidebar to run the new build"
+    ))
+}
+
 pub fn run() -> i32 {
+    // Capture this before an upgrade can replace the running inode. On Linux,
+    // asking current_exe afterwards can return a path suffixed with "(deleted)".
+    let executable = std::env::current_exe();
     let socket = crate::daemon::state_socket_path();
     let wire = match StateStream::start(socket) {
         Ok(wire) => wire,
@@ -1799,6 +1850,7 @@ pub fn run() -> i32 {
     let mut dirty = true;
 
     loop {
+        let mut reopen = None;
         if poll_keybinding(&mut open) {
             dirty = true;
         }
@@ -1810,6 +1862,9 @@ pub fn run() -> i32 {
             if let Some(rx) = pending {
                 match rx.try_recv() {
                     Ok(fresh) => {
+                        if let crate::sidebar::release::Check::Finished(Ok(message)) = &fresh {
+                            reopen = Some(message.clone());
+                        }
                         *check = fresh;
                         *pending = None;
                         dirty = true;
@@ -1827,6 +1882,21 @@ pub fn run() -> i32 {
                     Err(std::sync::mpsc::TryRecvError::Empty) => {}
                 }
             }
+        }
+
+        if let Some(message) = reopen {
+            let executable = executable.as_deref().map_err(|error| error.to_string());
+            return reexec_or_fallback(
+                &message,
+                executable,
+                std::env::args_os().skip(1).collect(),
+                || {
+                    drop(terminal);
+                    drop(guard);
+                },
+                reexec_sidebar,
+                draw_message_and_wait,
+            );
         }
 
         if let Some(Dialog::Bridges { view, pending, .. }) = open.as_mut() {
@@ -2107,6 +2177,74 @@ mod tests {
         // error into a hot loop.
         assert!(keep_polling(&Ok(false)));
         assert!(!keep_polling(&Err(std::io::Error::other("pty is gone"))));
+    }
+
+    #[test]
+    fn dropping_the_terminal_guard_leaves_the_screen_and_raw_mode() {
+        let mut output = Vec::new();
+        let raw_disabled = std::cell::Cell::new(false);
+        {
+            let _guard = TerminalGuard {
+                output: &mut output,
+                disable_raw_mode: || {
+                    raw_disabled.set(true);
+                    Ok(())
+                },
+            };
+        }
+
+        assert_eq!(output, b"\x1b[?1049l", "alternate screen was not left");
+        assert!(raw_disabled.get(), "raw mode was not disabled");
+    }
+
+    #[test]
+    fn a_successful_upgrade_restores_before_exec_and_keeps_the_arguments() {
+        let events = std::cell::RefCell::new(Vec::new());
+        let arguments = vec!["sidebar".into(), "--demo".into()];
+
+        let code = reexec_or_fallback(
+            "updated",
+            Ok(std::path::Path::new("/new/agent-watcher")),
+            arguments.clone(),
+            || events.borrow_mut().push("restore".to_string()),
+            |executable, got| {
+                events
+                    .borrow_mut()
+                    .push(format!("exec {}", executable.display()));
+                assert_eq!(got, arguments);
+                Ok(())
+            },
+            |_| panic!("a successful exec never falls back"),
+        );
+
+        assert_eq!(code, 0);
+        assert_eq!(events.into_inner(), ["restore", "exec /new/agent-watcher"]);
+    }
+
+    #[test]
+    fn a_failed_exec_restores_first_and_leaves_a_message_in_the_pane() {
+        let events = std::cell::RefCell::new(Vec::new());
+
+        let code = reexec_or_fallback(
+            "plugin installed",
+            Ok(std::path::Path::new("/new/agent-watcher")),
+            vec!["sidebar".into()],
+            || events.borrow_mut().push("restore".to_string()),
+            |_, _| {
+                events.borrow_mut().push("exec".to_string());
+                Err("permission denied".into())
+            },
+            |message| {
+                events.borrow_mut().push("fallback".to_string());
+                assert!(message.contains("plugin installed"), "{message}");
+                assert!(message.contains("permission denied"), "{message}");
+                assert!(message.contains("reopen this sidebar"), "{message}");
+                17
+            },
+        );
+
+        assert_eq!(code, 17, "the fallback keeps control of this pane");
+        assert_eq!(events.into_inner(), ["restore", "exec", "fallback"]);
     }
 
     #[test]

@@ -56,6 +56,7 @@ herdr plugin action invoke <id> --plugin herdr-agent-watcher
 | --- | --- | --- |
 | `restart-daemon` | 启动或重启 daemon | |
 | `stop-daemon` | 停止 daemon | |
+| `update` | 重新安装最新 release 并重启 daemon；链接的工作目录会被拒绝 | [侧边栏](#侧边栏) |
 | `open-sidebar` | 在新分屏里打开实时侧边栏 | [侧边栏](#侧边栏) |
 | `bind-sidebar-key` | 绑定一个打开侧边栏的快捷键 | [侧边栏](#侧边栏) |
 | `unbind-sidebar-key` | 移除该绑定 | [侧边栏](#侧边栏) |
@@ -93,8 +94,9 @@ herdr plugin action invoke bind-sidebar-key --plugin herdr-agent-watcher
 
 `x` 里还有 **Update**（在任意面板中按 `u` 也能直接打开）：它向 GitHub 查询最新 release，并说明它与你正在运行的版本的关系。
 只在你打开它时才请求 —— 这里没有任何东西会自行联网。当存在更新且插件是从 GitHub 安装的，
-按 `u` 就会安装，然后请你重新打开 sidebar：没有进程能替换自己正在执行的二进制。若是链接的
-工作目录，它会改为提示你 `git pull` —— herdr 拒绝覆盖链接，而那棵树属于正在编辑它的人。
+按 `u` 就会安装、重启 daemon，并让 sidebar 重新执行新二进制。在 sidebar 外调用 `update`
+action 可以完成重新安装和 daemon 重启。两者都会拒绝链接的工作目录，并提示你改用
+`git pull`：herdr 不会替换链接，而那棵树属于正在编辑它的人。
 
 > [!WARNING]
 > 请从**设置**的第一行打开 **Keybindings** 并在那里解绑，或运行 `unbind-sidebar-key`，然后再
