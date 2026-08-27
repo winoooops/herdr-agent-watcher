@@ -470,7 +470,7 @@ mod service_tests {
         }
     }
 
-    fn wait_for(mut condition: impl FnMut() -> bool) {
+    fn wait_for(what: &str, mut condition: impl FnMut() -> bool) {
         let deadline = std::time::Instant::now() + Duration::from_secs(3);
         while std::time::Instant::now() < deadline {
             if condition() {
@@ -478,7 +478,7 @@ mod service_tests {
             }
             std::thread::sleep(Duration::from_millis(10));
         }
-        panic!("timed out waiting for daemon state");
+        panic!("timed out waiting for {what}");
     }
 
     fn bound_status_path(path: &std::path::Path) -> Option<String> {
@@ -547,7 +547,7 @@ mod service_tests {
                 let options = crate::daemon::DaemonOptions::new(&state);
                 for _ in 0..2 {
                     let handle = start(options.clone());
-                    wait_for(|| {
+                    wait_for("daemon sockets to appear", || {
                         options.control_socket_path().exists()
                             && options.state_socket_path().exists()
                     });
@@ -565,7 +565,7 @@ mod service_tests {
                     assert!(!hello.is_empty());
 
                     handle.shutdown();
-                    wait_for(|| handle.is_finished());
+                    wait_for("daemon thread to finish", || handle.is_finished());
                     assert_eq!(handle.join().expect("daemon thread"), 0);
                     assert!(!options.control_socket_path().exists());
                     assert!(!options.state_socket_path().exists());
@@ -682,7 +682,9 @@ mod service_tests {
 
                 // The route is installed only after watcher startup and the
                 // agent-type check, so it proves a live watcher before shutdown.
-                wait_for(|| bound_status_path(&options.state_socket_path()).is_some());
+                wait_for("the bound watcher route", || {
+                    bound_status_path(&options.state_socket_path()).is_some()
+                });
 
                 handle.shutdown();
                 let (finished, result) = std::sync::mpsc::sync_channel(1);

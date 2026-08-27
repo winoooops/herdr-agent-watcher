@@ -41,6 +41,7 @@ impl StateStream {
                 }
             };
             let mut line = String::new();
+            let mut disconnected = false;
 
             while !stop.load(Ordering::Relaxed) {
                 match reader.read_line(&mut line) {
@@ -48,6 +49,16 @@ impl StateStream {
                         line.clear();
                     }
                     Ok(_) => {
+                        // A successful connect/write is not a recovered state
+                        // feed: a dying listener can accept it and close before
+                        // sending its hello. Announce reconnection only once a
+                        // line proves the replacement feed is readable.
+                        if disconnected {
+                            if events_tx.send(Event::Reconnected).is_err() {
+                                return;
+                            }
+                            disconnected = false;
+                        }
                         if events_tx
                             .send(Event::Line(std::mem::take(&mut line)))
                             .is_err()
@@ -69,8 +80,11 @@ impl StateStream {
                     Err(_) => {}
                 }
 
-                if events_tx.send(Event::Disconnected).is_err() {
-                    return;
+                if !disconnected {
+                    if events_tx.send(Event::Disconnected).is_err() {
+                        return;
+                    }
+                    disconnected = true;
                 }
                 loop {
                     if stop.load(Ordering::Relaxed) {
@@ -80,9 +94,6 @@ impl StateStream {
                         Ok(fresh) => {
                             reader = fresh;
                             line.clear();
-                            if events_tx.send(Event::Reconnected).is_err() {
-                                return;
-                            }
                             break;
                         }
                         Err(_) => std::thread::sleep(RECONNECT_EVERY),
@@ -201,19 +212,52 @@ mod tests {
     #[test]
     fn reconnects_and_resubscribes_after_the_server_restarts() {
         let (dir, socket, first_listener) = listener();
-        let first = serve_once(first_listener, "{\"version\":2,\"seq\":1,\"panes\":{}}\n");
+        let (stale_ready_tx, stale_ready_rx) = mpsc::channel();
+        let (close_stale_tx, close_stale_rx) = mpsc::channel();
+        let first = std::thread::spawn(move || {
+            let (mut stream, _) = first_listener.accept().expect("accept first subscriber");
+            let mut request = String::new();
+            BufReader::new(stream.try_clone().expect("clone first stream"))
+                .read_line(&mut request)
+                .expect("read first subscription");
+            stream
+                .write_all(b"{\"version\":2,\"seq\":1,\"panes\":{}}\n")
+                .expect("write first state line");
+            drop(stream);
+
+            // Accept one reconnect on the dying listener, but never send its
+            // hello. A socket connection alone is not a recovered state feed.
+            let (stale, _) = first_listener.accept().expect("accept stale reconnect");
+            let mut request = String::new();
+            BufReader::new(stale.try_clone().expect("clone stale stream"))
+                .read_line(&mut request)
+                .expect("read stale subscription");
+            drop(first_listener);
+            stale_ready_tx.send(()).expect("report stale reconnect");
+            let _ = close_stale_rx.recv();
+            drop(stale);
+        });
         let stream = StateStream::start(&socket).expect("start state stream");
         assert!(matches!(
             stream.recv_timeout(Duration::from_secs(1)),
             Ok(Event::Line(_))
         ));
-        first.join().expect("join first server");
         assert_eq!(
             stream
                 .recv_timeout(Duration::from_secs(1))
                 .expect("disconnect event"),
             Event::Disconnected
         );
+        stale_ready_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("dying listener accepted the reconnect");
+        assert_eq!(
+            stream.recv_timeout(Duration::from_millis(200)),
+            Err(RecvTimeoutError::Timeout),
+            "a connection with no hello must not report Reconnected"
+        );
+        close_stale_tx.send(()).expect("close stale connection");
+        first.join().expect("join first server");
 
         std::fs::remove_file(&socket).expect("remove first socket");
         let second_listener = UnixListener::bind(&socket).expect("bind restarted state socket");
