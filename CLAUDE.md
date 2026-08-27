@@ -77,8 +77,8 @@ herdr plugin action invoke stop-daemon --plugin agent-watcher  # stop the runnin
 
 ## Key constraints
 
-- **Singleton takeover**: the daemon claims an exclusive lock (`daemon/singleton.rs`); only one daemon runs at a time, with a 5 s takeover deadline for CLI commands.
-- **Herdr socket**: default `$XDG_CONFIG_HOME/herdr/herdr.sock` (configurable via `HERDR_SOCKET_PATH`). Requests require an object-valued `params` field; 3 s read timeout is load-bearing (must stay below 5 s takeover deadline).
+- **Singleton takeover**: the daemon claims an exclusive lock (`daemon/singleton.rs`); only one daemon runs at a time, with an 8 s takeover deadline for CLI commands.
+- **Herdr socket**: default `$XDG_CONFIG_HOME/herdr/herdr.sock` (configurable via `HERDR_SOCKET_PATH`). Requests require an object-valued `params` field; the 3 s read timeout is load-bearing, and the takeover deadline must clear the incumbent's worst-case shutdown (the read timeout plus the remaining loop work).
 - **Reconciliation interval**: default 1000 ms (`AGENT_WATCHER_INTERVAL_MS`); must be positive. Set in the environment that launches Herdr, then restart the daemon.
 - **OpenCode bridge**: first bind installs/updates the bundled TypeScript bridge in OpenCode's plugin directory. Overridable via `AGENT_WATCHER_OPENCODE_PLUGINS_DIR` and `AGENT_WATCHER_OPENCODE_BRIDGE_DIR`.
 - **Kimi usage consent**: disabled by default; sends API key to Kimi's `/usages` endpoint only when explicitly enabled via `kimi-consent-on`. Revocation is picked up live without daemon restart.

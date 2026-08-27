@@ -6,6 +6,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+// Herdr reads can block for three seconds, and a full live shutdown was
+// measured at 4.36 seconds after the remaining iteration work. Eight seconds
+// leaves 3.64 seconds of headroom; the alternative failure leaves no daemon.
+const TAKEOVER_TIMEOUT: Duration = Duration::from_secs(8);
+
 fn try_flock(file: &File) -> bool {
     unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) == 0 }
 }
@@ -53,7 +58,7 @@ pub(crate) fn claim_with(
         .ok()?;
 
     if !try_flock(&file) {
-        let deadline = Instant::now() + Duration::from_secs(4);
+        let deadline = Instant::now() + TAKEOVER_TIMEOUT;
         request_shutdown(
             &options.control_socket_path(),
             deadline.saturating_duration_since(Instant::now()),
@@ -153,5 +158,11 @@ mod tests {
         let elapsed = start.elapsed();
         assert!(elapsed >= budget);
         assert!(elapsed < budget + Duration::from_millis(50));
+    }
+
+    #[test]
+    fn takeover_budget_has_headroom_over_the_measured_shutdown() {
+        assert!(TAKEOVER_TIMEOUT >= Duration::from_secs(8));
+        assert!(TAKEOVER_TIMEOUT > Duration::from_millis(4_360));
     }
 }

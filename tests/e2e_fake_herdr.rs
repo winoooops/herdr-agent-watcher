@@ -566,10 +566,10 @@ fn takeover_replaces_running_daemon_within_deadline() {
     let mut second = ProcessGuard(spawn_daemon());
     wait_for(
         || first.0.try_wait().ok().flatten().is_some(),
-        Duration::from_secs(5),
+        Duration::from_secs(9),
     );
     assert!(second.0.try_wait().unwrap().is_none());
-    assert!(started.elapsed() < Duration::from_secs(5));
+    assert!(started.elapsed() < Duration::from_secs(9));
     drop(stalled);
     fake.stop();
 }
@@ -609,7 +609,7 @@ fn takeover_of_unresponsive_holder_fails_within_deadline() {
     let elapsed = started.elapsed();
     assert!(!status.success());
     assert!(
-        elapsed < Duration::from_millis(5_250),
+        elapsed < Duration::from_millis(9_250),
         "takeover took {elapsed:?}"
     );
     drop(lock);

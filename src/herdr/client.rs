@@ -52,8 +52,9 @@ impl HerdrClient {
         }
     }
 
-    /// One request per connection. The three-second read bound stays below
-    /// the daemon's five-second singleton takeover deadline.
+    /// One request per connection. The three-second read bound is one part of
+    /// the incumbent daemon's worst-case shutdown, which the eight-second
+    /// singleton takeover deadline must clear.
     pub fn request(&self, method: &str, params: Value) -> Result<Value, HerdrClientError> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed).to_string();
         let request = json!({ "id": id, "method": method, "params": params });

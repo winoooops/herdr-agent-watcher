@@ -174,5 +174,6 @@ checked in; match the existing style (standard `rustfmt` defaults) and keep
   never be committed; the live verifier (`tests/verify-live-agents.sh`)
   redacts pane titles.
 - The Herdr client speaks to a local Unix socket only; requests require an
-  object-valued `params` field, and the 3 s read timeout must stay below the
-  daemon's 5 s singleton takeover deadline.
+  object-valued `params` field, and the daemon's 8 s singleton takeover deadline
+  must clear the incumbent's worst-case shutdown — the 3 s read timeout plus the
+  remaining loop work, measured at 4.36 s.
