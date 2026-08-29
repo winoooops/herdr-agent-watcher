@@ -37,6 +37,19 @@ fn token(value: &Value) -> Option<String> {
     }
 }
 
+/// Claude reports `usedPercentage` sometimes pre-rounded (`70.0`) and sometimes
+/// raw (`71.48529411764706`). The raw form is 17 characters wide, which overflows
+/// a fixed-width sidebar column, so pin percentages to one decimal.
+fn token_pct(value: &Value) -> Option<String> {
+    match value {
+        Value::Number(number) => number
+            .as_f64()
+            .map(|percentage| format!("{percentage:.1}"))
+            .or_else(|| Some(number.to_string())),
+        _ => token(value),
+    }
+}
+
 pub struct HerdrSink {
     port: Arc<dyn HerdrPort>,
     store: Arc<crate::daemon::store::TelemetryStore>,
@@ -103,7 +116,7 @@ impl EventSink for HerdrSink {
                         ),
                         (
                             "agent_watcher_context_pct".into(),
-                            token(&payload["contextWindow"]["usedPercentage"]),
+                            token_pct(&payload["contextWindow"]["usedPercentage"]),
                         ),
                         (
                             "agent_watcher_cost_usd".into(),
@@ -257,6 +270,48 @@ mod tests {
         assert!(metadata[0].1.keys().all(|key| key
             .chars()
             .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')));
+    }
+
+    #[test]
+    fn raw_context_percentage_is_pinned_to_one_decimal() {
+        let port = Arc::new(RecordingPort::default());
+        let sink = HerdrSink::new(port.clone());
+        sink.emit_json(
+            "agent-status",
+            json!({
+                "sessionId": "p1",
+                "modelDisplayName": "Sonnet",
+                "contextWindow": { "usedPercentage": 71.48529411764706_f64 },
+                "cost": { "totalCostUsd": 1.25 },
+            }),
+        )
+        .unwrap();
+        let metadata = port.metadata.lock().unwrap();
+        assert_eq!(
+            metadata[0].1.get("agent_watcher_context_pct"),
+            Some(&Some("71.5".to_string()))
+        );
+    }
+
+    #[test]
+    fn pre_rounded_context_percentage_keeps_its_decimal() {
+        let port = Arc::new(RecordingPort::default());
+        let sink = HerdrSink::new(port.clone());
+        sink.emit_json(
+            "agent-status",
+            json!({
+                "sessionId": "p1",
+                "modelDisplayName": "Sonnet",
+                "contextWindow": { "usedPercentage": 70.0 },
+                "cost": { "totalCostUsd": 1.25 },
+            }),
+        )
+        .unwrap();
+        let metadata = port.metadata.lock().unwrap();
+        assert_eq!(
+            metadata[0].1.get("agent_watcher_context_pct"),
+            Some(&Some("70.0".to_string()))
+        );
     }
 
     #[test]
