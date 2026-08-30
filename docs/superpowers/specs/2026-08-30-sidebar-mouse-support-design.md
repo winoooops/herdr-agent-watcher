@@ -380,3 +380,5 @@ can pass while `[cards] mouse = true` still starts with capture off.
 `the_sheet_and_the_driven_table_describe_the_same_keys` passes as-is —
 the trailer's exemption is the test's proof that non-key hints do not
 corrupt the key contract.
+
+<!-- codex-reviewed: 2026-08-30T16:45:48Z -->
