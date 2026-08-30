@@ -88,7 +88,11 @@ guards built over an in-memory writer in tests have the method at all.
 The flag means "capture may be applied" and is tracked conservatively: set
 *before* attempting enable, cleared only after a *successful* disable — a
 partially written enable can never strand live capture behind a false
-flag. Three rules:
+flag. `set_mouse` never short-circuits on `self.mouse == on`: every
+scheduled transition (rule 1 below) issues its command bytes regardless
+of the conservative flag, because after a failed disable the flag reads
+`true` while reporting may be partially off — an equality guard would
+silently suppress the re-enable. Three rules:
 
 1. The run loop keys reconciliation on a third piece of state it owns:
    `last_attempted: Option<bool>`, `None` at startup so the initial
@@ -270,11 +274,16 @@ timing state.
 
 **Probe.** A ~40-line diagnostic example, `examples/mouse-probe.rs`
 (sibling to the existing `examples/probe.rs`), kept in-tree as a support
-tool rather than thrown away: raw mode + `EnableMouseCapture`, print each
-`Event::Mouse` as one line (`kind`, `column`, `row`, `modifiers`),
-restore on `q`/`Ctrl-C` through the same guard-ordering rules as the
-sidebar (capture off before raw-mode off — the probe must not leak
-capture either).
+tool rather than thrown away. It reproduces the sidebar's exact terminal
+lifecycle — raw mode, *enter the alternate screen*, then
+`EnableMouseCapture` — because wheel transport differs between primary
+and alternate screens (Section 5), and a primary-screen probe could
+green-light a mode the sidebar never runs in. It prints each
+`Event::Mouse` as one line (`kind`, `column`, `row`, `modifiers`) inside
+the alternate screen, and on `q`/`Ctrl-C` restores in the sidebar's
+order (capture off → leave alternate screen → raw-mode off — the probe
+must not leak capture either), then prints a per-kind event count
+summary to the primary screen so results survive the screen switch.
 
 **Procedure & pass criteria.** First run `cargo run --example
 mouse-probe` directly in ghostty: this control must pass before any
@@ -299,9 +308,13 @@ or the emulator assumption first — herdr is not implicated. If the
 control passes and a herdr run fails, the work item converts into a
 herdr-side forwarding investigation and this spec goes dormant — nothing
 in Sections 2–5 is worth building against a host that will not deliver
-the events. Partial
-pass (clicks yes, wheel no, or coordinates offset by pane origin)
-becomes a targeted amendment to Section 3's geometry before any code.
+the events. A partial pass routes the same way: missing wheel events
+cannot be manufactured client-side, and the sidebar cannot correct
+host-global coordinates — the decoded `PaneInfo` carries no pane
+rectangle (`src/herdr/api.rs`) to transform against. Both shapes are
+herdr-side findings. Only if that investigation yields a concrete
+pane-local transform (and this spec is amended to obtain the rect) does
+a Section 3 geometry change become an option.
 
 **Rollout.** Ships default-off inside a normal release; no migration, no
 config written on upgrade. The changelog line and README's settings
@@ -345,7 +358,10 @@ it. A capturing `Vec<u8>` writer asserts byte order — disable-capture
 bytes precede leave-alternate-screen in `Drop`, and appear only when the
 flag is set. `Vec<u8>` never fails, so the conservative error rules take
 a failing-`Write` double (a writer that errors on demand): enable
-failure leaves the flag set; disable failure does not clear it.
+failure leaves the flag set; disable failure does not clear it; and the
+failed-disable recovery emits bytes — disable fails, then a new `on`
+request writes enable bytes anyway, proving `set_mouse` has no equality
+short-circuit.
 `last_attempted` reconcile logic is a pure function with its own table:
 startup `None` attempts once, repeated ticks do not, each requested
 change attempts exactly once regardless of outcome —
