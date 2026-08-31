@@ -17,6 +17,9 @@ struct TerminalGuard<W: Write = std::io::Stdout, D: FnMut() -> std::io::Result<(
 {
     output: W,
     disable_raw_mode: D,
+    /// Conservative "capture may be applied" (spec §2): set before an
+    /// enable is attempted, cleared only after a successful disable.
+    mouse: bool,
 }
 
 impl TerminalGuard {
@@ -32,12 +35,34 @@ impl TerminalGuard {
         Ok(Self {
             output,
             disable_raw_mode: crossterm::terminal::disable_raw_mode,
+            mouse: false,
         })
+    }
+}
+
+impl<W: Write, D: FnMut() -> std::io::Result<()>> TerminalGuard<W, D> {
+    /// Every scheduled transition writes its bytes — no equality
+    /// short-circuit on `self.mouse`, because after a failed disable the
+    /// flag reads true while reporting may be partially off (spec §2).
+    fn set_mouse(&mut self, on: bool) -> std::io::Result<()> {
+        if on {
+            self.mouse = true;
+            crossterm::execute!(&mut self.output, crossterm::event::EnableMouseCapture)
+        } else {
+            crossterm::execute!(&mut self.output, crossterm::event::DisableMouseCapture)?;
+            self.mouse = false;
+            Ok(())
+        }
     }
 }
 
 impl<W: Write, D: FnMut() -> std::io::Result<()>> Drop for TerminalGuard<W, D> {
     fn drop(&mut self) {
+        // Capture off strictly first: leaking capture into the user's
+        // shell is the worst failure this feature can add (spec §2).
+        if self.mouse {
+            let _ = crossterm::execute!(&mut self.output, crossterm::event::DisableMouseCapture);
+        }
         let _ = crossterm::execute!(&mut self.output, crossterm::terminal::LeaveAlternateScreen);
         let _ = (self.disable_raw_mode)();
     }
@@ -2289,6 +2314,7 @@ mod tests {
                     raw_disabled.set(true);
                     Ok(())
                 },
+                mouse: false,
             };
         }
 
@@ -4276,5 +4302,101 @@ mod tests {
             40
         ));
         assert_eq!(it.cursor.as_deref(), Some("a"));
+    }
+
+    /// A writer the test can make fail on demand, with a shared view of
+    /// everything successfully written.
+    #[derive(Clone)]
+    struct FlakyWriter {
+        fail: std::rc::Rc<std::cell::Cell<bool>>,
+        wrote: std::rc::Rc<std::cell::RefCell<Vec<u8>>>,
+    }
+
+    impl FlakyWriter {
+        fn new() -> Self {
+            Self {
+                fail: std::rc::Rc::new(std::cell::Cell::new(false)),
+                wrote: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
+            }
+        }
+
+        fn written(&self) -> String {
+            String::from_utf8_lossy(&self.wrote.borrow()).into_owned()
+        }
+    }
+
+    impl Write for FlakyWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            if self.fail.get() {
+                return Err(std::io::Error::other("flaky"));
+            }
+            self.wrote.borrow_mut().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            if self.fail.get() {
+                return Err(std::io::Error::other("flaky"));
+            }
+            Ok(())
+        }
+    }
+
+    fn test_guard(writer: FlakyWriter) -> TerminalGuard<FlakyWriter, fn() -> std::io::Result<()>> {
+        TerminalGuard {
+            output: writer,
+            disable_raw_mode: || Ok(()),
+            mouse: false,
+        }
+    }
+
+    #[test]
+    fn drop_disables_capture_before_leaving_the_alternate_screen() {
+        let writer = FlakyWriter::new();
+        let mut guard = test_guard(writer.clone());
+        guard.set_mouse(true).expect("enable");
+        drop(guard);
+        let bytes = writer.written();
+        let disable = bytes.find("?1000l").expect("disable-capture bytes");
+        let leave = bytes.find("?1049l").expect("leave-alternate-screen bytes");
+        assert!(disable < leave, "capture off strictly before leave-alt");
+    }
+
+    #[test]
+    fn drop_without_capture_never_emits_a_disable() {
+        let writer = FlakyWriter::new();
+        let guard = test_guard(writer.clone());
+        drop(guard);
+        assert!(!writer.written().contains("?1000l"));
+        assert!(writer.written().contains("?1049l"));
+    }
+
+    #[test]
+    fn the_conservative_flag_survives_failures_and_never_short_circuits() {
+        let writer = FlakyWriter::new();
+        let mut guard = test_guard(writer.clone());
+
+        // A failed enable still marks "may be applied" (spec §2).
+        writer.fail.set(true);
+        assert!(guard.set_mouse(true).is_err());
+        assert!(guard.mouse, "flag set before the attempt");
+
+        // A failed disable does not clear it.
+        assert!(guard.set_mouse(false).is_err());
+        assert!(guard.mouse, "cleared only after a successful disable");
+
+        // Recovery emits bytes: a new `on` request writes the enable
+        // sequence even though the flag already reads true.
+        writer.fail.set(false);
+        writer.wrote.borrow_mut().clear();
+        guard.set_mouse(true).expect("re-enable");
+        assert!(
+            writer.written().contains("?1000h"),
+            "no equality short-circuit on the conservative flag"
+        );
+
+        // And a successful disable finally clears it.
+        guard.set_mouse(false).expect("disable");
+        assert!(!guard.mouse);
     }
 }
