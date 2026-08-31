@@ -316,6 +316,22 @@ herdr-side findings. Only if that investigation yields a concrete
 pane-local transform (and this spec is amended to obtain the rect) does
 a Section 3 geometry change become an option.
 
+**Probe results (2026-08-30).** All three runs pass; the gate is open.
+ghostty control: clicks plus both scroll directions, window-global
+coordinates, as expected outside a multiplexer. herdr default config:
+the full event set forwarded with **pane-local 0-based coordinates**
+(max `col=55 row=16` in a ~70×19 pane) — exactly the frame Section 3's
+`line = offset + row` arithmetic assumes, no transform needed. herdr
+`ui.mouse_capture = false` (applied live via `herdr server
+reload-config`, restored after): full event set still forwarded (23
+modifier-free left-downs, 570/558 scrolls), confirming the documented
+pane-app exception. Operational note: with `mouse_capture = false`,
+herdr's click-to-focus stops, so mouse events reach the pane app under
+the pointer while the keyboard stays wherever it was — the probe's `q`
+had to arrive via `herdr pane send-keys`. No spec impact: the sidebar
+receives events regardless of focus, and its own keys already work only
+when focused, which is unchanged herdr behavior.
+
 **Rollout.** Ships default-off inside a normal release; no migration, no
 config written on upgrade. The changelog line and README's settings
 table mention `[cards] mouse`. Platform note: the plugin already
