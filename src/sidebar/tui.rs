@@ -1374,6 +1374,25 @@ fn route(
     }
 }
 
+/// The mouse counterpart of `route`'s starvation rule, plus the off
+/// switch (spec §3). A delegation seam rather than inline in the event
+/// arm so the gate is unit-testable the way `route` is.
+#[allow(clippy::too_many_arguments)]
+fn route_mouse(
+    mouse: MouseEvent,
+    open: &Option<Dialog>,
+    mouse_enabled: bool,
+    it: &mut Interaction,
+    rendered: &Rendered,
+    viewport: u16,
+    total: usize,
+) -> bool {
+    if open.is_some() || !mouse_enabled {
+        return false;
+    }
+    apply_mouse(mouse, it, rendered, viewport, total)
+}
+
 /// "now" already reads as a time; everything else needs "ago". `format::age`
 /// returns the bare quantity, so appending unconditionally gives "now ago".
 fn taken_ago(taken_at: u64, now: u64) -> String {
@@ -2172,6 +2191,19 @@ pub fn run() -> i32 {
                     frame_size.height,
                 ) {
                     return 0;
+                }
+            }
+            Ok(Event::Mouse(mouse)) => {
+                if route_mouse(
+                    mouse,
+                    &open,
+                    live.mouse,
+                    &mut it,
+                    &last_rendered,
+                    viewport,
+                    total,
+                ) {
+                    dirty = true;
                 }
             }
             Ok(Event::Resize(_, _)) => dirty = true,
@@ -4192,5 +4224,57 @@ mod tests {
             20,
             40
         ));
+    }
+
+    #[test]
+    fn no_mouse_event_reaches_the_card_list_while_a_panel_is_open() {
+        let rendered = two_cards();
+        let mut it = Interaction::default();
+        let open = Some(keys_dialog());
+        assert!(!route_mouse(
+            click(0),
+            &open,
+            true,
+            &mut it,
+            &rendered,
+            20,
+            40
+        ));
+        assert_eq!(it.cursor, None);
+        assert!(it.toggled.is_empty());
+    }
+
+    #[test]
+    fn no_mouse_event_acts_while_the_setting_is_off() {
+        // Spec §3: capture can be physically stuck on after a failed
+        // disable; events from a stuck capture must not mutate cards.
+        let rendered = two_cards();
+        let mut it = Interaction::default();
+        assert!(!route_mouse(
+            click(0),
+            &None,
+            false,
+            &mut it,
+            &rendered,
+            20,
+            40
+        ));
+        assert_eq!(it.cursor, None);
+    }
+
+    #[test]
+    fn an_open_gate_delegates_to_apply_mouse() {
+        let rendered = two_cards();
+        let mut it = Interaction::default();
+        assert!(route_mouse(
+            click(0),
+            &None,
+            true,
+            &mut it,
+            &rendered,
+            20,
+            40
+        ));
+        assert_eq!(it.cursor.as_deref(), Some("a"));
     }
 }
