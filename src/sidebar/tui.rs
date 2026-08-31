@@ -2,11 +2,11 @@ use std::io::Write;
 use std::time::Duration;
 
 use crate::sidebar::config::Theme;
-use crossterm::event::{Event, KeyCode, KeyModifiers};
+use crossterm::event::{Event, KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::text::Text;
 use ratatui::widgets::Paragraph;
 
-use crate::sidebar::layout::{clamp_scroll, ensure_visible, reanchor};
+use crate::sidebar::layout::{card_at, clamp_scroll, ensure_visible, reanchor, Hit};
 use crate::sidebar::reducer::{apply_line, State};
 use crate::sidebar::state_stream::{Event as WireEvent, StateStream};
 use crate::sidebar::view::{Line, Rendered, Role, Semantic, ViewInput};
@@ -48,6 +48,8 @@ impl<W: Write, D: FnMut() -> std::io::Result<()>> Drop for TerminalGuard<W, D> {
 /// only thing still waiting is a daemon that died.
 const RECONNECT_FOR: Duration = Duration::from_secs(60);
 const INPUT_POLL_EVERY: Duration = Duration::from_millis(100);
+/// Matches herdr's own `mouse_scroll_lines` default of 3.
+const MOUSE_SCROLL_LINES: u16 = 3;
 
 fn terminal_is_gone(revents: i16) -> bool {
     revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0
@@ -1703,6 +1705,71 @@ fn apply_key(
         _ => {}
     }
     KeyOutcome::Handled
+}
+
+/// The card-list mutation for one mouse event (spec §3). Returns whether
+/// state changed: mouse events arrive in floods, so an inert click or a
+/// saturated scroll must not cost a redraw.
+fn apply_mouse(
+    mouse: MouseEvent,
+    it: &mut Interaction,
+    rendered: &Rendered,
+    viewport: u16,
+    total: usize,
+) -> bool {
+    if viewport == 0 {
+        return false;
+    }
+    match mouse.kind {
+        MouseEventKind::Down(MouseButton::Left) if mouse.modifiers.is_empty() => {
+            if mouse.row >= viewport {
+                return false;
+            }
+            let line = it.offset as usize + mouse.row as usize;
+            let Some((id, hit)) = card_at(&rendered.spans, line) else {
+                return false;
+            };
+            let id = id.to_string();
+            match hit {
+                Hit::Header => {
+                    it.cursor = Some(id.clone());
+                    if !it.toggled.remove(&id) {
+                        it.toggled.insert(id);
+                    }
+                    it.follow = true;
+                    true
+                }
+                // follow stays off: `ensure_visible` would scroll a
+                // partially visible card into view and pin an oversized
+                // one to its header — moving content under the pointer.
+                // And a repeated click on the already-selected body is a
+                // no-op that must say so (spec §3 dirty discipline).
+                Hit::Body => {
+                    let changed = it.cursor.as_deref() != Some(id.as_str()) || it.follow;
+                    it.cursor = Some(id);
+                    it.follow = false;
+                    changed
+                }
+            }
+        }
+        MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+            let before = it.offset;
+            it.offset = match mouse.kind {
+                MouseEventKind::ScrollUp => it.offset.saturating_sub(MOUSE_SCROLL_LINES),
+                _ => clamp_scroll(
+                    it.offset.saturating_add(MOUSE_SCROLL_LINES),
+                    total,
+                    viewport,
+                ),
+            };
+            if it.offset == before {
+                return false;
+            }
+            it.follow = false;
+            true
+        }
+        _ => false,
+    }
 }
 
 fn to_ratatui(
@@ -3998,5 +4065,132 @@ mod tests {
             Some("v9.9.9"),
             "the tag survives for `--ref`"
         );
+    }
+
+    fn click(row: u16) -> MouseEvent {
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 0,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    fn wheel(kind: MouseEventKind) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column: 0,
+            row: 5,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn a_header_click_selects_toggles_and_follows() {
+        let rendered = two_cards();
+        let mut it = Interaction::default();
+        assert!(apply_mouse(click(0), &mut it, &rendered, 20, 40));
+        assert_eq!(it.cursor.as_deref(), Some("a"));
+        assert!(it.toggled.contains("a"));
+        assert!(it.follow);
+        // Idempotence: the second header click un-toggles.
+        assert!(apply_mouse(click(0), &mut it, &rendered, 20, 40));
+        assert!(!it.toggled.contains("a"));
+    }
+
+    #[test]
+    fn a_body_click_selects_without_toggling_or_scrolling() {
+        let rendered = two_cards();
+        let mut it = Interaction {
+            follow: true,
+            offset: 2,
+            ..Default::default()
+        };
+        // Row 3 + offset 2 = line 5, inside card b's body.
+        assert!(apply_mouse(click(3), &mut it, &rendered, 20, 40));
+        assert_eq!(it.cursor.as_deref(), Some("b"));
+        assert!(it.toggled.is_empty());
+        assert!(!it.follow, "spec §3: a body click detaches, never scrolls");
+        assert_eq!(it.offset, 2, "offset untouched");
+        // The identical body click again changes nothing — and reports it.
+        assert!(!apply_mouse(click(3), &mut it, &rendered, 20, 40));
+    }
+
+    #[test]
+    fn a_click_through_a_scrolled_offset_resolves_the_scrolled_card() {
+        let rendered = two_cards();
+        let mut it = Interaction {
+            offset: 4,
+            ..Default::default()
+        };
+        // Row 0 + offset 4 = line 4 = card b's header.
+        assert!(apply_mouse(click(0), &mut it, &rendered, 20, 40));
+        assert_eq!(it.cursor.as_deref(), Some("b"));
+        assert!(it.toggled.contains("b"));
+    }
+
+    #[test]
+    fn inert_clicks_report_no_state_change() {
+        let rendered = two_cards();
+        let mut it = Interaction::default();
+        // The separator line between the cards.
+        assert!(!apply_mouse(click(3), &mut it, &rendered, 20, 40));
+        // The pinned footer region.
+        assert!(!apply_mouse(click(20), &mut it, &rendered, 20, 40));
+        // A modified click.
+        let shifted = MouseEvent {
+            modifiers: KeyModifiers::SHIFT,
+            ..click(0)
+        };
+        assert!(!apply_mouse(shifted, &mut it, &rendered, 20, 40));
+        // A zero viewport.
+        assert!(!apply_mouse(click(0), &mut it, &rendered, 0, 40));
+        assert_eq!(it.cursor, None, "no inert event moved the cursor");
+        assert!(it.toggled.is_empty());
+    }
+
+    #[test]
+    fn the_wheel_moves_three_lines_and_detaches_only_when_it_moves() {
+        let rendered = two_cards();
+        let mut it = Interaction {
+            follow: true,
+            ..Default::default()
+        };
+        // At the top, ScrollUp cannot move: no change, follow untouched.
+        assert!(!apply_mouse(
+            wheel(MouseEventKind::ScrollUp),
+            &mut it,
+            &rendered,
+            20,
+            40
+        ));
+        assert!(it.follow);
+        assert!(apply_mouse(
+            wheel(MouseEventKind::ScrollDown),
+            &mut it,
+            &rendered,
+            20,
+            40
+        ));
+        assert_eq!(it.offset, 3);
+        assert!(!it.follow, "a moved wheel detaches like PageDown");
+        // Saturate: total 40, viewport 20 clamps at 20.
+        for _ in 0..10 {
+            apply_mouse(
+                wheel(MouseEventKind::ScrollDown),
+                &mut it,
+                &rendered,
+                20,
+                40,
+            );
+        }
+        assert_eq!(it.offset, 20);
+        assert!(!apply_mouse(
+            wheel(MouseEventKind::ScrollDown),
+            &mut it,
+            &rendered,
+            20,
+            40
+        ));
     }
 }
