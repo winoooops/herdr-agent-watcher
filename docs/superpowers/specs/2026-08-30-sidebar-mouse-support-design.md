@@ -204,9 +204,10 @@ Section-2 reconcile rule — no restart, no reopen. On startup, capture is
 applied after `TerminalGuard::enter()` only when the loaded config says
 on.
 
-**Discoverability**: the `?` sheet gains one static hint line —
-`mouse (when on) · click selects · header click toggles · wheel scrolls`
-— rendered by the keys panel as a trailer, NOT appended to `KEYS`. The
+**Discoverability**: the `?` sheet gains one static trailer row — label
+`mouse (when on)`, description
+`click selects · header click toggles · wheel scrolls`, rendered by the
+keys panel in its normal two-column layout — NOT appended to `KEYS`. The
 `KEYS` table stays key-only so the load-bearing
 `the_sheet_and_the_driven_table_describe_the_same_keys` invariant (every
 `KEYS` label appears in `routed()`) is untouched; the panel's `len()`

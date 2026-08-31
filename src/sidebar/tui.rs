@@ -398,7 +398,8 @@ impl Dialog {
     fn len(&self) -> usize {
         match self {
             Dialog::Menu { .. } => MENU.len(),
-            Dialog::Keys { .. } => KEYS.len(),
+            // KEYS plus the mouse hint trailer the panel appends.
+            Dialog::Keys { .. } => KEYS.len() + 1,
             Dialog::Settings { .. } => crate::sidebar::live::SETTINGS.len() + 1,
             // These scroll; they have no selectable rows, so no cursor to
             // bound.
@@ -1488,6 +1489,13 @@ fn panel_for(
                     value: (*what).into(),
                     enabled: false,
                 })
+                .chain(std::iter::once(Row::Entry {
+                    // Outside KEYS on purpose: it names no key, so the
+                    // sheet↔routed invariant stays exact (spec §4).
+                    label: "mouse (when on)".into(),
+                    value: "click selects · header click toggles · wheel scrolls".into(),
+                    enabled: false,
+                }))
                 .collect(),
             footer: "j/k scroll · esc close".into(),
             cursor: Some(*cursor),
@@ -4432,5 +4440,27 @@ mod tests {
         // …and each change attempts exactly once, success or not.
         assert_eq!(mouse_transition(false, Some(true)), Some(false));
         assert_eq!(mouse_transition(true, Some(false)), Some(true));
+    }
+
+    #[test]
+    fn the_keys_sheet_carries_the_mouse_hint_outside_the_key_contract() {
+        let live = live_default();
+        let cfg = crate::sidebar::config::Loaded::from_missing();
+        let panel = panel_for(&keys_dialog(), &live, &cfg, 0);
+        assert_eq!(panel.rows.len(), KEYS.len() + 1);
+        assert_eq!(
+            keys_dialog().len(),
+            KEYS.len() + 1,
+            "scroll bounds cover the trailer"
+        );
+        let Some(crate::sidebar::dialog::Row::Entry { label, value, .. }) = panel.rows.last()
+        else {
+            panic!("the trailer is an entry row");
+        };
+        assert_eq!(label, "mouse (when on)");
+        assert_eq!(
+            value,
+            "click selects · header click toggles · wheel scrolls"
+        );
     }
 }
