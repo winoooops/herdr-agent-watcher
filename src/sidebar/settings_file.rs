@@ -32,6 +32,7 @@ fn item_for(live: &Live, setting: Setting) -> Item {
     match setting {
         Setting::HideIdle => value(live.hide_idle),
         Setting::PlanUsage => value(live.plan_usage),
+        Setting::Mouse => value(live.mouse),
         Setting::TraceLines => value(i64::from(live.trace_lines)),
         Setting::IntervalMs => value(i64::from(live.interval_ms)),
         Setting::PruneAfterDays => value(i64::from(live.prune_after_days)),
@@ -408,5 +409,16 @@ sort = \"position\"
             std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
             0o600
         );
+    }
+
+    #[test]
+    fn mouse_saves_under_cards_without_disturbing_the_document() {
+        let mut live = Live::from(&crate::sidebar::config::Loaded::from_missing());
+        live.mouse = true;
+        let current = "# a comment the save must keep\n[cards]\nauto_expand = \"all\"\n";
+        let edited = edit(current, &live, &[Setting::Mouse]).expect("edit");
+        assert!(edited.contains("# a comment the save must keep"));
+        assert!(edited.contains("auto_expand = \"all\""));
+        assert!(edited.contains("mouse = true"));
     }
 }
