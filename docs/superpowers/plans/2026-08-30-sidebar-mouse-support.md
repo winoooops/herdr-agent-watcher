@@ -1062,3 +1062,5 @@ git add README.md && git commit -m "docs: document cards.mouse in the configurat
 - §5 requested-vs-applied, enable/disable failure, stuck capture → Tasks 7, 8, 6; degenerate viewport → Task 5.
 - §6 probe → done pre-plan (2026-08-30, recorded in spec).
 - §7 test list → distributed across Tasks 1–9 exactly as specified.
+
+<!-- codex-reviewed: 2026-08-31T02:44:37Z -->
