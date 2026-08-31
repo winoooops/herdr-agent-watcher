@@ -142,6 +142,7 @@ setting rather than the plugin.
 | `cards.tool_calls` | `bars`, `jar` | `bars` | How the context meter is drawn |
 | `cards.trace_lines` | `1`–`20` | `5` | Traces per expanded card. Out of range clamps, it does not reject |
 | `cards.plan_usage` \* | `true`, `false` | `true` | Show plan usage on expanded cards |
+| `cards.mouse` | `true`, `false` | `false` | Capture the mouse in the sidebar: click a card header to expand/collapse it, click a body to select, scroll with the wheel. Off by default because capture takes native drag-to-select text away from the pane |
 | `list.sort` | `position`, `smart`, `group` | `position` | Card order: Herdr's layout, urgency, or grouped by agent. `position` is the default because it is the only one that does not move under you |
 | `list.hide_idle` | `true`, `false` | `false` | Hide idle agents, as `z` does |
 | `list.scope` | `all`, `workspace` | `all` | `workspace` needs `HERDR_WORKSPACE_ID`; without it, falls back to `all` |
