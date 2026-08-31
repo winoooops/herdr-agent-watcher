@@ -57,6 +57,7 @@ pub struct Loaded {
     pub tool_calls: ToolCallStyle,
     pub trace_lines: u8,
     pub plan_usage: bool,
+    pub mouse: bool,
     pub sort: Sort,
     pub hide_idle: bool,
     pub scope: Scope,
@@ -85,6 +86,7 @@ impl Default for Loaded {
             tool_calls: ToolCallStyle::default(),
             trace_lines: 5,
             plan_usage: true,
+            mouse: false,
             sort: Sort::default(),
             hide_idle: false,
             scope: Scope::default(),
@@ -278,6 +280,10 @@ impl Loaded {
                 "plan_usage" => match val.as_bool() {
                     Some(enabled) => self.plan_usage = enabled,
                     None => self.problem("invalid value for cards.plan_usage".into()),
+                },
+                "mouse" => match val.as_bool() {
+                    Some(enabled) => self.mouse = enabled,
+                    None => self.problem("invalid value for cards.mouse".into()),
                 },
                 other => self.problem(format!("unknown key cards.{other}")),
             }
@@ -787,5 +793,15 @@ mod tests {
         let l = load_str("[agent.claude]\nsymbol = \"猫\"\n");
         assert!(l.appearances["claude"].symbol.is_none());
         assert_eq!(l.status.problems, 1);
+    }
+
+    #[test]
+    fn mouse_defaults_off_and_reads_the_cards_key() {
+        assert!(!load_str("").mouse);
+        assert!(load_str("[cards]\nmouse = true\n").mouse);
+        assert!(!load_str("[cards]\nmouse = false\n").mouse);
+        let invalid = load_str("[cards]\nmouse = \"sure\"\n");
+        assert!(!invalid.mouse, "a bad value falls back to off");
+        assert_eq!(invalid.status.problems, 1);
     }
 }
