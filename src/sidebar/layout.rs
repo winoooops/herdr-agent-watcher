@@ -53,6 +53,30 @@ pub fn reanchor(
     clamp_scroll(next.clamp(0, u16::MAX as i64) as u16, total_lines, viewport)
 }
 
+/// Which part of a card a content line lands on (spec §3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Hit {
+    Header,
+    Body,
+}
+
+/// The card whose span contains `line`, and whether that line is its
+/// header row. Lines inside no span — separator rows, anything past the
+/// last card — are misses the caller treats as inert.
+pub fn card_at(spans: &[(String, LineSpan)], line: usize) -> Option<(&str, Hit)> {
+    spans.iter().find_map(|(id, span)| {
+        let inside = line >= span.start && line < span.start + span.height;
+        inside.then(|| {
+            let hit = if line == span.start {
+                Hit::Header
+            } else {
+                Hit::Body
+            };
+            (id.as_str(), hit)
+        })
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -139,5 +163,33 @@ mod tests {
         };
         assert_eq!(reanchor(45, old, new, 20, 100), 15);
         assert_eq!(reanchor(38, old, new, 20, 100), 8);
+    }
+
+    #[test]
+    fn card_at_maps_lines_to_cards_and_header_rows() {
+        let spans = vec![
+            (
+                "a".to_string(),
+                LineSpan {
+                    start: 0,
+                    height: 3,
+                },
+            ),
+            (
+                "b".to_string(),
+                LineSpan {
+                    start: 4,
+                    height: 20,
+                },
+            ),
+        ];
+        assert_eq!(card_at(&spans, 0), Some(("a", Hit::Header)));
+        assert_eq!(card_at(&spans, 2), Some(("a", Hit::Body)), "last body row");
+        assert_eq!(card_at(&spans, 3), None, "the separator row is inert");
+        assert_eq!(card_at(&spans, 4), Some(("b", Hit::Header)));
+        assert_eq!(card_at(&spans, 23), Some(("b", Hit::Body)));
+        assert_eq!(card_at(&spans, 24), None, "one past the last card");
+        assert_eq!(card_at(&spans, 500), None, "past all content");
+        assert_eq!(card_at(&[], 0), None, "empty span list");
     }
 }
