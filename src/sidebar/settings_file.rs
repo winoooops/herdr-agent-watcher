@@ -18,6 +18,7 @@ fn table_and_key(setting: Setting) -> (&'static str, &'static str) {
         Setting::ToolCalls => ("cards", "tool_calls"),
         Setting::TraceLines => ("cards", "trace_lines"),
         Setting::PlanUsage => ("cards", "plan_usage"),
+        Setting::Mouse => ("cards", "mouse"),
         Setting::Theme => ("appearance", "theme"),
         Setting::AgentMark => ("appearance", "agent_mark"),
         // The daemon's table. The sidebar's loader skips it entirely, which is

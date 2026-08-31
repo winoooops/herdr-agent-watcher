@@ -20,6 +20,10 @@ pub struct Live {
     pub tool_calls: ToolCallStyle,
     pub trace_lines: u8,
     pub plan_usage: bool,
+    /// Requested state (spec §5): what the user asked for, what the row
+    /// shows, what saves persist. Whether capture is applied lives in
+    /// the terminal guard, never here.
+    pub mouse: bool,
     pub theme: Theme,
     pub agent_mark: AgentMark,
     /// The daemon's, not the sidebar's. Editable and saveable, but it cannot
@@ -89,6 +93,7 @@ impl Live {
             tool_calls: cfg.tool_calls,
             trace_lines: cfg.trace_lines,
             plan_usage: cfg.plan_usage,
+            mouse: cfg.mouse,
             theme: cfg.theme,
             agent_mark: cfg.agent_mark,
             interval_ms: daemon_interval_ms,
@@ -119,13 +124,14 @@ pub enum Setting {
     ToolCalls,
     TraceLines,
     PlanUsage,
+    Mouse,
     Theme,
     AgentMark,
     IntervalMs,
     PruneAfterDays,
 }
 
-pub const SETTINGS: [Setting; 11] = [
+pub const SETTINGS: [Setting; 12] = [
     Setting::Sort,
     Setting::Scope,
     Setting::HideIdle,
@@ -133,6 +139,7 @@ pub const SETTINGS: [Setting; 11] = [
     Setting::ToolCalls,
     Setting::TraceLines,
     Setting::PlanUsage,
+    Setting::Mouse,
     Setting::Theme,
     Setting::AgentMark,
     Setting::IntervalMs,
@@ -149,6 +156,7 @@ impl Setting {
             Setting::ToolCalls => "tool calls",
             Setting::TraceLines => "trace lines",
             Setting::PlanUsage => "plan usage",
+            Setting::Mouse => "mouse",
             Setting::Theme => "theme",
             Setting::AgentMark => "agent mark",
             Setting::IntervalMs => "interval ms",
@@ -184,6 +192,7 @@ impl Live {
             .into(),
             Setting::TraceLines => self.trace_lines.to_string(),
             Setting::PlanUsage => if self.plan_usage { "yes" } else { "no" }.into(),
+            Setting::Mouse => if self.mouse { "on" } else { "off" }.into(),
             Setting::Theme => match self.theme {
                 Theme::Inherit => "inherit",
                 Theme::Lumon => "lumon",
@@ -242,6 +251,7 @@ impl Live {
             // Clamped, not wrapped: a held key must not jump 20 → 1.
             Setting::TraceLines => self.trace_lines = (self.trace_lines + 1).min(20),
             Setting::PlanUsage => self.plan_usage = !self.plan_usage,
+            Setting::Mouse => self.mouse = !self.mouse,
             Setting::IntervalMs => {
                 self.interval_ms = step_ladder(&INTERVALS_MS, self.interval_ms, 1)
             }
@@ -296,6 +306,7 @@ mod tests {
         cfg.scope = Scope::Workspace;
         cfg.workspace_id = Some("w4".into());
         cfg.prune_after_days = 30;
+        cfg.mouse = true;
 
         let live = Live::from(&cfg);
         assert_eq!(live.sort, Sort::Smart);
@@ -305,6 +316,19 @@ mod tests {
         assert_eq!(live.scope, Scope::Workspace);
         assert_eq!(live.workspace.as_deref(), Some("w4"));
         assert_eq!(live.prune_after_days, 30);
+        assert!(live.mouse);
+    }
+
+    #[test]
+    fn the_mouse_setting_cycles_and_reports_on_off() {
+        let mut live = Live::from(&Loaded::from_missing());
+        assert_eq!(live.value(Setting::Mouse), "off");
+        live.cycle(Setting::Mouse, None);
+        assert_eq!(live.value(Setting::Mouse), "on");
+        assert!(live.mouse);
+        live.cycle_back(Setting::Mouse, None);
+        assert!(!live.mouse);
+        assert!(SETTINGS.contains(&Setting::Mouse));
     }
 
     #[test]
