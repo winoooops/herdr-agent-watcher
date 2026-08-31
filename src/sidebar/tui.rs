@@ -1816,6 +1816,13 @@ fn apply_mouse(
     }
 }
 
+/// One attempt per change of the requested value (spec §2 rule 1),
+/// keyed on the request — never on the guard's conservative flag, which
+/// diverges forever after a failed disable and would retry every tick.
+fn mouse_transition(requested: bool, last_attempted: Option<bool>) -> Option<bool> {
+    (last_attempted != Some(requested)).then_some(requested)
+}
+
 fn to_ratatui(
     style: crate::sidebar::style::Style,
     theme: Theme,
@@ -1912,7 +1919,7 @@ pub fn run() -> i32 {
     };
     let mut lost_at: Option<std::time::Instant> = None;
 
-    let guard = match TerminalGuard::enter() {
+    let mut guard = match TerminalGuard::enter() {
         Ok(guard) => guard,
         Err(error) => {
             eprintln!("unable to initialize sidebar terminal: {error}");
@@ -1959,8 +1966,22 @@ pub fn run() -> i32 {
     };
     let mut last_age_tick_ms: u64 = now_unix_ms();
     let mut dirty = true;
+    let mut mouse_attempted: Option<bool> = None;
 
     loop {
+        // Requested-vs-attempted reconcile (spec §2 rule 1): the settings
+        // toggle takes effect this iteration, startup applies the loaded
+        // config exactly once, and a failing terminal is never hammered.
+        if let Some(requested) = mouse_transition(live.mouse, mouse_attempted) {
+            mouse_attempted = Some(requested);
+            if guard.set_mouse(requested).is_err() && requested {
+                // Intent stands (spec §5): live.mouse stays true, the file
+                // keeps what the user asked for; only the notice reports.
+                it.notice = Some("mouse capture failed".into());
+                dirty = true;
+            }
+        }
+
         let mut reopen = None;
         if poll_keybinding(&mut open) {
             dirty = true;
@@ -4398,5 +4419,18 @@ mod tests {
         // And a successful disable finally clears it.
         guard.set_mouse(false).expect("disable");
         assert!(!guard.mouse);
+    }
+
+    #[test]
+    fn the_reconciler_attempts_once_per_requested_change() {
+        // Startup None forces exactly one attempt, whatever the request.
+        assert_eq!(mouse_transition(true, None), Some(true));
+        assert_eq!(mouse_transition(false, None), Some(false));
+        // A repeated tick with the same request does nothing…
+        assert_eq!(mouse_transition(true, Some(true)), None);
+        assert_eq!(mouse_transition(false, Some(false)), None);
+        // …and each change attempts exactly once, success or not.
+        assert_eq!(mouse_transition(false, Some(true)), Some(false));
+        assert_eq!(mouse_transition(true, Some(false)), Some(true));
     }
 }
