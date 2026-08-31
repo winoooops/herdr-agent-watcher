@@ -413,6 +413,8 @@ use crate::sidebar::layout::{card_at, clamp_scroll, ensure_visible, reanchor, Hi
         assert!(it.toggled.is_empty());
         assert!(!it.follow, "spec §3: a body click detaches, never scrolls");
         assert_eq!(it.offset, 2, "offset untouched");
+        // The identical body click again changes nothing — and reports it.
+        assert!(!apply_mouse(click(3), &mut it, &rendered, 20, 40));
     }
 
     #[test]
@@ -515,16 +517,20 @@ fn apply_mouse(
                         it.toggled.insert(id);
                     }
                     it.follow = true;
+                    true
                 }
                 // follow stays off: `ensure_visible` would scroll a
                 // partially visible card into view and pin an oversized
                 // one to its header — moving content under the pointer.
+                // And a repeated click on the already-selected body is a
+                // no-op that must say so (spec §3 dirty discipline).
                 Hit::Body => {
+                    let changed = it.cursor.as_deref() != Some(id.as_str()) || it.follow;
                     it.cursor = Some(id);
                     it.follow = false;
+                    changed
                 }
             }
-            true
         }
         MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
             let before = it.offset;
@@ -825,6 +831,8 @@ impl<W: Write, D: FnMut() -> std::io::Result<()>> Drop for TerminalGuard<W, D> {
 
 (The re-exec sites already call `drop(guard)` explicitly, so this single cleanup covers both exit paths — do not add another.)
 
+Also update the EXISTING test `dropping_the_terminal_guard_leaves_the_screen_and_raw_mode` (near the bottom of the file, ~line 2183): its literal `TerminalGuard { output: &mut output, disable_raw_mode: || { … } }` gains the new field — add `mouse: false,` — or this task's own test run fails on the missing field.
+
 - [ ] **Step 4: Run to verify pass**
 
 Run: `cargo test sidebar::tui -- --nocapture`
@@ -940,7 +948,7 @@ cargo fmt && git add src/sidebar/tui.rs && git commit -m "feat(sidebar): reconci
             panic!("the trailer is an entry row");
         };
         assert_eq!(label, "mouse (when on)");
-        assert_eq!(value, "click selects · header toggles · wheel scrolls");
+        assert_eq!(value, "click selects · header click toggles · wheel scrolls");
     }
 ```
 
@@ -972,11 +980,30 @@ Expected: FAIL — `panel.rows.len()` is `KEYS.len()`.
                     // Outside KEYS on purpose: it names no key, so the
                     // sheet↔routed invariant stays exact (spec §4).
                     label: "mouse (when on)".into(),
-                    value: "click selects · header toggles · wheel scrolls".into(),
+                    value: "click selects · header click toggles · wheel scrolls".into(),
                     enabled: false,
                 }))
                 .collect(),
 ```
+
+The dialog renders entry rows as two padded columns, so the hint displays as label + description, not one `·`-joined string. Amend the spec's §4 wording to match what actually renders — in `docs/superpowers/specs/2026-08-30-sidebar-mouse-support-design.md`, replace:
+
+```
+**Discoverability**: the `?` sheet gains one static hint line —
+`mouse (when on) · click selects · header click toggles · wheel scrolls`
+— rendered by the keys panel as a trailer, NOT appended to `KEYS`.
+```
+
+with:
+
+```
+**Discoverability**: the `?` sheet gains one static trailer row — label
+`mouse (when on)`, description
+`click selects · header click toggles · wheel scrolls`, rendered by the
+keys panel in its normal two-column layout — NOT appended to `KEYS`.
+```
+
+and include the spec file in this task's commit.
 
 - [ ] **Step 4: Run to verify pass**
 
@@ -986,7 +1013,7 @@ Expected: PASS — including `the_sheet_and_the_driven_table_describe_the_same_k
 - [ ] **Step 5: Commit**
 
 ```bash
-cargo fmt && git add src/sidebar/tui.rs && git commit -m "feat(sidebar): mouse hint on the keys sheet, outside the key contract"
+cargo fmt && git add src/sidebar/tui.rs docs/superpowers/specs/2026-08-30-sidebar-mouse-support-design.md && git commit -m "feat(sidebar): mouse hint on the keys sheet, outside the key contract"
 ```
 
 ---
@@ -1018,6 +1045,11 @@ Run in a herdr pane: `cargo build --release && herdr plugin action invoke open-s
 ```bash
 git add README.md && git commit -m "docs: document cards.mouse in the configuration section"
 ```
+
+- [ ] **Step 5: Release-gate reminders (spec §6 rollout — actions at release time, not now).** Record these two items wherever the release is tracked, and honor them in the release that ships this feature:
+
+1. Run `cargo run --example mouse-probe` on the other supported OS (macOS if this was implemented on Linux) inside a herdr pane before tagging.
+2. Per this repo's release convention (CLAUDE.md "Releasing": notes live in the `chore: <version>` bump commit body; no separate changelog file), include a line in that body such as: `sidebar: opt-in mouse support — set [cards] mouse = true to click and scroll the card list`.
 
 ---
 
