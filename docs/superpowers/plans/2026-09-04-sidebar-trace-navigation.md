@@ -119,6 +119,7 @@ pub fn trace_at(spans: &[(String, String, LineSpan)], line: usize) -> Option<(&s
 **Files:**
 - Modify: `src/sidebar/style.rs` — `Rendered` gains `trace_spans: Vec<(String, String, LineSpan)>` and `trace_span_for`.
 - Modify: `src/sidebar/view.rs` — `ViewInput` gains `trace_focus: Option<(&'a str, &'a str)>`; `trace_rows` returns row metadata and honors focus (full ring, reversed selected row, dedup, display-only); new `expanded_card_with_traces` (existing `expanded_card` becomes a `.0` delegate — its 30+ callers stay untouched); `render` threads the metadata into absolute spans.
+- Modify: `src/sidebar/tui.rs:185` — the shell's `ViewInput` constructor gains `trace_focus: None` (a placeholder Task 4 replaces with the real pair).
 - Modify: `tests/e2e_fake_herdr.rs:676` — `trace_focus: None` in the existing `ViewInput` literal (compile fix only).
 - Tests: `src/sidebar/view.rs`'s existing `mod tests`.
 
@@ -146,10 +147,10 @@ pub fn trace_at(spans: &[(String, String, LineSpan)], line: usize) -> Option<(&s
       })
       .collect();
   ```
-  then take `calls.iter().take(window)` where `window` is `usize::MAX` when `cx` says this card is trace-focused, else `cx.trace_lines as usize`.
+  then take `calls.iter().take(window)` where `window` is `usize::MAX` when `cx` says this card is trace-focused, else `cx.trace_lines as usize`. **The `+N older` remainder line (currently computed from `cx.trace_lines` at `view.rs:834`) uses the same `window`**: a focused card shows zero remainder — leaving the old calculation renders a false `+N older` under the full ring.
 - Selectable check per row: `let selectable = call.get("toolUseId").and_then(Value::as_str).is_some() && matches!(call.get("status").and_then(Value::as_str), Some("done") | Some("failed"));` — push `(id, offset)` metadata only when selectable.
 - `CardCtx` gains `trace_focus: Option<&str>` (the selected id, already scoped to this card by the caller) — when `Some(id)` matches a row's id, wrap every span of that row with `reverse: true` styling exactly the way the card cursor row does (find the existing reversed-row treatment in `view.rs` and reuse the same `Style` mutation).
-- `expanded_card` records `let traces_at = lines.len();` before `lines.extend(trace_rows(...).0)` and returns the metadata alongside; `render` (at the existing `let start = scrollable.len();` / `spans.push((...))` site, `view.rs:907–928`) converts each `(id, offset)` into `(pane_id.clone(), id, LineSpan { start: start + traces_at + offset, height: 1 })` pushed onto `trace_spans`. Collapsed cards contribute nothing.
+- `expanded_card_with_traces` records `let traces_at = lines.len();` before extending with `trace_rows(...).0` and returns the metadata alongside; `render` (at the existing `let start = scrollable.len();` / `spans.push((...))` site, `view.rs:907–928`) converts each `(id, offset)` into `(pane_id.clone(), id, LineSpan { start: start + traces_at + offset, height: 1 })` pushed onto `trace_spans`. Collapsed cards contribute nothing.
 - `render`'s `ViewInput.trace_focus` is consulted twice: (a) the focused card renders the full ring; (b) that card's `CardCtx.trace_focus = Some(id)`.
 - The final `Rendered { scrollable, pinned, spans }` literal gains `trace_spans`. **Every `Rendered { … }` literal in the tree gains the field** — `grep -rn "Rendered {" src/` and add `trace_spans: Vec::new()` everywhere EXCEPT `two_cards()` in `tui.rs`, which gets exactly these two rows inside card `a` (Tasks 5–7's click coordinates depend on them):
 
@@ -235,6 +236,12 @@ pub fn trace_at(spans: &[(String, String, LineSpan)], line: usize) -> Option<(&s
         // Focused: all 10, and the selected row is reversed.
         let focused = render_one_expanded("p1", t, Some(("p1", "t3")));
         assert_eq!(focused.trace_spans.len(), 10);
+        let text: String = focused
+            .scrollable
+            .iter()
+            .flat_map(|line| line.iter().map(|s| s.text.clone()))
+            .collect();
+        assert!(!text.contains("older"), "no false +N older under the full ring");
         let span = focused.trace_span_for("p1", "t3").expect("selected row");
         let row = &focused.scrollable[span.start];
         assert!(
@@ -249,7 +256,7 @@ pub fn trace_at(spans: &[(String, String, LineSpan)], line: usize) -> Option<(&s
 - [ ] **Step 2: Verify failure** — `cargo test sidebar::view::tests::trace_spans_export` — FAIL to compile (`no field trace_spans`).
 - [ ] **Step 3: Implement** per the notes above (style.rs field + `trace_span_for`; view.rs threading; fix every `Rendered` literal the grep finds).
 - [ ] **Step 4: Verify pass** — `cargo test sidebar::view && cargo test sidebar::tui` (the latter proves fixture literals were all updated) — PASS.
-- [ ] **Step 5: Commit** — `cargo fmt && git add -A src/sidebar && git commit -m "feat(sidebar): export trace-row geometry and render trace focus"`
+- [ ] **Step 5: Commit** — `cargo fmt && git add src/sidebar tests/e2e_fake_herdr.rs && git commit -m "feat(sidebar): export trace-row geometry and render trace focus"`
 
 ---
 
@@ -274,7 +281,7 @@ pub fn trace_at(spans: &[(String, String, LineSpan)], line: usize) -> Option<(&s
         let cur = Some("a".to_string());
         let mut focus = Some("t1".to_string());
         let spans = vec![tspan("a", "t0", 5), tspan("a", "t1", 6)];
-        assert!(!reconcile_trace_focus(&cur, &mut focus, &spans, &spans));
+        assert!(!reconcile_trace_focus(&cur, &cur, &mut focus, &spans, &spans));
         assert_eq!(focus.as_deref(), Some("t1"));
     }
 
@@ -284,7 +291,7 @@ pub fn trace_at(spans: &[(String, String, LineSpan)], line: usize) -> Option<(&s
         let mut focus = Some("t9".to_string());
         let previous = vec![tspan("a", "t8", 5), tspan("a", "t9", 6)];
         let current = vec![tspan("a", "t8", 5), tspan("a", "t7", 6)];
-        assert!(reconcile_trace_focus(&cur, &mut focus, &previous, &current));
+        assert!(reconcile_trace_focus(&cur, &cur, &mut focus, &previous, &current));
         assert_eq!(focus.as_deref(), Some("t7"), "same index, newest side");
     }
 
@@ -315,8 +322,27 @@ pub fn trace_at(spans: &[(String, String, LineSpan)], line: usize) -> Option<(&s
 
 (The two surviving tests from above pass `&cur, &cur` — a stable anchor.)
 
+Also add the two remaining anchor-loss cases as tests in the same table:
+
+```rust
+    #[test]
+    fn collapse_and_expansion_flips_drop_focus_via_absent_spans() {
+        // A collapsed card (or auto_expand flipped in settings) renders no
+        // trace rows, so its spans vanish — the reconcile must drop focus.
+        let cur = Some("a".to_string());
+        let mut focus = Some("t1".to_string());
+        let previous = vec![tspan("a", "t1", 5)];
+        assert!(reconcile_trace_focus(&cur, &cur, &mut focus, &previous, &[]));
+        assert_eq!(focus, None);
+    }
+```
+
+(Attached-vs-detached churn visibility is a draw-site property proven by
+the follow-flag tests in Tasks 5/6 plus `follow_span` in Task 9 — the
+flag decides `ensure_visible` vs `reanchor` exactly as in v0.2.5.)
+
 - [ ] **Step 2: Verify failure** — FAIL to compile (`no field trace_focus` / missing fn).
-- [ ] **Step 3: Implement** the field (`Interaction` derives `Default` — `Option` defaults fine). Also update the two `reconcile_trace_focus` signature examples below to take `previous_cursor` first, per the interface block, and mirror the first-parameter comparison at the top:
+- [ ] **Step 3: Implement** the field (`Interaction` derives `Default` — `Option` defaults fine). Import note: `tui.rs` does not import `LineSpan` today — extend line 9 to `use crate::sidebar::layout::{card_at, clamp_scroll, ensure_visible, reanchor, trace_at, Hit, LineSpan};` (this also pre-imports `trace_at` for Task 6). Then:
 
 ```rust
 /// Spec §2: the pair either still renders, snaps to the nearest surviving
@@ -383,7 +409,7 @@ Wire it in the draw block right after the cursor reconcile (capture `let previou
 
 **Interfaces:**
 - Consumes: `Interaction.trace_focus`, `Rendered.trace_spans`, `Live.auto_expand`, `Interaction.toggled`.
-- Produces (Task 9 consumes): `KeyOutcome::{Quit, Handled, EnterTraces { card_id: String }, OpenTrace { card_id: String, tool_use_id: String }}`. Zone rules (spec §2): with `trace_focus` set, `j`/`k` move over the cursor card's rows in `trace_spans` (clamped, `follow = true`), `h` clears focus, `o`/Enter yields `OpenTrace(pair)`, `l` is inert; in the card zone, `l` yields `EnterTraces` when the cursor card is expanded (`expanded = matches!(live.auto_expand, AutoExpand::All) ^ it.toggled.contains(id)`), and `h` is inert. `z`/PageUp/PageDown/arrows keep their existing arms in both zones; `q`/esc/ctrl-c unchanged.
+- Produces (Task 9 consumes): `KeyOutcome::{Quit, Handled, EnterTraces { card_id: String }, OpenTrace { card_id: String, tool_use_id: String }}`. Zone rules (spec §2): with `trace_focus` set, `j`/`k` move over the cursor card's rows in `trace_spans` (clamped, `follow = true`), `h` clears focus, `o`/Enter yields `OpenTrace(pair)`, `l` is inert; in the card zone, `l` yields `EnterTraces` when the cursor card is expanded (`expanded = matches!(live.auto_expand, crate::sidebar::config::AutoExpand::All) ^ it.toggled.contains(id)` — fully qualified; `tui.rs` does not import `AutoExpand`), and `h` is inert. `z`/PageUp/PageDown/arrows keep their existing arms in both zones; `q`/esc/ctrl-c unchanged.
 
 - [ ] **Step 1: Write the failing tests** (the `two_cards()` fixture gains trace spans on card `a` in Task 3's literal update — give it `tspan("a","t-new",1)` and `tspan("a","t-old",2)` here if not already):
 
@@ -507,6 +533,12 @@ Wire it in the draw block right after the cursor reconcile (capture `let previou
         it.toggled.insert("a".into());
         apply_mouse(click(0), &mut it, &rendered, 20, 40); // card a header
         assert_eq!(it.trace_focus, None);
+        // Header click onto ANOTHER card: focus must not ride along even
+        // though pane-unique ids could collide (spec §3 general rule).
+        let mut it = focused("a", "t-new");
+        apply_mouse(click(4), &mut it, &rendered, 20, 40); // card b header
+        assert_eq!(it.cursor.as_deref(), Some("b"));
+        assert_eq!(it.trace_focus, None);
     }
 ```
 
@@ -541,7 +573,7 @@ Update the existing v0.2.5 mouse tests mechanically: `assert!(apply_mouse(...))`
 **Interfaces:**
 - Consumes: `dialog::{Panel, Row, line_count}`.
 - Produces:
-  - `dialog::Row::Text(String)` (spec §4): one logical line, rendered **verbatim** — leading spaces and exact spacing preserved (pretty-JSON indentation). `Note`'s `wrap` is word-joining and collapses space runs, so `Text` wraps by the character-budget path only: a new `fn wrap_verbatim(text: &str, width: usize) -> Vec<String>` that slices by display width without re-joining words (reuse the long-word loop inside `wrap`). `line_count` counts `Text` via `wrap_verbatim(...).len()`; `render`'s row match draws each wrapped slice framed like a `Note` but with `Role::Body` styling and no re-spacing. `Row` derives `Clone` (Task 9's resolver and `panel_for` both clone rows out of the dialog).
+  - `dialog::Row::Text(String)` (spec §4): one logical line, rendered **verbatim** — leading spaces and exact spacing preserved (pretty-JSON indentation). `Note`'s `wrap` is word-joining and collapses space runs, so `Text` wraps by the character-budget path only: a new `fn wrap_verbatim(text: &str, width: usize) -> Vec<String>`: **split on `'\n'` first** (each hard line is its own unit — spec §4 newline preservation), then slice each unit by display width without re-joining words (reuse the long-word loop inside `wrap`); an empty unit yields one empty rendered line. `line_count` counts `Text` via `wrap_verbatim(...).len()`; `render`'s row match draws each wrapped slice framed like a `Note` but with `Role::Body` styling and no re-spacing. `Row` derives `Clone` (Task 9's resolver and `panel_for` both clone rows out of the dialog).
   - `Dialog::TraceDetail { title: String, rows: Vec<Row>, offset: usize }` — a **fully frozen snapshot**; `fn trace_panel(title: &str, rows: &[Row], offset: usize) -> Panel` (cursor `None`, footer `"j/k scroll · esc close"`, `rows: rows.to_vec()`); `fn panel_width(frame: u16) -> u16 { frame.min(60) }` used by BOTH the draw site (replacing the inline `area.width.min(60)`) and scroll bounding (spec §4 shared-width rule).
 - Routing: `esc`/`q` on `TraceDetail` sets `*open = None` directly (its own arm ABOVE the generic back-to-menu branch — spec §4); `j`/`k` scroll by offset bounded by `dialog::line_count(&trace_panel(...), panel_width(width))` — `route` already receives `width`. `Dialog::len` returns 0; the exhaustive `cursor_mut` gains `Dialog::TraceDetail { .. } => None` (compile requirement); `offset`/`offset_mut` include it.
 
@@ -576,6 +608,9 @@ Update the existing v0.2.5 mouse tests mechanically: `assert!(apply_mouse(...))`
             body.contains("  \"command\": \"cargo test\""),
             "leading indentation survives verbatim, got: {body}"
         );
+        // Embedded hard newlines flatten to distinct rendered lines.
+        let panel = trace_panel("t", &[crate::sidebar::dialog::Row::Text("a\nb".into())], 0);
+        assert_eq!(crate::sidebar::dialog::line_count(&panel, 60), 2);
     }
 
     #[test]
@@ -588,10 +623,17 @@ Update the existing v0.2.5 mouse tests mechanically: `assert!(apply_mouse(...))`
         let mut it = focused("a", "t-new");
         let mut live = live_default();
         let rendered = two_cards();
-        route(press(KeyCode::Esc), &mut open, &mut it, &mut live, &rendered, 20, 40, 120, 40);
-        assert!(open.is_none(), "no menu detour");
-        assert_eq!(it.cursor.as_deref(), Some("a"));
-        assert_eq!(it.trace_focus.as_deref(), Some("t-new"));
+        for key in [KeyCode::Esc, KeyCode::Char('q')] {
+            let mut open = Some(Dialog::TraceDetail {
+                title: "Trace — Bash".into(),
+                rows: detail_rows(),
+                offset: 0,
+            });
+            route(press(key), &mut open, &mut it, &mut live, &rendered, 20, 40, 120, 40);
+            assert!(open.is_none(), "no menu detour for {key:?}");
+            assert_eq!(it.cursor.as_deref(), Some("a"));
+            assert_eq!(it.trace_focus.as_deref(), Some("t-new"));
+        }
     }
 
     #[test]
@@ -619,7 +661,7 @@ Update the existing v0.2.5 mouse tests mechanically: `assert!(apply_mouse(...))`
 ```
 
 - [ ] **Step 2: Verify failure** — FAIL to compile (no variant).
-- [ ] **Step 3: Implement.** In `dialog.rs`: `#[derive(Clone)]` on `Row`, the `Text(String)` variant, `wrap_verbatim` (extract the existing long-word character-budget loop from `wrap` and apply it to the whole string), the `Text` arms in `render` and `line_count`. In `tui.rs`: add the `TraceDetail` variant; extend `offset`/`offset_mut`; `len` → 0 arm; `cursor_mut` → `Dialog::TraceDetail { .. } => None` arm (the match is exhaustive — forgetting it is a compile error); add to `row_count` an arm `Dialog::TraceDetail { title, rows, .. } => crate::sidebar::dialog::line_count(&trace_panel(title, rows, 0), 60)` — then in the `j` routing branch, special-case the width-aware bound: for `TraceDetail`, compute `let rows = crate::sidebar::dialog::line_count(&trace_panel(title, rows, 0), panel_width(width));` (shadowing the generic `row_count()` value). Add the close arm before the generic esc branch:
+- [ ] **Step 3: Implement.** In `dialog.rs`: `#[derive(Clone)]` on `Row`, the `Text(String)` variant, `wrap_verbatim` (extract the existing long-word character-budget loop from `wrap` and apply it to the whole string), the `Text` arms in `render` and `line_count`. In `tui.rs`: the existing test helper `rows_text` (~line 3104) matches `Row` exhaustively — add its `Row::Text(t) => t.clone()` arm or Task 7's own test run fails on a non-exhaustive pattern. Add the `TraceDetail` variant; extend `offset`/`offset_mut`; `len` → 0 arm; `cursor_mut` → `Dialog::TraceDetail { .. } => None` arm (the match is exhaustive — forgetting it is a compile error); add to `row_count` an arm `Dialog::TraceDetail { title, rows, .. } => crate::sidebar::dialog::line_count(&trace_panel(title, rows, 0), 60)` — then in the `j` routing branch, special-case the width-aware bound: for `TraceDetail`, compute `let rows = crate::sidebar::dialog::line_count(&trace_panel(title, rows, 0), panel_width(width));` (shadowing the generic `row_count()` value). Add the close arm before the generic esc branch:
 
 ```rust
             (KeyCode::Esc, _) | (KeyCode::Char('q'), _) if matches!(dialog, Dialog::TraceDetail { .. }) => {
@@ -642,7 +684,7 @@ Update the existing v0.2.5 mouse tests mechanically: `assert!(apply_mouse(...))`
 **Interfaces:**
 - Consumes: `format::{duration_ms, age, parse_iso8601_ms, sanitise}`; `dialog::Row`.
 - Produces (Task 9 calls it): `fn trace_snapshot(call: &serde_json::Value, now_unix_ms: u64) -> (String, Vec<crate::sidebar::dialog::Row>)`. Content (spec §4/§5): title `Trace — <tool>` (`?` fallback); rows = `Entry { label: "status", value: "<✓ done|✕ failed> · <duration>", enabled: false }` (duration segment omitted when `durationMs` is missing), `Entry { label: "when", value: "<ISO stamp> · <age>", ... }` (`—` when missing/unparseable — the age is computed HERE, once: the frozen when-line, spec §4), `Rule`, then the args body: `serde_json::from_str::<Value>(args)` OK → `serde_json::to_string_pretty` split into one **`Row::Text`** per line (hard newlines by construction, indentation verbatim per Task 7's wrapper); parse failure → the sanitised raw preview as one `Row::Text`; empty → `Row::Text("(no arguments retained)".into())`.
-- **Spec amendment (same commit):** spec §4 lists snapshot fields `card id + agent label … tool_use_id` that the panel never renders and the frozen `(title, rows)` model does not need — the panel opens from the selected card, so its identity is on screen behind it. Replace that sentence in `docs/superpowers/specs/2026-09-01-sidebar-trace-navigation-design.md` with: "A new `Dialog::TraceDetail` variant holding the frozen snapshot — a title and pre-built panel rows (status, when, args body) — plus the offset the `Panel` machinery already uses for scrolling." Deliberate narrowing, recorded here so it is not drift.
+- The spec's §4 snapshot sentence was **already amended and re-footered before this plan was finalized** to the `(title, rows)` model this task implements — no spec edits happen during implementation.
 
 - [ ] **Step 1: Write the failing tests:**
 
@@ -696,7 +738,7 @@ Update the existing v0.2.5 mouse tests mechanically: `assert!(apply_mouse(...))`
 - [ ] **Step 2: Verify failure** — FAIL to compile.
 - [ ] **Step 3: Implement** exactly per the interface block (a straight-line function of gets + fallbacks; glyph mapping `failed → ✕`, everything settled-else → `✓` is fine because Task 3 guarantees only done/failed rows are reachable).
 - [ ] **Step 4: Verify pass** — `cargo test sidebar::tui::tests::snapshot` — PASS.
-- [ ] **Step 5: Commit** — `cargo fmt && git add src/sidebar/tui.rs docs/superpowers/specs/2026-09-01-sidebar-trace-navigation-design.md && git commit -m "feat(sidebar): frozen trace snapshot builder"`
+- [ ] **Step 5: Commit** — `cargo fmt && git add src/sidebar/tui.rs && git commit -m "feat(sidebar): frozen trace snapshot builder"`
 
 ---
 
@@ -796,10 +838,43 @@ The draw block's `it.offset = match it.cursor.as_deref().and_then(|id| out.span_
         };
         assert_eq!(title, "Trace — Bash");
         let before = rows.len();
-        // Snapshot survival: mutate the ring, the installed panel is a copy.
+        // Snapshot survival: mutate the ring, the installed panel is a copy
+        // — content-compared, not length-compared.
+        let frozen: Vec<String> = rows
+            .iter()
+            .filter_map(|r| match r {
+                crate::sidebar::dialog::Row::Entry { label, value, .. } => Some(format!("{label}={value}")),
+                crate::sidebar::dialog::Row::Text(t) => Some(t.clone()),
+                _ => None,
+            })
+            .collect();
         state.panes.get_mut("a").unwrap().tool_calls.clear();
         let Some(Dialog::TraceDetail { rows, .. }) = &open else { unreachable!() };
         assert_eq!(rows.len(), before);
+        let after: Vec<String> = rows
+            .iter()
+            .filter_map(|r| match r {
+                crate::sidebar::dialog::Row::Entry { label, value, .. } => Some(format!("{label}={value}")),
+                crate::sidebar::dialog::Row::Text(t) => Some(t.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(frozen, after, "the panel text is byte-identical after churn");
+        // Frozen clock: a second install with a different `now` bakes a
+        // different when-line — proving age is computed once, at build.
+        let state2 = one_pane_state("a", vec![serde_json::json!({
+            "toolUseId":"t1","tool":"Bash","status":"done",
+            "args":"","timestamp":"2026-09-01T10:00:00.000Z","durationMs":5,
+        })]);
+        let mut it2 = focused("a", "t1");
+        let mut open2 = None;
+        resolve_open_trace(&state2, frame(120, 40), 3_600_000_000_000, &mut it2, &mut open2, "a", "t1");
+        let Some(Dialog::TraceDetail { rows: rows2, .. }) = &open2 else { panic!() };
+        let when = |rows: &Vec<crate::sidebar::dialog::Row>| rows.iter().find_map(|r| match r {
+            crate::sidebar::dialog::Row::Entry { label, value, .. } if label == "when" => Some(value.clone()),
+            _ => None,
+        });
+        assert_ne!(when(rows), when(rows2), "the when-line is a function of the now at open");
     }
 
     #[test]
@@ -859,7 +934,7 @@ The draw block's `it.offset = match it.cursor.as_deref().and_then(|id| out.span_
 ```
 
 - [ ] **Step 2: Verify failure** — FAIL to compile.
-- [ ] **Step 3: Implement** the helpers (`newest_selectable_id` with the seen-set dedup-first scan; `canonical_call` as first-rev-match; `resolve_open_trace` doing gate → canonical → selectable-check → `trace_snapshot` → install; `resolve_enter_traces` doing `newest_selectable_id` → set focus + follow) and wire the run loop: the `Event::Key` arm matches `EnterTraces`/`OpenTrace` and calls the resolvers (each `true` sets `dirty`); the `Event::Mouse` arm's `OpenTrace` calls the same `resolve_open_trace` so the logic exists once. Then swap the draw-block span selection to `follow_span`.
+- [ ] **Step 3: Implement.** Add `use serde_json::Value;` to `tui.rs`'s imports (the helpers' signatures and tests use it bare). Then the helpers (`newest_selectable_id` with the seen-set dedup-first scan; `canonical_call` as first-rev-match; `resolve_open_trace` doing gate → canonical → selectable-check → `trace_snapshot` → install; `resolve_enter_traces` doing `newest_selectable_id` → set focus + follow) and wire the run loop: the `Event::Key` arm matches `EnterTraces`/`OpenTrace` and calls the resolvers (each `true` sets `dirty`); the `Event::Mouse` arm's `OpenTrace` calls the same `resolve_open_trace` so the logic exists once. Then swap the draw-block span selection to `follow_span`.
 - [ ] **Step 4: Verify pass** — `cargo test sidebar::tui` — PASS; then `cargo test` (whole suite) — PASS.
 - [ ] **Step 5: Commit** — `cargo fmt && git add src/sidebar/tui.rs && git commit -m "feat(sidebar): resolve trace outcomes and follow the selected row"`
 
