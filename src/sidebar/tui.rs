@@ -323,6 +323,15 @@ enum KeyOutcome {
     },
 }
 
+enum MouseOutcome {
+    Inert,
+    Changed,
+    OpenTrace {
+        card_id: String,
+        tool_use_id: String,
+    },
+}
+
 #[derive(Debug)]
 pub(crate) struct KeyBindingResult {
     state: crate::agents::keybinding::BindingState,
@@ -1472,9 +1481,9 @@ fn route_mouse(
     rendered: &Rendered,
     viewport: u16,
     total: usize,
-) -> bool {
+) -> MouseOutcome {
     if open.is_some() || !mouse_enabled {
-        return false;
+        return MouseOutcome::Inert;
     }
     apply_mouse(mouse, it, rendered, viewport, total)
 }
@@ -1876,37 +1885,51 @@ fn apply_key(
     KeyOutcome::Handled
 }
 
-/// The card-list mutation for one mouse event (spec §3). Returns whether
-/// state changed: mouse events arrive in floods, so an inert click or a
-/// saturated scroll must not cost a redraw.
+/// The card-list result for one mouse event (spec §3). Mouse events arrive in
+/// floods, so inert clicks and saturated scrolls must not cost a redraw.
 fn apply_mouse(
     mouse: MouseEvent,
     it: &mut Interaction,
     rendered: &Rendered,
     viewport: u16,
     total: usize,
-) -> bool {
+) -> MouseOutcome {
     if viewport == 0 {
-        return false;
+        return MouseOutcome::Inert;
     }
     match mouse.kind {
         MouseEventKind::Down(MouseButton::Left) if mouse.modifiers.is_empty() => {
             if mouse.row >= viewport {
-                return false;
+                return MouseOutcome::Inert;
             }
             let line = it.offset as usize + mouse.row as usize;
+            if let Some((card_id, tool_use_id)) = trace_at(&rendered.trace_spans, line) {
+                if it.cursor.as_deref() == Some(card_id)
+                    && it.trace_focus.as_deref() == Some(tool_use_id)
+                {
+                    return MouseOutcome::OpenTrace {
+                        card_id: card_id.to_string(),
+                        tool_use_id: tool_use_id.to_string(),
+                    };
+                }
+                it.cursor = Some(card_id.to_string());
+                it.trace_focus = Some(tool_use_id.to_string());
+                it.follow = true;
+                return MouseOutcome::Changed;
+            }
             let Some((id, hit)) = card_at(&rendered.spans, line) else {
-                return false;
+                return MouseOutcome::Inert;
             };
             let id = id.to_string();
             match hit {
                 Hit::Header => {
+                    it.trace_focus = None;
                     it.cursor = Some(id.clone());
                     if !it.toggled.remove(&id) {
                         it.toggled.insert(id);
                     }
                     it.follow = true;
-                    true
+                    MouseOutcome::Changed
                 }
                 // follow stays off: `ensure_visible` would scroll a
                 // partially visible card into view and pin an oversized
@@ -1915,9 +1938,16 @@ fn apply_mouse(
                 // no-op that must say so (spec §3 dirty discipline).
                 Hit::Body => {
                     let changed = it.cursor.as_deref() != Some(id.as_str()) || it.follow;
+                    if it.cursor.as_deref() != Some(id.as_str()) {
+                        it.trace_focus = None;
+                    }
                     it.cursor = Some(id);
                     it.follow = false;
-                    changed
+                    if changed {
+                        MouseOutcome::Changed
+                    } else {
+                        MouseOutcome::Inert
+                    }
                 }
             }
         }
@@ -1932,12 +1962,12 @@ fn apply_mouse(
                 ),
             };
             if it.offset == before {
-                return false;
+                return MouseOutcome::Inert;
             }
             it.follow = false;
-            true
+            MouseOutcome::Changed
         }
-        _ => false,
+        _ => MouseOutcome::Inert,
     }
 }
 
@@ -2380,7 +2410,7 @@ pub fn run() -> i32 {
                 }
             }
             Ok(Event::Mouse(mouse)) => {
-                if route_mouse(
+                match route_mouse(
                     mouse,
                     &open,
                     live.mouse,
@@ -2389,7 +2419,9 @@ pub fn run() -> i32 {
                     viewport,
                     total,
                 ) {
-                    dirty = true;
+                    MouseOutcome::Inert => {}
+                    MouseOutcome::Changed => dirty = true,
+                    MouseOutcome::OpenTrace { .. } => dirty = true,
                 }
             }
             Ok(Event::Resize(_, _)) => dirty = true,
@@ -4530,15 +4562,56 @@ mod tests {
     }
 
     #[test]
+    fn a_trace_click_deep_selects_and_a_second_click_opens() {
+        let rendered = two_cards();
+        let mut it = Interaction::default();
+        assert!(matches!(
+            apply_mouse(click(1), &mut it, &rendered, 20, 40),
+            MouseOutcome::Changed
+        ));
+        assert_eq!(it.cursor.as_deref(), Some("a"));
+        assert_eq!(it.trace_focus.as_deref(), Some("t-new"));
+        assert!(it.follow);
+        assert!(matches!(
+            apply_mouse(click(1), &mut it, &rendered, 20, 40),
+            MouseOutcome::OpenTrace { ref card_id, ref tool_use_id }
+                if card_id == "a" && tool_use_id == "t-new"
+        ));
+    }
+
+    #[test]
+    fn card_clicks_that_move_or_collapse_clear_trace_focus() {
+        let rendered = two_cards();
+        let mut it = focused("a", "t-new");
+        apply_mouse(click(6), &mut it, &rendered, 20, 40);
+        assert_eq!(it.cursor.as_deref(), Some("b"));
+        assert_eq!(it.trace_focus, None, "pair cannot leak across cards");
+        let mut it = focused("a", "t-new");
+        it.toggled.insert("a".into());
+        apply_mouse(click(0), &mut it, &rendered, 20, 40);
+        assert_eq!(it.trace_focus, None);
+        let mut it = focused("a", "t-new");
+        apply_mouse(click(4), &mut it, &rendered, 20, 40);
+        assert_eq!(it.cursor.as_deref(), Some("b"));
+        assert_eq!(it.trace_focus, None);
+    }
+
+    #[test]
     fn a_header_click_selects_toggles_and_follows() {
         let rendered = two_cards();
         let mut it = Interaction::default();
-        assert!(apply_mouse(click(0), &mut it, &rendered, 20, 40));
+        assert!(matches!(
+            apply_mouse(click(0), &mut it, &rendered, 20, 40),
+            MouseOutcome::Changed
+        ));
         assert_eq!(it.cursor.as_deref(), Some("a"));
         assert!(it.toggled.contains("a"));
         assert!(it.follow);
         // Idempotence: the second header click un-toggles.
-        assert!(apply_mouse(click(0), &mut it, &rendered, 20, 40));
+        assert!(matches!(
+            apply_mouse(click(0), &mut it, &rendered, 20, 40),
+            MouseOutcome::Changed
+        ));
         assert!(!it.toggled.contains("a"));
     }
 
@@ -4551,13 +4624,19 @@ mod tests {
             ..Default::default()
         };
         // Row 3 + offset 2 = line 5, inside card b's body.
-        assert!(apply_mouse(click(3), &mut it, &rendered, 20, 40));
+        assert!(matches!(
+            apply_mouse(click(3), &mut it, &rendered, 20, 40),
+            MouseOutcome::Changed
+        ));
         assert_eq!(it.cursor.as_deref(), Some("b"));
         assert!(it.toggled.is_empty());
         assert!(!it.follow, "spec §3: a body click detaches, never scrolls");
         assert_eq!(it.offset, 2, "offset untouched");
         // The identical body click again changes nothing — and reports it.
-        assert!(!apply_mouse(click(3), &mut it, &rendered, 20, 40));
+        assert!(matches!(
+            apply_mouse(click(3), &mut it, &rendered, 20, 40),
+            MouseOutcome::Inert
+        ));
     }
 
     #[test]
@@ -4568,7 +4647,10 @@ mod tests {
             ..Default::default()
         };
         // Row 0 + offset 4 = line 4 = card b's header.
-        assert!(apply_mouse(click(0), &mut it, &rendered, 20, 40));
+        assert!(matches!(
+            apply_mouse(click(0), &mut it, &rendered, 20, 40),
+            MouseOutcome::Changed
+        ));
         assert_eq!(it.cursor.as_deref(), Some("b"));
         assert!(it.toggled.contains("b"));
     }
@@ -4578,17 +4660,29 @@ mod tests {
         let rendered = two_cards();
         let mut it = Interaction::default();
         // The separator line between the cards.
-        assert!(!apply_mouse(click(3), &mut it, &rendered, 20, 40));
+        assert!(matches!(
+            apply_mouse(click(3), &mut it, &rendered, 20, 40),
+            MouseOutcome::Inert
+        ));
         // The pinned footer region.
-        assert!(!apply_mouse(click(20), &mut it, &rendered, 20, 40));
+        assert!(matches!(
+            apply_mouse(click(20), &mut it, &rendered, 20, 40),
+            MouseOutcome::Inert
+        ));
         // A modified click.
         let shifted = MouseEvent {
             modifiers: KeyModifiers::SHIFT,
             ..click(0)
         };
-        assert!(!apply_mouse(shifted, &mut it, &rendered, 20, 40));
+        assert!(matches!(
+            apply_mouse(shifted, &mut it, &rendered, 20, 40),
+            MouseOutcome::Inert
+        ));
         // A zero viewport.
-        assert!(!apply_mouse(click(0), &mut it, &rendered, 0, 40));
+        assert!(matches!(
+            apply_mouse(click(0), &mut it, &rendered, 0, 40),
+            MouseOutcome::Inert
+        ));
         assert_eq!(it.cursor, None, "no inert event moved the cursor");
         assert!(it.toggled.is_empty());
     }
@@ -4601,20 +4695,20 @@ mod tests {
             ..Default::default()
         };
         // At the top, ScrollUp cannot move: no change, follow untouched.
-        assert!(!apply_mouse(
-            wheel(MouseEventKind::ScrollUp),
-            &mut it,
-            &rendered,
-            20,
-            40
+        assert!(matches!(
+            apply_mouse(wheel(MouseEventKind::ScrollUp), &mut it, &rendered, 20, 40),
+            MouseOutcome::Inert
         ));
         assert!(it.follow);
-        assert!(apply_mouse(
-            wheel(MouseEventKind::ScrollDown),
-            &mut it,
-            &rendered,
-            20,
-            40
+        assert!(matches!(
+            apply_mouse(
+                wheel(MouseEventKind::ScrollDown),
+                &mut it,
+                &rendered,
+                20,
+                40
+            ),
+            MouseOutcome::Changed
         ));
         assert_eq!(it.offset, 3);
         assert!(!it.follow, "a moved wheel detaches like PageDown");
@@ -4629,12 +4723,15 @@ mod tests {
             );
         }
         assert_eq!(it.offset, 20);
-        assert!(!apply_mouse(
-            wheel(MouseEventKind::ScrollDown),
-            &mut it,
-            &rendered,
-            20,
-            40
+        assert!(matches!(
+            apply_mouse(
+                wheel(MouseEventKind::ScrollDown),
+                &mut it,
+                &rendered,
+                20,
+                40
+            ),
+            MouseOutcome::Inert
         ));
     }
 
@@ -4643,14 +4740,9 @@ mod tests {
         let rendered = two_cards();
         let mut it = Interaction::default();
         let open = Some(keys_dialog());
-        assert!(!route_mouse(
-            click(0),
-            &open,
-            true,
-            &mut it,
-            &rendered,
-            20,
-            40
+        assert!(matches!(
+            route_mouse(click(0), &open, true, &mut it, &rendered, 20, 40),
+            MouseOutcome::Inert
         ));
         assert_eq!(it.cursor, None);
         assert!(it.toggled.is_empty());
@@ -4662,14 +4754,9 @@ mod tests {
         // disable; events from a stuck capture must not mutate cards.
         let rendered = two_cards();
         let mut it = Interaction::default();
-        assert!(!route_mouse(
-            click(0),
-            &None,
-            false,
-            &mut it,
-            &rendered,
-            20,
-            40
+        assert!(matches!(
+            route_mouse(click(0), &None, false, &mut it, &rendered, 20, 40),
+            MouseOutcome::Inert
         ));
         assert_eq!(it.cursor, None);
     }
@@ -4678,14 +4765,9 @@ mod tests {
     fn an_open_gate_delegates_to_apply_mouse() {
         let rendered = two_cards();
         let mut it = Interaction::default();
-        assert!(route_mouse(
-            click(0),
-            &None,
-            true,
-            &mut it,
-            &rendered,
-            20,
-            40
+        assert!(matches!(
+            route_mouse(click(0), &None, true, &mut it, &rendered, 20, 40),
+            MouseOutcome::Changed
         ));
         assert_eq!(it.cursor.as_deref(), Some("a"));
     }
