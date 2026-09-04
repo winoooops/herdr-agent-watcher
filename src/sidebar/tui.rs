@@ -268,7 +268,7 @@ fn reconcile_trace_focus(
             .collect()
     };
     let now = card_rows(current);
-    if now.iter().any(|r| *r == id) {
+    if now.contains(&id) {
         return false;
     }
     let next = if now.is_empty() {
@@ -1136,10 +1136,12 @@ const MENU_UPDATE: usize = 3;
 /// One inventory. The sheet is reachable from the card list, so it describes
 /// only keys that work there; each panel carries its own controls in its
 /// footer.
-const KEYS: [(&str, &str); 9] = [
+const KEYS: [(&str, &str); 11] = [
     ("j / ↓", "move down"),
     ("k / ↑", "move up"),
-    ("o / ↵", "expand a card"),
+    ("o / ↵", "expand a card, or open the selected trace"),
+    ("l", "into traces"),
+    ("h", "back to cards"),
     ("z", "hide idle agents"),
     ("PageUp / PageDown", "scroll"),
     ("x", "menu"),
@@ -1155,22 +1157,43 @@ const KEYS: [(&str, &str); 9] = [
 /// does nothing. A single start makes one of them look like an ignored key.
 ///
 #[cfg(test)]
-fn routed() -> [(&'static str, KeyCode, KeyModifiers, &'static str); 9] {
+fn routed() -> [(
+    &'static str,
+    KeyCode,
+    KeyModifiers,
+    &'static str,
+    Option<&'static str>,
+); 11] {
     [
-        ("j / ↓", KeyCode::Char('j'), KeyModifiers::NONE, "a"),
-        ("k / ↑", KeyCode::Char('k'), KeyModifiers::NONE, "b"),
-        ("o / ↵", KeyCode::Char('o'), KeyModifiers::NONE, "a"),
-        ("z", KeyCode::Char('z'), KeyModifiers::NONE, "a"),
+        ("j / ↓", KeyCode::Char('j'), KeyModifiers::NONE, "a", None),
+        ("k / ↑", KeyCode::Char('k'), KeyModifiers::NONE, "b", None),
+        ("o / ↵", KeyCode::Char('o'), KeyModifiers::NONE, "a", None),
+        ("l", KeyCode::Char('l'), KeyModifiers::NONE, "a", None),
+        (
+            "h",
+            KeyCode::Char('h'),
+            KeyModifiers::NONE,
+            "a",
+            Some("t-new"),
+        ),
+        ("z", KeyCode::Char('z'), KeyModifiers::NONE, "a", None),
         (
             "PageUp / PageDown",
             KeyCode::PageDown,
             KeyModifiers::NONE,
             "a",
+            None,
         ),
-        ("x", KeyCode::Char('x'), KeyModifiers::NONE, "a"),
-        ("?", KeyCode::Char('?'), KeyModifiers::NONE, "a"),
-        ("q / esc", KeyCode::Esc, KeyModifiers::NONE, "a"),
-        ("ctrl-c", KeyCode::Char('c'), KeyModifiers::CONTROL, "a"),
+        ("x", KeyCode::Char('x'), KeyModifiers::NONE, "a", None),
+        ("?", KeyCode::Char('?'), KeyModifiers::NONE, "a", None),
+        ("q / esc", KeyCode::Esc, KeyModifiers::NONE, "a", None),
+        (
+            "ctrl-c",
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL,
+            "a",
+            None,
+        ),
     ]
 }
 
@@ -1749,7 +1772,8 @@ fn panel_for(
                     // Outside KEYS on purpose: it names no key, so the
                     // sheet↔routed invariant stays exact (spec §4).
                     label: "mouse (when on)".into(),
-                    value: "click selects · header click toggles · wheel scrolls".into(),
+                    value: "click selects · header toggles · trace re-click opens · wheel scrolls"
+                        .into(),
                     enabled: false,
                 }))
                 .collect(),
@@ -3950,18 +3974,23 @@ mod tests {
     #[test]
     fn every_key_the_sheet_describes_does_something() {
         let r = two_cards();
-        for (key, code, modifiers, start) in routed() {
+        for (key, code, modifiers, start, trace_focus) in routed() {
             let mut it = Interaction {
                 follow: true,
                 offset: 5,
                 cursor: Some(start.into()),
+                trace_focus: trace_focus.map(str::to_string),
                 ..Default::default()
             };
+            if key == "l" {
+                it.toggled.insert("a".into());
+            }
             let mut live = live_default();
             let mut open = None;
             let before = (
                 it.offset,
                 it.cursor.clone(),
+                it.trace_focus.clone(),
                 it.toggled.clone(),
                 // The whole of `live`, not just `hide_idle`: a key that only
                 // moves a setting is still a key that did something.
@@ -3986,6 +4015,7 @@ mod tests {
             let after = (
                 it.offset,
                 it.cursor.clone(),
+                it.trace_focus.clone(),
                 it.toggled.clone(),
                 live.clone(),
                 open.is_some(),
@@ -3995,7 +4025,12 @@ mod tests {
                 bridge_state(&open),
             );
             assert!(
-                matches!(outcome, KeyOutcome::Quit) || before != after,
+                matches!(
+                    outcome,
+                    KeyOutcome::Quit
+                        | KeyOutcome::EnterTraces { .. }
+                        | KeyOutcome::OpenTrace { .. }
+                ) || before != after,
                 "{key} is in the sheet but the router ignores it"
             );
         }
@@ -5516,7 +5551,7 @@ mod tests {
         assert_eq!(label, "mouse (when on)");
         assert_eq!(
             value,
-            "click selects · header click toggles · wheel scrolls"
+            "click selects · header toggles · trace re-click opens · wheel scrolls"
         );
     }
 }
