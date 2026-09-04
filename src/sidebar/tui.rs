@@ -314,6 +314,13 @@ struct Interaction {
 enum KeyOutcome {
     Quit,
     Handled,
+    EnterTraces {
+        card_id: String,
+    },
+    OpenTrace {
+        card_id: String,
+        tool_use_id: String,
+    },
 }
 
 #[derive(Debug)]
@@ -1767,6 +1774,52 @@ fn apply_key(
     viewport: u16,
     total: usize,
 ) -> KeyOutcome {
+    if it.trace_focus.is_some() {
+        match (key.code, key.modifiers) {
+            (KeyCode::Char('j'), _) | (KeyCode::Char('k'), _) => {
+                let rows: Vec<&str> = rendered
+                    .trace_spans
+                    .iter()
+                    .filter(|(card, ..)| Some(card.as_str()) == it.cursor.as_deref())
+                    .map(|(_, id, _)| id.as_str())
+                    .collect();
+                if !rows.is_empty() {
+                    let at = it
+                        .trace_focus
+                        .as_deref()
+                        .and_then(|id| rows.iter().position(|row| *row == id))
+                        .unwrap_or(0) as isize;
+                    let delta = if key.code == KeyCode::Char('j') {
+                        1
+                    } else {
+                        -1
+                    };
+                    let next = (at + delta).clamp(0, rows.len() as isize - 1) as usize;
+                    it.trace_focus = Some(rows[next].to_string());
+                }
+                it.follow = true;
+                return KeyOutcome::Handled;
+            }
+            (KeyCode::Char('h'), _) => {
+                it.trace_focus = None;
+                return KeyOutcome::Handled;
+            }
+            (KeyCode::Char('o'), _) | (KeyCode::Enter, _) => {
+                if let (Some(card_id), Some(tool_use_id)) =
+                    (it.cursor.clone(), it.trace_focus.clone())
+                {
+                    return KeyOutcome::OpenTrace {
+                        card_id,
+                        tool_use_id,
+                    };
+                }
+                return KeyOutcome::Handled;
+            }
+            (KeyCode::Char('l'), _) => return KeyOutcome::Handled,
+            _ => {}
+        }
+    }
+
     match (key.code, key.modifiers) {
         (KeyCode::Char('q'), _) | (KeyCode::Esc, _) => return KeyOutcome::Quit,
         (KeyCode::Char('c'), m) if m.contains(KeyModifiers::CONTROL) => return KeyOutcome::Quit,
@@ -1789,6 +1842,17 @@ fn apply_key(
         (KeyCode::Char('z'), _) => {
             live.hide_idle = !live.hide_idle;
             it.follow = true;
+        }
+        (KeyCode::Char('l'), _) => {
+            if let Some(id) = it.cursor.as_deref() {
+                let expanded = matches!(live.auto_expand, crate::sidebar::config::AutoExpand::All)
+                    ^ it.toggled.contains(id);
+                if expanded {
+                    return KeyOutcome::EnterTraces {
+                        card_id: id.to_string(),
+                    };
+                }
+            }
         }
         (KeyCode::Up, _) | (KeyCode::Down, _) | (KeyCode::PageUp, _) | (KeyCode::PageDown, _) => {
             if viewport == 0 {
@@ -2384,6 +2448,141 @@ mod tests {
 
     fn tspan(card: &str, id: &str, start: usize) -> (String, String, LineSpan) {
         (card.into(), id.into(), LineSpan { start, height: 1 })
+    }
+
+    fn focused(cursor: &str, id: &str) -> Interaction {
+        Interaction {
+            cursor: Some(cursor.into()),
+            trace_focus: Some(id.into()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn l_yields_enter_traces_only_from_an_expanded_card() {
+        let rendered = two_cards();
+        let mut live = live_default();
+        let mut it = Interaction {
+            cursor: Some("a".into()),
+            ..Default::default()
+        };
+        assert!(matches!(
+            apply_key(
+                press(KeyCode::Char('l')),
+                &mut it,
+                &mut live,
+                &rendered,
+                20,
+                40
+            ),
+            KeyOutcome::Handled
+        ));
+        it.toggled.insert("a".into());
+        assert!(matches!(
+            apply_key(
+                press(KeyCode::Char('l')),
+                &mut it,
+                &mut live,
+                &rendered,
+                20,
+                40
+            ),
+            KeyOutcome::EnterTraces { ref card_id } if card_id == "a"
+        ));
+        let mut it = focused("a", "t-new");
+        assert!(matches!(
+            apply_key(
+                press(KeyCode::Char('l')),
+                &mut it,
+                &mut live,
+                &rendered,
+                20,
+                40
+            ),
+            KeyOutcome::Handled
+        ));
+        assert_eq!(it.trace_focus.as_deref(), Some("t-new"));
+    }
+
+    #[test]
+    fn trace_zone_navigation_clamps_and_h_returns() {
+        let rendered = two_cards();
+        let mut live = live_default();
+        let mut it = focused("a", "t-new");
+        apply_key(
+            press(KeyCode::Char('j')),
+            &mut it,
+            &mut live,
+            &rendered,
+            20,
+            40,
+        );
+        assert_eq!(it.trace_focus.as_deref(), Some("t-old"));
+        assert!(it.follow);
+        apply_key(
+            press(KeyCode::Char('j')),
+            &mut it,
+            &mut live,
+            &rendered,
+            20,
+            40,
+        );
+        assert_eq!(
+            it.trace_focus.as_deref(),
+            Some("t-old"),
+            "clamped at the end"
+        );
+        apply_key(
+            press(KeyCode::Char('k')),
+            &mut it,
+            &mut live,
+            &rendered,
+            20,
+            40,
+        );
+        assert_eq!(it.trace_focus.as_deref(), Some("t-new"));
+        apply_key(
+            press(KeyCode::Char('h')),
+            &mut it,
+            &mut live,
+            &rendered,
+            20,
+            40,
+        );
+        assert_eq!(it.trace_focus, None);
+        assert_eq!(it.cursor.as_deref(), Some("a"), "cursor stays");
+    }
+
+    #[test]
+    fn o_in_the_trace_zone_requests_the_pair() {
+        let rendered = two_cards();
+        let mut live = live_default();
+        let mut it = focused("a", "t-old");
+        assert!(matches!(
+            apply_key(
+                press(KeyCode::Char('o')),
+                &mut it,
+                &mut live,
+                &rendered,
+                20,
+                40
+            ),
+            KeyOutcome::OpenTrace { ref card_id, ref tool_use_id }
+                if card_id == "a" && tool_use_id == "t-old"
+        ));
+        let mut it = Interaction {
+            cursor: Some("a".into()),
+            ..Default::default()
+        };
+        apply_key(
+            press(KeyCode::Char('o')),
+            &mut it,
+            &mut live,
+            &rendered,
+            20,
+            40,
+        );
+        assert!(it.toggled.contains("a"));
     }
 
     #[test]
