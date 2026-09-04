@@ -80,7 +80,7 @@ pub fn card_at(spans: &[(String, LineSpan)], line: usize) -> Option<(&str, Hit)>
 pub fn trace_at(spans: &[(String, String, LineSpan)], line: usize) -> Option<(&str, &str)> {
     spans.iter().find_map(|(card, id, span)| {
         (line >= span.start && line < span.start + span.height)
-            .then(|| (card.as_str(), id.as_str()))
+            .then_some((card.as_str(), id.as_str()))
     })
 }
 
