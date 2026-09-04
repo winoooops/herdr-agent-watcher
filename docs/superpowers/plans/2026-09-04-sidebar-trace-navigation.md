@@ -119,7 +119,7 @@ pub fn trace_at(spans: &[(String, String, LineSpan)], line: usize) -> Option<(&s
 **Files:**
 - Modify: `src/sidebar/style.rs` — `Rendered` gains `trace_spans: Vec<(String, String, LineSpan)>` and `trace_span_for`.
 - Modify: `src/sidebar/view.rs` — `ViewInput` gains `trace_focus: Option<(&'a str, &'a str)>`; `trace_rows` returns row metadata and honors focus (full ring, reversed selected row, dedup, display-only); new `expanded_card_with_traces` (existing `expanded_card` becomes a `.0` delegate — its 30+ callers stay untouched); `render` threads the metadata into absolute spans.
-- Modify: `src/sidebar/tui.rs:185` — the shell's `ViewInput` constructor gains `trace_focus: None` (a placeholder Task 4 replaces with the real pair).
+- Modify: `src/sidebar/tui.rs` — the `view_input` helper (~line 178) gains `trace_focus: None` inside the literal it builds (no signature change in this task; Task 4 threads the real pair through a new parameter).
 - Modify: `tests/e2e_fake_herdr.rs:676` — `trace_focus: None` in the existing `ViewInput` literal (compile fix only).
 - Tests: `src/sidebar/view.rs`'s existing `mod tests`.
 
@@ -395,7 +395,7 @@ fn reconcile_trace_focus(
 }
 ```
 
-Wire it in the draw block right after the cursor reconcile (capture `let previous_cursor = it.cursor.clone();` BEFORE `reconcile_cursor` runs). **A correction must re-render synchronously** — the draw block already has `dirty = false` at its end, so setting `dirty = true` from inside it is silently swallowed; instead, follow the existing `recovered` pattern: when `reconcile_trace_focus(...)` returns true, rebuild `out = view::render(...)` once with the corrected focus before the offset math, exactly as the cursor recovery re-render at the same site does. Also pass the pair into `view::render`'s input: `trace_focus: it.trace_focus.as_deref().and_then(|id| it.cursor.as_deref().map(|c| (c, id)))`.
+Thread the pair into the view first: `view_input` gains a parameter — `fn view_input(..existing params.., trace_focus: Option<(&str, &str)>) -> ViewInput` — and ALL FOUR call sites update: the two production draw sites (`tui.rs` ~2128 and ~2142) pass `it.trace_focus.as_deref().and_then(|id| it.cursor.as_deref().map(|c| (c, id)))`; the two test callers (~3043 and ~3711) pass `None`. (`it` is not in scope inside `view_input`, so the pair must arrive as a parameter — Task 3's `None` literal was only a compile placeholder.) Then wire the reconcile in the draw block right after the cursor reconcile (capture `let previous_cursor = it.cursor.clone();` BEFORE `reconcile_cursor` runs). **A correction must re-render synchronously** — the draw block already has `dirty = false` at its end, so setting `dirty = true` from inside it is silently swallowed; instead, follow the existing `recovered` pattern: when `reconcile_trace_focus(...)` returns true, rebuild `out = view::render(...)` once with the corrected focus before the offset math, exactly as the cursor recovery re-render at the same site does. (The pair now flows through the `view_input` parameter added above.)
 
 - [ ] **Step 4: Verify pass** — `cargo test sidebar::tui` — PASS.
 - [ ] **Step 5: Commit** — `cargo fmt && git add src/sidebar/tui.rs && git commit -m "feat(sidebar): trace-focus state with pair-safe reconcile"`
@@ -575,7 +575,7 @@ Update the existing v0.2.5 mouse tests mechanically: `assert!(apply_mouse(...))`
 - Produces:
   - `dialog::Row::Text(String)` (spec §4): one logical line, rendered **verbatim** — leading spaces and exact spacing preserved (pretty-JSON indentation). `Note`'s `wrap` is word-joining and collapses space runs, so `Text` wraps by the character-budget path only: a new `fn wrap_verbatim(text: &str, width: usize) -> Vec<String>`: **split on `'\n'` first** (each hard line is its own unit — spec §4 newline preservation), then slice each unit by display width without re-joining words (reuse the long-word loop inside `wrap`); an empty unit yields one empty rendered line. `line_count` counts `Text` via `wrap_verbatim(...).len()`; `render`'s row match draws each wrapped slice framed like a `Note` but with `Role::Body` styling and no re-spacing. `Row` derives `Clone` (Task 9's resolver and `panel_for` both clone rows out of the dialog).
   - `Dialog::TraceDetail { title: String, rows: Vec<Row>, offset: usize }` — a **fully frozen snapshot**; `fn trace_panel(title: &str, rows: &[Row], offset: usize) -> Panel` (cursor `None`, footer `"j/k scroll · esc close"`, `rows: rows.to_vec()`); `fn panel_width(frame: u16) -> u16 { frame.min(60) }` used by BOTH the draw site (replacing the inline `area.width.min(60)`) and scroll bounding (spec §4 shared-width rule).
-- Routing: `esc`/`q` on `TraceDetail` sets `*open = None` directly (its own arm ABOVE the generic back-to-menu branch — spec §4); `j`/`k` scroll by offset bounded by `dialog::line_count(&trace_panel(...), panel_width(width))` — `route` already receives `width`. `Dialog::len` returns 0; the exhaustive `cursor_mut` gains `Dialog::TraceDetail { .. } => None` (compile requirement); `offset`/`offset_mut` include it.
+- Routing: `esc`/`q` on `TraceDetail` sets `*open = None` directly (its own arm ABOVE the generic back-to-menu branch — spec §4); `j`/`k` scroll by offset bounded by `dialog::line_count(&trace_panel(...), panel_width(width))` — `route` already receives `width`. `Dialog::len` returns 0; the exhaustive `cursor_mut` gains `Dialog::TraceDetail { .. } => None` (compile requirement); `offset_mut` includes it (the only offset accessor `Dialog` has).
 
 - [ ] **Step 1: Write the failing tests:**
 
@@ -615,11 +615,6 @@ Update the existing v0.2.5 mouse tests mechanically: `assert!(apply_mouse(...))`
 
     #[test]
     fn trace_detail_closes_to_none_keeping_the_selection() {
-        let mut open = Some(Dialog::TraceDetail {
-            title: "Trace — Bash".into(),
-            rows: detail_rows(),
-            offset: 0,
-        });
         let mut it = focused("a", "t-new");
         let mut live = live_default();
         let rendered = two_cards();
@@ -661,7 +656,7 @@ Update the existing v0.2.5 mouse tests mechanically: `assert!(apply_mouse(...))`
 ```
 
 - [ ] **Step 2: Verify failure** — FAIL to compile (no variant).
-- [ ] **Step 3: Implement.** In `dialog.rs`: `#[derive(Clone)]` on `Row`, the `Text(String)` variant, `wrap_verbatim` (extract the existing long-word character-budget loop from `wrap` and apply it to the whole string), the `Text` arms in `render` and `line_count`. In `tui.rs`: the existing test helper `rows_text` (~line 3104) matches `Row` exhaustively — add its `Row::Text(t) => t.clone()` arm or Task 7's own test run fails on a non-exhaustive pattern. Add the `TraceDetail` variant; extend `offset`/`offset_mut`; `len` → 0 arm; `cursor_mut` → `Dialog::TraceDetail { .. } => None` arm (the match is exhaustive — forgetting it is a compile error); add to `row_count` an arm `Dialog::TraceDetail { title, rows, .. } => crate::sidebar::dialog::line_count(&trace_panel(title, rows, 0), 60)` — then in the `j` routing branch, special-case the width-aware bound: for `TraceDetail`, compute `let rows = crate::sidebar::dialog::line_count(&trace_panel(title, rows, 0), panel_width(width));` (shadowing the generic `row_count()` value). Add the close arm before the generic esc branch:
+- [ ] **Step 3: Implement.** In `dialog.rs`: `#[derive(Clone)]` on `Row`, the `Text(String)` variant, `wrap_verbatim` (extract the existing long-word character-budget loop from `wrap` and apply it to the whole string), the `Text` arms in `render` and `line_count`. In `tui.rs`: add a module-level `use crate::sidebar::dialog::{Panel, Row};` to the imports — today those names are imported only locally inside `panel_for`, so the new `Dialog::TraceDetail { rows: Vec<Row> }` field and `trace_panel(...) -> Panel` signature would not resolve (drop the now-redundant local import if clippy flags it). The existing test helper `rows_text` (~line 3104) matches `Row` exhaustively — add its `Row::Text(t) => t.clone()` arm or Task 7's own test run fails on a non-exhaustive pattern. Add the `TraceDetail` variant; extend `offset`/`offset_mut`; `len` → 0 arm; `cursor_mut` → `Dialog::TraceDetail { .. } => None` arm (the match is exhaustive — forgetting it is a compile error); add to `row_count` an arm `Dialog::TraceDetail { title, rows, .. } => crate::sidebar::dialog::line_count(&trace_panel(title, rows, 0), 60)` — then in the `j` routing branch, special-case the width-aware bound: for `TraceDetail`, compute `let rows = crate::sidebar::dialog::line_count(&trace_panel(title, rows, 0), panel_width(width));` (shadowing the generic `row_count()` value). Add the close arm before the generic esc branch:
 
 ```rust
             (KeyCode::Esc, _) | (KeyCode::Char('q'), _) if matches!(dialog, Dialog::TraceDetail { .. }) => {
@@ -870,7 +865,7 @@ The draw block's `it.offset = match it.cursor.as_deref().and_then(|id| out.span_
         let mut open2 = None;
         resolve_open_trace(&state2, frame(120, 40), 3_600_000_000_000, &mut it2, &mut open2, "a", "t1");
         let Some(Dialog::TraceDetail { rows: rows2, .. }) = &open2 else { panic!() };
-        let when = |rows: &Vec<crate::sidebar::dialog::Row>| rows.iter().find_map(|r| match r {
+        let when = |rows: &[crate::sidebar::dialog::Row]| rows.iter().find_map(|r| match r {
             crate::sidebar::dialog::Row::Entry { label, value, .. } if label == "when" => Some(value.clone()),
             _ => None,
         });
