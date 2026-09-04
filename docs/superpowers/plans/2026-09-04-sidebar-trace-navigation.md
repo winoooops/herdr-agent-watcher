@@ -960,3 +960,5 @@ The draw block's `it.offset = match it.cursor.as_deref().and_then(|id| out.span_
 - §4 panel content/scroll/close/duration/frozen when/keys sheet/trailer → Tasks 8, 7, 1, 10.
 - §5 anchor-loss matrix, churn, duplicates, malformed metadata, degenerate frames → Tasks 4, 3, 8, 9 tests.
 - §6 test list → distributed exactly as written per task.
+
+<!-- codex-reviewed: 2026-09-04T09:51:47Z -->
