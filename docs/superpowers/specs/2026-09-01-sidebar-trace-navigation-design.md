@@ -88,17 +88,24 @@ nearest surviving row (newest side); a focused card whose ring is *empty*
 an empty ring while the card stays present and expanded) drops focus to
 the card zone; card gone/collapsed likewise resets focus to `None`, with
 the cursor behaving exactly as today. `trace_focus` therefore always
-denotes a real rendered row. Rows lacking a `toolUseId` (replay
-summaries copy unvalidated shapes into the ring) are **display-only**:
-they render as today but export no span, cannot be selected, and
-`j`/`k` skip over them.
+denotes a real rendered row. Rows lacking a `toolUseId` **or an exact
+`done`/`failed` status** (replay summaries copy unvalidated shapes into
+the ring — the settled-only guarantee is enforced here, not assumed) are
+**display-only**: they render as today but export no span, cannot be
+selected or opened, and `j`/`k` skip over them.
 
 **Transitions.**
 
-- `l` (card zone, cursor on an expanded card with ≥1 **selectable** —
-  id-bearing — row): enter traces, select the newest selectable row (a
-  newest id-less row is skipped over). Collapsed card, no selectable
-  rows (including an all-id-less ring), or no cursor → inert.
+- `l` (card zone): routing yields an `EnterTraces { card_id }` outcome
+  when the cursor names an expanded card; the **run loop resolves it**
+  against the canonical ring and selects the newest **selectable** row —
+  wherever it sits, even outside the unfocused `trace_lines` window.
+  `apply_key` sees only rendered geometry and cannot make that choice:
+  with `trace_lines = 1` and a display-only newest row, the only valid
+  identity is off-screen. No selectable row anywhere in the ring,
+  collapsed card, or no cursor → the outcome resolves to nothing. The
+  draw that renders the new focus also renders the full ring, so the
+  always-a-real-row invariant holds at every draw boundary.
 - `h` (trace zone): back to the card zone; cursor unchanged. `h` in the
   card zone stays inert; `l` in the trace zone is inert (nothing deeper).
 - `j`/`k` (trace zone): move selection by rendered row, clamped at both
@@ -116,8 +123,9 @@ they render as today but export no span, cannot be selected, and
 **Rendering while focused** (geometry in Section 3): the focused card's
 traces section shows the full ring (Decision 2). The selected-row
 visibility guarantee is conditional, mirroring the card contract exactly:
-`l`/`j`/`k` set `follow = true` and the next draw keeps the selected
-trace row on screen (`ensure_visible` extended to row granularity); the
+zone entry and `j`/`k` set `follow = true` (`l` *inside* the trace zone
+stays inert — it is not a reattachment key) and the next draw keeps the
+selected trace row on screen (`ensure_visible` at row granularity); the
 wheel still detaches (`follow = false`, redraw uses `reanchor`), and a
 detached view may legitimately leave the selected row off-screen until
 keyboard navigation resumes.
@@ -161,19 +169,25 @@ a card's span, so the more specific hit must win.
   selection itself is always correct, and the row-granularity follow
   pulls the selected row into view on the next draw; a second click
   simply needs re-aiming after a cross-card reflow.
-- Header/body clicks keep their v0.2.5 semantics, with the Section-2
-  invariant enforced: a body click that moves the cursor to another card,
-  or a header click that collapses the anchor card, clears `trace_focus`.
+- Header/body clicks keep their v0.2.5 semantics, with one general
+  rule: **any card click that changes `cursor`, and any header click
+  that collapses the anchor, clears `trace_focus`** — body clicks to
+  another card, header clicks on another card included. Ids are only
+  pane-unique, so a stale pair carried onto a new card could look valid;
+  clearing on every cursor change closes that leak.
 - Wheel: unchanged — scrolls the list, detaches.
 
 **Outcome plumbing.** Neither `apply_mouse` nor `apply_key` touches
 `State` or the dialog slot, and that stays true: opening a detail panel
 is expressed as data. `apply_mouse`'s return grows from `bool` into a
 small outcome (changed / unchanged / `OpenTrace { card_id, tool_use_id
-}`), and key routing gains the matching `KeyOutcome` variant for
-`o`/Enter in the trace zone. The **run loop is the single resolver**: it
-looks the pair up in `State`, clones the call into the Section-2
-snapshot, installs the panel, and marks dirty. Resolution happens in the
+}`), and key routing gains matching `KeyOutcome` variants: `OpenTrace`
+for `o`/Enter in the trace zone, and `EnterTraces { card_id }` for `l`
+(Section 2) — the mouse needs no `EnterTraces` because a clicked span
+already carries its id. The **run loop is the single resolver**: it
+resolves `EnterTraces` to the newest selectable id in the canonical
+ring, looks an `OpenTrace` pair up in `State`, clones the call into the
+Section-2 snapshot, installs the panel, and marks dirty. Resolution happens in the
 same loop iteration as the input — the loop is single-threaded, so the
 ring cannot change in between; if the pair is somehow absent at
 resolution, the outcome degrades to selection-only (no panel, no crash).
@@ -205,8 +219,11 @@ duration from a **new compact duration formatter** — `format::age` is an
 absolute-delta formatter that reports every sub-minute interval as
 "now" and cannot express durations; the new contract is
 `0..1000ms → "NNNms"` including `"0ms"`, `1s..60s → one-decimal
-seconds`, `≥60s → "MmSSs"`), a when line (absolute timestamp plus age —
-`age` IS correct there), a rule, then the **args body**: pretty-printed
+seconds`, `≥60s → "MmSSs"`), a when line (absolute timestamp plus age,
+**frozen at open**: the snapshot stores the formatted line, so the
+minute tick that redraws the UI never rewrites panel text — `age` is
+the right formatter here but runs exactly once), a rule, then the
+**args body**: pretty-printed
 via `serde_json` when the preview parses as JSON, verbatim otherwise.
 The body renders as `Row::Text(String)` — one new variant, nothing else
 in the panel grammar changes — which **preserves hard newlines and
@@ -263,7 +280,7 @@ invariant restated as the test surface.
 downward; the id anchor means selection *identity* never drifts. While
 attached (`follow = true`), **every dirty draw** keeps the selected row
 visible — churn cannot push it off-screen; only a wheel-detached view
-lets rows slide away, and the next `l`/`j`/`k` reattaches. Duplicate
+lets rows slide away, and the next `j`/`k` reattaches. Duplicate
 ids are handled *before* geometry exists: the view canonicalizes
 newest-first and renders at most one row per id (Section 3), so
 hit-testing and selection are never ambiguous — pinned by a plan test.
@@ -310,10 +327,14 @@ modified clicks inert with no state change, **and both card-click
 focus-clearing branches** — a body click that changes cards clears
 `trace_focus`, a header click that collapses the anchor clears it, each
 exercised with the *same* `toolUseId` present on two cards so pair
-leakage cannot masquerade as valid selection. Key table: `l`
+leakage cannot masquerade as valid selection — including a **header
+click onto another card** clearing focus. Key table: `l`
 (expanded+selectable / collapsed / empty / **all-id-less** /
-**newest-id-less-mixed** / no-cursor), `h` in both zones, `j`/`k`
-clamped and skipping id-less rows, `o` yielding `OpenTrace`, and
+**newest-id-less-mixed** / no-cursor / **inert inside the trace zone**
+/ **`trace_lines = 1` with a display-only newest row still reaching
+the hidden selectable row through the resolver**), `h` in both zones,
+`j`/`k` clamped and skipping display-only rows (id-less *and*
+non-settled status), `o` yielding `OpenTrace`, and
 **TraceDetail close**: `esc` and `q` each land on `open == None` (not
 the menu) with cursor and `trace_focus` unchanged. Reconcile matrix:
 unbind (cursor rehomes, focus clears), collapse, `auto_expand` flip,
@@ -334,9 +355,12 @@ line is reachable); `cursor: None`.
 **`format`** — duration boundary table: `0ms`, `999ms`, `1.0s`,
 `59.9s`, `1m00s`, `2m05s`.
 
-**Resolver** — the **happy path first**: a valid `OpenTrace` resolves
+**Resolver** — the **happy paths first**: a valid `OpenTrace` resolves
 the canonical call, clones it, and installs `Dialog::TraceDetail`; the
-ring is then mutated and the installed snapshot is asserted unchanged.
-Then the failure paths: small-frame refusal keeps selection; an absent
-pair degrades to selection-only; snapshot fallbacks (`?`, `—`, omitted
-segments) for malformed metadata.
+ring is then mutated and the installed snapshot is asserted unchanged —
+including its **frozen when-line across a minute tick**. `EnterTraces`
+resolves the newest selectable id from the canonical ring. Then the
+failure paths: small-frame refusal keeps selection; an absent pair
+degrades to selection-only; snapshot fallbacks (`?`, `—`, omitted
+segments) for malformed metadata, with non-settled-status rows proven
+display-only end to end.
