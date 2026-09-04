@@ -5,6 +5,7 @@ use crate::sidebar::config::Theme;
 use crossterm::event::{Event, KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::text::Text;
 use ratatui::widgets::Paragraph;
+use serde_json::Value;
 
 use crate::sidebar::dialog::{Panel, Row};
 use crate::sidebar::layout::{
@@ -220,6 +221,20 @@ fn reconcile_cursor(cursor: &mut Option<String>, rendered: &Rendered, prev_index
     let changed = *cursor != next;
     *cursor = next;
     changed
+}
+
+/// Row-granularity follow (spec §2): while a trace is selected, the
+/// visibility contract tracks the row, not its card.
+fn follow_span(
+    cursor: &Option<String>,
+    trace_focus: &Option<String>,
+    rendered: &Rendered,
+) -> Option<LineSpan> {
+    let card = cursor.as_deref()?;
+    trace_focus
+        .as_deref()
+        .and_then(|id| rendered.trace_span_for(card, id))
+        .or_else(|| rendered.span_for(card))
 }
 
 /// Spec §2: the pair either still renders, snaps to the nearest surviving
@@ -1550,6 +1565,77 @@ fn daemon_settings_warning(live: &crate::sidebar::live::Live, running: DaemonSet
     )
 }
 
+fn selectable_call(call: &Value) -> bool {
+    call.get("toolUseId").and_then(Value::as_str).is_some()
+        && matches!(
+            call.get("status").and_then(Value::as_str),
+            Some("done") | Some("failed")
+        )
+}
+
+fn canonical_call<'a>(ring: &'a std::collections::VecDeque<Value>, id: &str) -> Option<&'a Value> {
+    ring.iter()
+        .rev()
+        .find(|call| call.get("toolUseId").and_then(Value::as_str) == Some(id))
+}
+
+fn newest_selectable_id(ring: &std::collections::VecDeque<Value>) -> Option<String> {
+    let mut seen = std::collections::HashSet::new();
+    ring.iter().rev().find_map(|call| {
+        let id = call.get("toolUseId").and_then(Value::as_str)?;
+        if !seen.insert(id) {
+            return None;
+        }
+        selectable_call(call).then(|| id.to_string())
+    })
+}
+
+fn resolve_open_trace(
+    state: &State,
+    frame: ratatui::layout::Size,
+    now: u64,
+    it: &mut Interaction,
+    open: &mut Option<Dialog>,
+    card_id: &str,
+    tool_use_id: &str,
+) -> bool {
+    if frame.width < MIN_DIALOG_WIDTH || frame.height < MIN_DIALOG_HEIGHT {
+        it.notice = Some(format!(
+            "the frame is too small for a panel ({}x{}; needs {MIN_DIALOG_WIDTH}x{MIN_DIALOG_HEIGHT})",
+            frame.width, frame.height
+        ));
+        return true;
+    }
+    let Some(call) = state
+        .panes
+        .get(card_id)
+        .and_then(|telemetry| canonical_call(&telemetry.tool_calls, tool_use_id))
+        .filter(|call| selectable_call(call))
+    else {
+        return false;
+    };
+    let (title, rows) = trace_snapshot(call, now);
+    *open = Some(Dialog::TraceDetail {
+        title,
+        rows,
+        offset: 0,
+    });
+    true
+}
+
+fn resolve_enter_traces(state: &State, it: &mut Interaction, card_id: &str) -> bool {
+    let Some(id) = state
+        .panes
+        .get(card_id)
+        .and_then(|telemetry| newest_selectable_id(&telemetry.tool_calls))
+    else {
+        return false;
+    };
+    it.trace_focus = Some(id);
+    it.follow = true;
+    true
+}
+
 fn trace_snapshot(call: &serde_json::Value, now_unix_ms: u64) -> (String, Vec<Row>) {
     let tool = crate::sidebar::format::sanitise(
         call.get("tool")
@@ -2372,10 +2458,7 @@ pub fn run() -> i32 {
             it.toggled.retain(|id| state.panes.contains_key(id));
 
             let prev_index = index_of(&last_rendered, it.cursor.as_deref());
-            let prev_span = it
-                .cursor
-                .as_deref()
-                .and_then(|id| last_rendered.span_for(id));
+            let prev_span = follow_span(&it.cursor, &it.trace_focus, &last_rendered);
 
             let mut out = crate::sidebar::view::render(
                 &state,
@@ -2427,7 +2510,7 @@ pub fn run() -> i32 {
             let pinned_keep = out.pinned.len().min(size.height as usize);
             viewport = size.height.saturating_sub(pinned_keep as u16);
             total = out.scrollable.len();
-            it.offset = match it.cursor.as_deref().and_then(|id| out.span_for(id)) {
+            it.offset = match follow_span(&it.cursor, &it.trace_focus, &out) {
                 Some(span) if it.follow || recovered => {
                     ensure_visible(it.offset, span, viewport, total)
                 }
@@ -2499,9 +2582,8 @@ pub fn run() -> i32 {
         }
         match crossterm::event::read() {
             Ok(Event::Key(key)) => {
-                dirty = true;
                 it.live_panes = state.panes.keys().cloned().collect();
-                if let KeyOutcome::Quit = route(
+                match route(
                     key,
                     &mut open,
                     &mut it,
@@ -2512,7 +2594,29 @@ pub fn run() -> i32 {
                     frame_size.width,
                     frame_size.height,
                 ) {
-                    return 0;
+                    KeyOutcome::Quit => return 0,
+                    KeyOutcome::Handled => dirty = true,
+                    KeyOutcome::EnterTraces { card_id } => {
+                        if resolve_enter_traces(&state, &mut it, &card_id) {
+                            dirty = true;
+                        }
+                    }
+                    KeyOutcome::OpenTrace {
+                        card_id,
+                        tool_use_id,
+                    } => {
+                        if resolve_open_trace(
+                            &state,
+                            frame_size,
+                            now,
+                            &mut it,
+                            &mut open,
+                            &card_id,
+                            &tool_use_id,
+                        ) {
+                            dirty = true;
+                        }
+                    }
                 }
             }
             Ok(Event::Mouse(mouse)) => {
@@ -2527,7 +2631,22 @@ pub fn run() -> i32 {
                 ) {
                     MouseOutcome::Inert => {}
                     MouseOutcome::Changed => dirty = true,
-                    MouseOutcome::OpenTrace { .. } => dirty = true,
+                    MouseOutcome::OpenTrace {
+                        card_id,
+                        tool_use_id,
+                    } => {
+                        if resolve_open_trace(
+                            &state,
+                            frame_size,
+                            now,
+                            &mut it,
+                            &mut open,
+                            &card_id,
+                            &tool_use_id,
+                        ) {
+                            dirty = true;
+                        }
+                    }
                 }
             }
             Ok(Event::Resize(_, _)) => dirty = true,
@@ -2747,6 +2866,244 @@ mod tests {
         );
         assert!(joined.contains("when=—"));
         assert!(joined.contains("(no arguments retained)"));
+    }
+
+    #[test]
+    fn canonical_call_and_newest_selectable_follow_ring_rules() {
+        let mut ring = std::collections::VecDeque::new();
+        ring.push_back(serde_json::json!({"toolUseId":"dup","status":"done","tool":"Old"}));
+        ring.push_back(serde_json::json!({"status":"done","tool":"NoId"}));
+        ring.push_back(serde_json::json!({"toolUseId":"run","status":"running"}));
+        ring.push_back(serde_json::json!({"toolUseId":"dup","status":"failed","tool":"New"}));
+        assert_eq!(
+            canonical_call(&ring, "dup")
+                .and_then(|c| c.get("tool"))
+                .and_then(Value::as_str),
+            Some("New"),
+            "newest occurrence wins, matching the view's dedup"
+        );
+        assert_eq!(newest_selectable_id(&ring).as_deref(), Some("dup"));
+        // Dedup-first: a newer running dup SHADOWS an older done one, so the
+        // shadowed settled entry is not selectable (it has no rendered row).
+        let shadowed: std::collections::VecDeque<Value> = [
+            serde_json::json!({"toolUseId":"dup","status":"done","tool":"Old"}),
+            serde_json::json!({"toolUseId":"other","status":"done"}),
+            serde_json::json!({"toolUseId":"dup","status":"running"}),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(
+            newest_selectable_id(&shadowed).as_deref(),
+            Some("other"),
+            "the shadowed dup is skipped; the next unshadowed selectable wins"
+        );
+        let empty: std::collections::VecDeque<Value> = [
+            serde_json::json!({"status":"done"}),
+            serde_json::json!({"toolUseId":"r","status":"running"}),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(
+            newest_selectable_id(&empty),
+            None,
+            "no selectable row anywhere"
+        );
+    }
+
+    fn one_pane_state(card: &str, ring: Vec<Value>) -> crate::sidebar::reducer::State {
+        let mut state = crate::sidebar::reducer::State::default();
+        let mut t = crate::daemon::store::PaneTelemetry::with_agent("claude");
+        t.tool_calls = ring.into_iter().collect();
+        state.panes.insert(card.into(), t);
+        state
+    }
+
+    fn frame(w: u16, h: u16) -> ratatui::layout::Size {
+        ratatui::layout::Size {
+            width: w,
+            height: h,
+        }
+    }
+
+    #[test]
+    fn resolve_open_trace_installs_a_frozen_panel() {
+        let call = serde_json::json!({
+            "toolUseId":"t1","tool":"Bash","status":"done",
+            "args":"{\"command\":\"ls\"}","timestamp":"2026-09-01T10:00:00.000Z","durationMs":5,
+        });
+        let mut state = one_pane_state("a", vec![call]);
+        let mut it = focused("a", "t1");
+        let mut open = None;
+        assert!(resolve_open_trace(
+            &state,
+            frame(120, 40),
+            0,
+            &mut it,
+            &mut open,
+            "a",
+            "t1"
+        ));
+        let Some(Dialog::TraceDetail { title, rows, .. }) = &open else {
+            panic!("panel installed");
+        };
+        assert_eq!(title, "Trace — Bash");
+        let before = rows.len();
+        // Snapshot survival: mutate the ring, the installed panel is a copy
+        // — content-compared, not length-compared.
+        let frozen: Vec<String> = rows
+            .iter()
+            .filter_map(|r| match r {
+                crate::sidebar::dialog::Row::Entry { label, value, .. } => {
+                    Some(format!("{label}={value}"))
+                }
+                crate::sidebar::dialog::Row::Text(t) => Some(t.clone()),
+                _ => None,
+            })
+            .collect();
+        state.panes.get_mut("a").unwrap().tool_calls.clear();
+        let Some(Dialog::TraceDetail { rows, .. }) = &open else {
+            unreachable!()
+        };
+        assert_eq!(rows.len(), before);
+        let after: Vec<String> = rows
+            .iter()
+            .filter_map(|r| match r {
+                crate::sidebar::dialog::Row::Entry { label, value, .. } => {
+                    Some(format!("{label}={value}"))
+                }
+                crate::sidebar::dialog::Row::Text(t) => Some(t.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            frozen, after,
+            "the panel text is byte-identical after churn"
+        );
+        // Frozen clock: a second install with a different `now` bakes a
+        // different when-line — proving age is computed once, at build.
+        let state2 = one_pane_state(
+            "a",
+            vec![serde_json::json!({
+                "toolUseId":"t1","tool":"Bash","status":"done",
+                "args":"","timestamp":"2026-09-01T10:00:00.000Z","durationMs":5,
+            })],
+        );
+        let mut it2 = focused("a", "t1");
+        let mut open2 = None;
+        resolve_open_trace(
+            &state2,
+            frame(120, 40),
+            3_600_000_000_000,
+            &mut it2,
+            &mut open2,
+            "a",
+            "t1",
+        );
+        let Some(Dialog::TraceDetail { rows: rows2, .. }) = &open2 else {
+            panic!()
+        };
+        let when = |rows: &[crate::sidebar::dialog::Row]| {
+            rows.iter().find_map(|r| match r {
+                crate::sidebar::dialog::Row::Entry { label, value, .. } if label == "when" => {
+                    Some(value.clone())
+                }
+                _ => None,
+            })
+        };
+        assert_ne!(
+            when(rows),
+            when(rows2),
+            "the when-line is a function of the now at open"
+        );
+    }
+
+    #[test]
+    fn resolve_open_trace_refuses_small_frames_and_bad_pairs() {
+        let call = serde_json::json!({"toolUseId":"t1","tool":"Bash","status":"done","args":""});
+        let running = serde_json::json!({"toolUseId":"t2","status":"running","args":""});
+        let state = one_pane_state("a", vec![call, running]);
+        // Small frame: notice, no panel, selection kept.
+        let mut it = focused("a", "t1");
+        let mut open = None;
+        assert!(resolve_open_trace(
+            &state,
+            frame(10, 5),
+            0,
+            &mut it,
+            &mut open,
+            "a",
+            "t1"
+        ));
+        assert!(open.is_none());
+        assert!(it.notice.as_deref().unwrap_or("").contains("too small"));
+        assert_eq!(it.trace_focus.as_deref(), Some("t1"));
+        // Absent pair: selection-only degrade, no panel, no notice.
+        let mut it = focused("a", "gone");
+        let mut open = None;
+        assert!(!resolve_open_trace(
+            &state,
+            frame(120, 40),
+            0,
+            &mut it,
+            &mut open,
+            "a",
+            "gone"
+        ));
+        assert!(open.is_none());
+        // Display-only (non-settled) rows never open.
+        let mut it = focused("a", "t2");
+        let mut open = None;
+        assert!(!resolve_open_trace(
+            &state,
+            frame(120, 40),
+            0,
+            &mut it,
+            &mut open,
+            "a",
+            "t2"
+        ));
+        assert!(open.is_none());
+    }
+
+    #[test]
+    fn resolve_enter_traces_selects_only_from_the_canonical_ring() {
+        let state = one_pane_state(
+            "a",
+            vec![
+                serde_json::json!({"toolUseId":"t-old","status":"done","args":""}),
+                serde_json::json!({"status":"done","args":""}), // id-less, newest
+            ],
+        );
+        let mut it = Interaction {
+            cursor: Some("a".into()),
+            ..Default::default()
+        };
+        assert!(resolve_enter_traces(&state, &mut it, "a"));
+        assert_eq!(
+            it.trace_focus.as_deref(),
+            Some("t-old"),
+            "hidden selectable row found"
+        );
+        assert!(it.follow);
+        // An all-unselectable ring resolves to nothing.
+        let state = one_pane_state("b", vec![serde_json::json!({"status":"done","args":""})]);
+        let mut it = Interaction {
+            cursor: Some("b".into()),
+            ..Default::default()
+        };
+        assert!(!resolve_enter_traces(&state, &mut it, "b"));
+        assert_eq!(it.trace_focus, None);
+    }
+
+    #[test]
+    fn follow_prefers_the_selected_trace_row_over_its_card() {
+        let rendered = two_cards();
+        let cursor = Some("a".to_string());
+        let span = follow_span(&cursor, &Some("t-old".to_string()), &rendered).expect("row");
+        assert_eq!(span.start, 2, "the row, not the card header");
+        let span = follow_span(&cursor, &None, &rendered).expect("card");
+        assert_eq!(span.start, 0, "card zone follows the card");
+        assert_eq!(follow_span(&None, &Some("t-old".into()), &rendered), None);
     }
 
     #[test]
