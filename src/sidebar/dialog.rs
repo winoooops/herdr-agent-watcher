@@ -20,6 +20,7 @@ pub struct Panel {
     pub offset: usize,
 }
 
+#[derive(Clone)]
 pub enum Row {
     /// `enabled: false` is shown but cannot be acted on.
     Entry {
@@ -35,10 +36,47 @@ pub enum Row {
     /// the daemon's interval needs a restart to take effect, and saying so in
     /// body text is saying it invisibly.
     Warn(String),
+    /// Preformatted body text. Unlike notes, spaces and hard line breaks are
+    /// content rather than wrapping opportunities.
+    Text(String),
     Rule,
 }
 
 const GAP: usize = 3;
+
+/// Slice one hard line by terminal-cell width without changing its spacing.
+fn wrap_verbatim_line(text: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![String::new()];
+    }
+    let mut out = Vec::new();
+    let mut rest = text.to_string();
+    while format::width(&rest) > width {
+        let mut head = String::new();
+        let mut taken = 0;
+        for ch in rest.chars() {
+            let next = format::width(&format!("{head}{ch}"));
+            if next > width {
+                break;
+            }
+            head.push(ch);
+            taken += 1;
+        }
+        if taken == 0 {
+            break;
+        }
+        out.push(head);
+        rest = rest.chars().skip(taken).collect();
+    }
+    out.push(rest);
+    out
+}
+
+fn wrap_verbatim(text: &str, width: usize) -> Vec<String> {
+    text.split('\n')
+        .flat_map(|line| wrap_verbatim_line(line, width))
+        .collect()
+}
 
 /// Split `text` to fit `width` cells, breaking at spaces where it can.
 fn wrap(text: &str, width: usize) -> Vec<String> {
@@ -64,25 +102,9 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
         // broken across lines. NOT `format::truncate`, which appends an
         // ellipsis: that is for text being cut off, and this is text being
         // continued on the next line.
-        let mut rest = word.to_string();
-        while format::width(&rest) > width {
-            let mut head = String::new();
-            let mut taken = 0;
-            for ch in rest.chars() {
-                let next = format::width(&format!("{head}{ch}"));
-                if next > width {
-                    break;
-                }
-                head.push(ch);
-                taken += 1;
-            }
-            if taken == 0 {
-                break;
-            }
-            out.push(head);
-            rest = rest.chars().skip(taken).collect();
-        }
-        line = rest;
+        let mut pieces = wrap_verbatim_line(word, width);
+        line = pieces.pop().unwrap_or_default();
+        out.extend(pieces);
     }
     if !line.is_empty() || out.is_empty() {
         out.push(line);
@@ -99,6 +121,7 @@ pub fn line_count(panel: &Panel, width: u16) -> usize {
         .iter()
         .map(|row| match row {
             Row::Note(note) | Row::Warn(note) => wrap(note, inner).len(),
+            Row::Text(text) => wrap_verbatim(text, inner).len(),
             _ => 1,
         })
         .sum()
@@ -213,6 +236,11 @@ pub fn render(panel: &Panel, width: u16, height: u16) -> Vec<Line> {
                         format!("  {piece}"),
                         Style::semantic(Role::Emphasis, Semantic::Warn),
                     ));
+                }
+            }
+            Row::Text(text) => {
+                for piece in wrap_verbatim(text, inner.saturating_sub(2)) {
+                    lines.push((format!("  {piece}"), Style::role(Role::Body)));
                 }
             }
             Row::Rule => lines.push(("─".repeat(inner), Style::role(Role::Rule))),

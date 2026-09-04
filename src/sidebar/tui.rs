@@ -6,6 +6,7 @@ use crossterm::event::{Event, KeyCode, KeyModifiers, MouseButton, MouseEvent, Mo
 use ratatui::text::Text;
 use ratatui::widgets::Paragraph;
 
+use crate::sidebar::dialog::{Panel, Row};
 use crate::sidebar::layout::{
     card_at, clamp_scroll, ensure_visible, reanchor, trace_at, Hit, LineSpan,
 };
@@ -434,6 +435,11 @@ pub(crate) enum Dialog {
         report: Result<crate::agents::doctor::Report, String>,
         taken_at: u64,
     },
+    TraceDetail {
+        title: String,
+        rows: Vec<Row>,
+        offset: usize,
+    },
 }
 
 impl Dialog {
@@ -449,7 +455,8 @@ impl Dialog {
             Dialog::Doctor { .. }
             | Dialog::Update { .. }
             | Dialog::Bridges { .. }
-            | Dialog::Keybindings { .. } => None,
+            | Dialog::Keybindings { .. }
+            | Dialog::TraceDetail { .. } => None,
         }
     }
 
@@ -458,7 +465,8 @@ impl Dialog {
             Dialog::Doctor { offset, .. }
             | Dialog::Update { offset, .. }
             | Dialog::Bridges { offset, .. }
-            | Dialog::Keybindings { offset, .. } => Some(offset),
+            | Dialog::Keybindings { offset, .. }
+            | Dialog::TraceDetail { offset, .. } => Some(offset),
             _ => None,
         }
     }
@@ -475,7 +483,8 @@ impl Dialog {
             Dialog::Doctor { .. }
             | Dialog::Update { .. }
             | Dialog::Bridges { .. }
-            | Dialog::Keybindings { .. } => 0,
+            | Dialog::Keybindings { .. }
+            | Dialog::TraceDetail { .. } => 0,
         }
     }
 
@@ -491,6 +500,9 @@ impl Dialog {
             Dialog::Keybindings {
                 bindings, editing, ..
             } => keybinding_rows(bindings, editing.as_ref()).len(),
+            Dialog::TraceDetail { title, rows, .. } => {
+                crate::sidebar::dialog::line_count(&trace_panel(title, rows, 0), 60)
+            }
             other => other.len(),
         }
     }
@@ -1258,6 +1270,11 @@ fn route(
             (KeyCode::Char('c'), m) if m.contains(KeyModifiers::CONTROL) => {
                 return KeyOutcome::Quit
             }
+            (KeyCode::Esc, _) | (KeyCode::Char('q'), _)
+                if matches!(dialog, Dialog::TraceDetail { .. }) =>
+            {
+                *open = None;
+            }
             // Back one level, not out: a panel reached through the menu
             // returns to it. One reached with `s` or `d` was never under a
             // menu, and dropping into one you did not open is not going back.
@@ -1294,7 +1311,13 @@ fn route(
             }
             (KeyCode::Char('j'), _) | (KeyCode::Down, _) => {
                 let last = dialog.len().saturating_sub(1);
-                let rows = dialog.row_count();
+                let rows = match dialog {
+                    Dialog::TraceDetail { title, rows, .. } => crate::sidebar::dialog::line_count(
+                        &trace_panel(title, rows, 0),
+                        panel_width(width),
+                    ),
+                    _ => dialog.row_count(),
+                };
                 if let Some(cursor) = dialog.cursor_mut() {
                     *cursor = (*cursor + 1).min(last);
                 } else if let Some(offset) = dialog.offset_mut() {
@@ -1527,13 +1550,26 @@ fn daemon_settings_warning(live: &crate::sidebar::live::Live, running: DaemonSet
     )
 }
 
+fn trace_panel(title: &str, rows: &[Row], offset: usize) -> Panel {
+    Panel {
+        title: title.to_string(),
+        rows: rows.to_vec(),
+        footer: "j/k scroll · esc close".into(),
+        cursor: None,
+        offset,
+    }
+}
+
+fn panel_width(frame: u16) -> u16 {
+    frame.min(60)
+}
+
 fn panel_for(
     dialog: &Dialog,
     live: &crate::sidebar::live::Live,
     _cfg: &crate::sidebar::config::Loaded,
     now: u64,
 ) -> crate::sidebar::dialog::Panel {
-    use crate::sidebar::dialog::{Panel, Row};
     match dialog {
         Dialog::Menu { cursor } => Panel {
             title: "Menu".into(),
@@ -1772,6 +1808,11 @@ fn panel_for(
             cursor: None,
             offset: *offset,
         },
+        Dialog::TraceDetail {
+            title,
+            rows,
+            offset,
+        } => trace_panel(title, rows, *offset),
     }
 }
 
@@ -2363,7 +2404,7 @@ pub fn run() -> i32 {
                     frame.render_widget(Paragraph::new(foot.clone()), split[1]);
                     if let Some(dialog) = open.as_ref() {
                         let panel = panel_for(dialog, &live, &cfg, now);
-                        let w = area.width.min(60);
+                        let w = panel_width(area.width);
                         let h = area.height.saturating_sub(2).min(20);
                         let rect = ratatui::layout::Rect {
                             x: area.x + (area.width - w) / 2,
@@ -2488,6 +2529,102 @@ mod tests {
             trace_focus: Some(id.into()),
             ..Default::default()
         }
+    }
+
+    fn detail_rows() -> Vec<crate::sidebar::dialog::Row> {
+        // 39 short lines plus one 100-char line: at panel width 60 the long
+        // line wraps into TWO rendered lines, at an unclamped 120 it stays
+        // ONE — so a bound computed at the frame width undercounts and this
+        // test catches the exact clamp mismatch the spec names (§4).
+        let mut rows: Vec<crate::sidebar::dialog::Row> = (0..39)
+            .map(|i| crate::sidebar::dialog::Row::Text(format!("line {i}")))
+            .collect();
+        rows.push(crate::sidebar::dialog::Row::Text("x".repeat(100)));
+        rows
+    }
+
+    #[test]
+    fn text_rows_wrap_verbatim_preserving_indentation() {
+        let panel = trace_panel(
+            "Trace — Bash",
+            &[crate::sidebar::dialog::Row::Text(
+                "  \"command\": \"cargo test\"".into(),
+            )],
+            0,
+        );
+        let lines = crate::sidebar::dialog::render(&panel, 60, 10);
+        let body: String = lines
+            .iter()
+            .flat_map(|line| line.iter().map(|s| s.text.clone()))
+            .collect();
+        assert!(
+            body.contains("  \"command\": \"cargo test\""),
+            "leading indentation survives verbatim, got: {body}"
+        );
+        // Embedded hard newlines flatten to distinct rendered lines.
+        let panel = trace_panel("t", &[crate::sidebar::dialog::Row::Text("a\nb".into())], 0);
+        assert_eq!(crate::sidebar::dialog::line_count(&panel, 60), 2);
+    }
+
+    #[test]
+    fn trace_detail_closes_to_none_keeping_the_selection() {
+        let mut it = focused("a", "t-new");
+        let mut live = live_default();
+        let rendered = two_cards();
+        for key in [KeyCode::Esc, KeyCode::Char('q')] {
+            let mut open = Some(Dialog::TraceDetail {
+                title: "Trace — Bash".into(),
+                rows: detail_rows(),
+                offset: 0,
+            });
+            route(
+                press(key),
+                &mut open,
+                &mut it,
+                &mut live,
+                &rendered,
+                20,
+                40,
+                120,
+                40,
+            );
+            assert!(open.is_none(), "no menu detour for {key:?}");
+            assert_eq!(it.cursor.as_deref(), Some("a"));
+            assert_eq!(it.trace_focus.as_deref(), Some("t-new"));
+        }
+    }
+
+    #[test]
+    fn trace_detail_scrolls_to_the_last_rendered_line_on_wide_frames() {
+        let mut open = Some(Dialog::TraceDetail {
+            title: "Trace — Bash".into(),
+            rows: detail_rows(),
+            offset: 0,
+        });
+        let mut it = Interaction::default();
+        let mut live = live_default();
+        let rendered = two_cards();
+        for _ in 0..200 {
+            route(
+                press(KeyCode::Char('j')),
+                &mut open,
+                &mut it,
+                &mut live,
+                &rendered,
+                20,
+                40,
+                120,
+                40,
+            );
+        }
+        let Some(Dialog::TraceDetail { offset, .. }) = open else {
+            panic!("panel stays open");
+        };
+        // 39 one-line rows + one line that wraps to 2 AT PANEL WIDTH 60:
+        // line_count = 41, so the clamp is 40. A bound computed at the
+        // unclamped frame width (120, where the long line stays single)
+        // would clamp at 39 and fail this assertion.
+        assert_eq!(offset, 40);
     }
 
     #[test]
@@ -3493,6 +3630,7 @@ mod tests {
             .map(|row| match row {
                 Row::Entry { label, value, .. } => format!("{label} {value}"),
                 Row::Note(note) | Row::Warn(note) => note.clone(),
+                Row::Text(text) => text.clone(),
                 Row::Rule => String::new(),
             })
             .collect::<Vec<_>>()
