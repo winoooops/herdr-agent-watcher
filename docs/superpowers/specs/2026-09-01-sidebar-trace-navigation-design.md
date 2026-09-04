@@ -211,9 +211,12 @@ inert trace clicks are misses and modified clicks.
 ## 4. Detail panel & help surface
 
 **Panel.** A new `Dialog::TraceDetail` variant holding the Section-2
-snapshot — card id + agent label, `tool`, `status`, `timestamp`,
-`duration_ms`, the retained args preview, `tool_use_id` — plus the
-cursor/offset the `Panel` machinery already uses for scrolling. Title:
+snapshot as **a title and pre-built panel rows** (status, when, args
+body — everything below is baked into rows at open) plus the offset the
+`Panel` machinery already uses for scrolling. Card identity and
+`tool_use_id` are not stored or rendered: the panel opens from the
+selected card, whose identity is on screen behind it — a deliberate
+narrowing from an earlier draft that listed unrendered fields. Title:
 `Trace — <tool>`. Rows: a status line (existing status glyph + word + a
 duration from a **new compact duration formatter** — `format::age` is an
 absolute-delta formatter that reports every sub-minute interval as
@@ -365,4 +368,4 @@ degrades to selection-only; snapshot fallbacks (`?`, `—`, omitted
 segments) for malformed metadata, with non-settled-status rows proven
 display-only end to end.
 
-<!-- codex-reviewed: 2026-09-04T09:10:24Z -->
+<!-- codex-reviewed: 2026-09-04T09:40:20Z -->
