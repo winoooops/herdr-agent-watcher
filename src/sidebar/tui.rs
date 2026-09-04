@@ -184,6 +184,7 @@ fn view_input<'a>(
 ) -> ViewInput<'a> {
     ViewInput {
         cursor,
+        trace_focus: None,
         toggled,
         hide_idle: live.hide_idle,
         scope: live.workspace_filter(),
@@ -1971,6 +1972,7 @@ pub fn run() -> i32 {
         scrollable: Vec::new(),
         pinned: Vec::new(),
         spans: Vec::new(),
+        trace_spans: Vec::new(),
     };
     let mut last_age_tick_ms: u64 = now_unix_ms();
     let mut dirty = true;
@@ -2290,6 +2292,24 @@ mod tests {
                     LineSpan {
                         start: 4,
                         height: 20,
+                    },
+                ),
+            ],
+            trace_spans: vec![
+                (
+                    "a".into(),
+                    "t-new".into(),
+                    LineSpan {
+                        start: 1,
+                        height: 1,
+                    },
+                ),
+                (
+                    "a".into(),
+                    "t-old".into(),
+                    LineSpan {
+                        start: 2,
+                        height: 1,
                     },
                 ),
             ],

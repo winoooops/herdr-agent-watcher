@@ -26,6 +26,7 @@ pub struct CardCtx<'a> {
     pub cwd_label: Option<&'a str>,
     pub width: u16,
     pub selected: bool,
+    pub trace_focus: Option<&'a str>,
     pub now_unix_ms: u64,
 }
 
@@ -638,6 +639,13 @@ fn plan_usage_rows(t: &PaneTelemetry, cx: &CardCtx<'_>) -> Vec<Line> {
 }
 
 pub fn expanded_card(t: &PaneTelemetry, cx: &CardCtx<'_>) -> Vec<Line> {
+    expanded_card_with_traces(t, cx).0
+}
+
+fn expanded_card_with_traces(
+    t: &PaneTelemetry,
+    cx: &CardCtx<'_>,
+) -> (Vec<Line>, Vec<(String, usize)>) {
     let width = cx.width;
     let mut lines = vec![header(t, cx, true), task_line(t, cx)];
     if width >= MODEL_LINE_MIN {
@@ -768,13 +776,21 @@ pub fn expanded_card(t: &PaneTelemetry, cx: &CardCtx<'_>) -> Vec<Line> {
     ));
     lines.extend(tool_rows(t, cx));
     lines.push(blank());
-    lines.extend(trace_rows(t, cx));
-    lines
+    let traces_at = lines.len();
+    let (trace_lines, trace_offsets) = trace_rows(t, cx);
+    lines.extend(trace_lines);
+    (
+        lines,
+        trace_offsets
+            .into_iter()
+            .map(|(id, offset)| (id, traces_at + offset))
+            .collect(),
+    )
 }
 
-/// Settled calls only, newest first. In-flight rows are cut from v1 (§1.3);
-/// work in progress reads as the card state.
-fn trace_rows(t: &PaneTelemetry, cx: &CardCtx<'_>) -> Vec<Line> {
+/// Newest first. Off-contract rows still display, but only id-bearing calls
+/// with an exact settled status export selectable geometry.
+fn trace_rows(t: &PaneTelemetry, cx: &CardCtx<'_>) -> (Vec<Line>, Vec<(String, usize)>) {
     let width = cx.width;
     let retained = t.tool_calls.len();
     let mut out = vec![vec![
@@ -782,8 +798,24 @@ fn trace_rows(t: &PaneTelemetry, cx: &CardCtx<'_>) -> Vec<Line> {
         Span::emphasis(format::count(retained as u64)),
         Span::body(" retained"),
     ]];
+    let mut rows = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let calls: Vec<&Value> = t
+        .tool_calls
+        .iter()
+        .rev()
+        .filter(|call| match call.get("toolUseId").and_then(Value::as_str) {
+            Some(id) => seen.insert(id.to_string()),
+            None => true,
+        })
+        .collect();
+    let window = if cx.trace_focus.is_some() {
+        usize::MAX
+    } else {
+        cx.trace_lines as usize
+    };
 
-    for call in t.tool_calls.iter().rev().take(cx.trace_lines as usize) {
+    for call in calls.iter().take(window) {
         let failed = call.get("status").and_then(Value::as_str) == Some("failed");
         let (glyph, semantic) = if failed {
             ("✕", Semantic::Bad)
@@ -818,7 +850,7 @@ fn trace_rows(t: &PaneTelemetry, cx: &CardCtx<'_>) -> Vec<Line> {
             .saturating_sub(used + format::width(&age))
             .max(1);
 
-        out.push(vec![
+        let mut row = vec![
             Span::body("  "),
             Span::new(format!("{glyph} "), Style::semantic(Role::Body, semantic)),
             Span::emphasis(format::pad(&tool, 6)),
@@ -828,17 +860,33 @@ fn trace_rows(t: &PaneTelemetry, cx: &CardCtx<'_>) -> Vec<Line> {
             // §2.5 forbids load-bearing spans from taking a role that can dim
             // out of existence.
             Span::body(age),
-        ]);
+        ];
+        let id = call.get("toolUseId").and_then(Value::as_str);
+        let selectable = id.is_some()
+            && matches!(
+                call.get("status").and_then(Value::as_str),
+                Some("done") | Some("failed")
+            );
+        if selectable {
+            let id = id.expect("selectable rows have ids");
+            rows.push((id.to_string(), out.len()));
+            if cx.trace_focus == Some(id) {
+                for span in &mut row {
+                    span.style.reverse = true;
+                }
+            }
+        }
+        out.push(row);
     }
 
-    let shown = retained.min(cx.trace_lines as usize);
-    if retained > shown {
+    let shown = calls.len().min(window);
+    if calls.len() > shown {
         out.push(vec![Span::label(format!(
             "    +{} older",
-            retained - shown
+            calls.len() - shown
         ))]);
     }
-    out
+    (out, rows)
 }
 
 /// Everything the view needs that is not telemetry. Owned by the shell,
@@ -847,6 +895,7 @@ fn trace_rows(t: &PaneTelemetry, cx: &CardCtx<'_>) -> Vec<Line> {
 #[derive(Debug, Clone)]
 pub struct ViewInput<'a> {
     pub cursor: Option<&'a str>,
+    pub trace_focus: Option<(&'a str, &'a str)>,
     /// Pane ids whose expansion is FLIPPED from the auto_expand default (§3.2).
     pub toggled: &'a std::collections::HashSet<String>,
     pub hide_idle: bool,
@@ -892,6 +941,7 @@ pub fn render(
 
     let mut scrollable: Vec<Line> = Vec::new();
     let mut spans: Vec<(String, crate::sidebar::layout::LineSpan)> = Vec::new();
+    let mut trace_spans: Vec<(String, String, crate::sidebar::layout::LineSpan)> = Vec::new();
     if visible.panes.is_empty() && visible.hidden_idle == 0 {
         scrollable.push(vec![Span::label("  no agents bound")]);
     }
@@ -914,15 +964,28 @@ pub fn render(
             cwd_label: labels.get(id.as_str()).map(String::as_str),
             width,
             selected: view.cursor == Some(id.as_str()),
+            trace_focus: view
+                .trace_focus
+                .and_then(|(card, trace)| (card == id).then_some(trace)),
             now_unix_ms,
         };
-        let card = if open {
-            expanded_card(t, &cx)
+        let (card, trace_offsets) = if open {
+            expanded_card_with_traces(t, &cx)
         } else {
-            compact_card(t, &cx)
+            (compact_card(t, &cx), Vec::new())
         };
         let height = card.len();
         scrollable.extend(card);
+        trace_spans.extend(trace_offsets.into_iter().map(|(trace, offset)| {
+            (
+                id.clone(),
+                trace,
+                crate::sidebar::layout::LineSpan {
+                    start: start + offset,
+                    height: 1,
+                },
+            )
+        }));
         spans.push((
             id.clone(),
             crate::sidebar::layout::LineSpan { start, height },
@@ -952,6 +1015,7 @@ pub fn render(
         scrollable,
         pinned,
         spans,
+        trace_spans,
     }
 }
 
@@ -1076,6 +1140,7 @@ mod tests {
             cwd_label: None,
             width: width.max(MIN_WIDTH),
             selected: false,
+            trace_focus: None,
             now_unix_ms: 0,
         }
     }
@@ -2109,6 +2174,7 @@ mod tests {
     ) -> ViewInput<'a> {
         ViewInput {
             cursor,
+            trace_focus: None,
             toggled,
             hide_idle: false,
             scope: None,
@@ -2123,6 +2189,96 @@ mod tests {
             config: crate::sidebar::style::ConfigStatus::default(),
             stale: None,
         }
+    }
+
+    fn call(id: Option<&str>, status: &str) -> Value {
+        let mut v = serde_json::json!({
+            "tool": "Bash", "args": "cargo test", "status": status,
+            "timestamp": "2026-09-01T10:00:00.000Z", "durationMs": 1200,
+        });
+        if let Some(id) = id {
+            v["toolUseId"] = Value::String(id.into());
+        }
+        v
+    }
+
+    fn render_one_expanded(
+        id: &str,
+        telemetry: PaneTelemetry,
+        trace_focus: Option<(&str, &str)>,
+    ) -> Rendered {
+        let state = crate::sidebar::reducer::State {
+            panes: [(id.to_string(), telemetry)].into_iter().collect(),
+            last_seq: 1,
+            ..Default::default()
+        };
+        let toggled = [id.to_string()].into_iter().collect();
+        let app = appearances();
+        let mut view = view_input(Some(id), &toggled, &app);
+        view.trace_focus = trace_focus;
+        render(&state, &view, 80, 0)
+    }
+
+    #[test]
+    fn trace_spans_export_selectable_rows_only() {
+        let mut t = PaneTelemetry::with_agent("claude");
+        t.card_state = CardState::Running;
+        t.tool_calls.push_back(call(Some("t-old"), "done"));
+        t.tool_calls.push_back(call(None, "done"));
+        t.tool_calls.push_back(call(Some("t-run"), "running"));
+        t.tool_calls.push_back(call(Some("t-new"), "failed"));
+        let rendered = render_one_expanded("p1", t, None);
+        let ids: Vec<&str> = rendered
+            .trace_spans
+            .iter()
+            .map(|(_, id, _)| id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["t-new", "t-old"], "newest-first, selectable only");
+        assert!(rendered.trace_span_for("p1", "t-new").is_some());
+        assert!(rendered.trace_span_for("p1", "t-run").is_none());
+    }
+
+    #[test]
+    fn duplicate_ids_render_once_newest_wins() {
+        let mut t = PaneTelemetry::with_agent("claude");
+        t.card_state = CardState::Running;
+        t.tool_calls.push_back(call(Some("dup"), "done"));
+        t.tool_calls.push_back(call(Some("dup"), "failed"));
+        let rendered = render_one_expanded("p1", t, None);
+        let dups = rendered
+            .trace_spans
+            .iter()
+            .filter(|(_, id, _)| id == "dup")
+            .count();
+        assert_eq!(dups, 1);
+    }
+
+    #[test]
+    fn focus_renders_the_full_ring_and_reverses_the_selected_row() {
+        let mut t = PaneTelemetry::with_agent("claude");
+        t.card_state = CardState::Running;
+        for i in 0..10 {
+            t.tool_calls.push_back(call(Some(&format!("t{i}")), "done"));
+        }
+        let windowed = render_one_expanded("p1", t.clone(), None);
+        assert_eq!(windowed.trace_spans.len(), 5);
+        let focused = render_one_expanded("p1", t, Some(("p1", "t3")));
+        assert_eq!(focused.trace_spans.len(), 10);
+        let text: String = focused
+            .scrollable
+            .iter()
+            .flat_map(|line| line.iter().map(|s| s.text.clone()))
+            .collect();
+        assert!(
+            !text.contains("older"),
+            "no false +N older under the full ring"
+        );
+        let span = focused.trace_span_for("p1", "t3").expect("selected row");
+        let row = &focused.scrollable[span.start];
+        assert!(
+            row.iter().any(|s| s.style.reverse),
+            "selected trace row renders reversed"
+        );
     }
 
     #[test]

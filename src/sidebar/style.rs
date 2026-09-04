@@ -33,7 +33,7 @@ pub struct Style {
     /// free of capability detection.
     pub rgb: Option<(u8, u8, u8)>,
     pub ansi: Option<u8>,
-    /// Reverse video, used only for the selected card's header (§3.2a).
+    /// Reverse video, used for the selected card header and selected trace row.
     pub reverse: bool,
 }
 
@@ -93,6 +93,7 @@ pub struct Rendered {
     /// survives longest (§2.4a).
     pub pinned: Vec<Line>,
     pub spans: Vec<(String, LineSpan)>,
+    pub trace_spans: Vec<(String, String, LineSpan)>,
 }
 
 impl Rendered {
@@ -110,6 +111,13 @@ impl Rendered {
             .iter()
             .find(|(id, _)| id == pane_id)
             .map(|(_, s)| *s)
+    }
+
+    pub fn trace_span_for(&self, card: &str, id: &str) -> Option<LineSpan> {
+        self.trace_spans
+            .iter()
+            .find(|(c, trace, _)| c == card && trace == id)
+            .map(|(_, _, span)| *span)
     }
 }
 
