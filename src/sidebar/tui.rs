@@ -6,7 +6,9 @@ use crossterm::event::{Event, KeyCode, KeyModifiers, MouseButton, MouseEvent, Mo
 use ratatui::text::Text;
 use ratatui::widgets::Paragraph;
 
-use crate::sidebar::layout::{card_at, clamp_scroll, ensure_visible, reanchor, Hit};
+use crate::sidebar::layout::{
+    card_at, clamp_scroll, ensure_visible, reanchor, trace_at, Hit, LineSpan,
+};
 use crate::sidebar::reducer::{apply_line, State};
 use crate::sidebar::state_stream::{Event as WireEvent, StateStream};
 use crate::sidebar::view::{Line, Rendered, Role, Semantic, ViewInput};
@@ -181,10 +183,11 @@ fn view_input<'a>(
     toggled: &'a std::collections::HashSet<String>,
     cursor: Option<&'a str>,
     stale: Option<&'a str>,
+    trace_focus: Option<(&'a str, &'a str)>,
 ) -> ViewInput<'a> {
     ViewInput {
         cursor,
-        trace_focus: None,
+        trace_focus,
         toggled,
         hide_idle: live.hide_idle,
         scope: live.workspace_filter(),
@@ -215,6 +218,54 @@ fn reconcile_cursor(cursor: &mut Option<String>, rendered: &Rendered, prev_index
     };
     let changed = *cursor != next;
     *cursor = next;
+    changed
+}
+
+/// Spec §2: the pair either still renders, snaps to the nearest surviving
+/// row on its card (newest side), or drops to the card zone. Never leaves
+/// focus on an unrendered row.
+fn reconcile_trace_focus(
+    previous_cursor: &Option<String>,
+    cursor: &Option<String>,
+    trace_focus: &mut Option<String>,
+    previous: &[(String, String, LineSpan)],
+    current: &[(String, String, LineSpan)],
+) -> bool {
+    let Some(id) = trace_focus.clone() else {
+        return false;
+    };
+    if previous_cursor != cursor {
+        // A rehomed or cleared anchor never carries trace focus with it:
+        // ids are pane-unique only (spec §2), so surviving onto the new
+        // card would be a stale pair masquerading as a valid one.
+        *trace_focus = None;
+        return true;
+    }
+    let Some(card) = cursor.clone() else {
+        return trace_focus.take().is_some();
+    };
+    let card_rows = |spans: &[(String, String, LineSpan)]| -> Vec<String> {
+        spans
+            .iter()
+            .filter(|(c, ..)| *c == card)
+            .map(|(_, id, _)| id.clone())
+            .collect()
+    };
+    let now = card_rows(current);
+    if now.iter().any(|r| *r == id) {
+        return false;
+    }
+    let next = if now.is_empty() {
+        None
+    } else {
+        let prev_index = card_rows(previous)
+            .iter()
+            .position(|r| *r == id)
+            .unwrap_or(0);
+        Some(now[prev_index.min(now.len() - 1)].clone())
+    };
+    let changed = *trace_focus != next;
+    *trace_focus = next;
     changed
 }
 
@@ -250,6 +301,7 @@ fn to_line(line: &Line, theme: Theme, truecolor: bool) -> ratatui::text::Line<'s
 #[derive(Default)]
 struct Interaction {
     cursor: Option<String>,
+    trace_focus: Option<String>,
     toggled: std::collections::HashSet<String>,
     offset: u16,
     follow: bool,
@@ -2133,12 +2185,23 @@ pub fn run() -> i32 {
                     &it.toggled,
                     it.cursor.as_deref(),
                     stale_against(&state),
+                    it.trace_focus
+                        .as_deref()
+                        .and_then(|id| it.cursor.as_deref().map(|c| (c, id))),
                 ),
                 size.width,
                 now,
             );
+            let previous_cursor = it.cursor.clone();
             let recovered = reconcile_cursor(&mut it.cursor, &out, prev_index);
-            if recovered {
+            let trace_recovered = reconcile_trace_focus(
+                &previous_cursor,
+                &it.cursor,
+                &mut it.trace_focus,
+                &last_rendered.trace_spans,
+                &out.trace_spans,
+            );
+            if recovered || trace_recovered {
                 out = crate::sidebar::view::render(
                     &state,
                     &view_input(
@@ -2147,6 +2210,9 @@ pub fn run() -> i32 {
                         &it.toggled,
                         it.cursor.as_deref(),
                         stale_against(&state),
+                        it.trace_focus
+                            .as_deref()
+                            .and_then(|id| it.cursor.as_deref().map(|c| (c, id))),
                     ),
                     size.width,
                     now,
@@ -2314,6 +2380,78 @@ mod tests {
                 ),
             ],
         }
+    }
+
+    fn tspan(card: &str, id: &str, start: usize) -> (String, String, LineSpan) {
+        (card.into(), id.into(), LineSpan { start, height: 1 })
+    }
+
+    #[test]
+    fn trace_focus_survives_when_the_pair_still_renders() {
+        let cur = Some("a".to_string());
+        let mut focus = Some("t1".to_string());
+        let spans = vec![tspan("a", "t0", 5), tspan("a", "t1", 6)];
+        assert!(!reconcile_trace_focus(
+            &cur, &cur, &mut focus, &spans, &spans
+        ));
+        assert_eq!(focus.as_deref(), Some("t1"));
+    }
+
+    #[test]
+    fn an_evicted_id_snaps_to_the_nearest_surviving_row() {
+        let cur = Some("a".to_string());
+        let mut focus = Some("t9".to_string());
+        let previous = vec![tspan("a", "t8", 5), tspan("a", "t9", 6)];
+        let current = vec![tspan("a", "t8", 5), tspan("a", "t7", 6)];
+        assert!(reconcile_trace_focus(
+            &cur, &cur, &mut focus, &previous, &current
+        ));
+        assert_eq!(focus.as_deref(), Some("t7"), "same index, newest side");
+    }
+
+    #[test]
+    fn an_empty_or_foreign_ring_drops_focus() {
+        let cur = Some("a".to_string());
+        let mut focus = Some("t1".to_string());
+        assert!(reconcile_trace_focus(&cur, &cur, &mut focus, &[], &[]));
+        assert_eq!(focus, None);
+        let mut focus = Some("t1".to_string());
+        let other = vec![tspan("b", "t1", 3)];
+        assert!(reconcile_trace_focus(
+            &cur, &cur, &mut focus, &other, &other
+        ));
+        assert_eq!(focus, None, "same id on another card is not our pair");
+    }
+
+    #[test]
+    fn a_rehomed_cursor_clears_focus_even_when_the_new_card_has_the_id() {
+        let previous_cursor = Some("a".to_string());
+        let cursor = Some("b".to_string());
+        let mut focus = Some("t1".to_string());
+        let spans = vec![tspan("b", "t1", 3)];
+        assert!(reconcile_trace_focus(
+            &previous_cursor,
+            &cursor,
+            &mut focus,
+            &spans,
+            &spans
+        ));
+        assert_eq!(focus, None);
+    }
+
+    #[test]
+    fn collapse_and_expansion_flips_drop_focus_via_absent_spans() {
+        let cur = Some("a".to_string());
+        let mut focus = Some("t1".to_string());
+        let previous = vec![tspan("a", "t1", 5)];
+        assert!(reconcile_trace_focus(
+            &cur,
+            &cur,
+            &mut focus,
+            &previous,
+            &[]
+        ));
+        assert_eq!(focus, None);
     }
 
     fn press(code: KeyCode) -> crossterm::event::KeyEvent {
@@ -3060,7 +3198,7 @@ mod tests {
         let order = |live: &crate::sidebar::live::Live| {
             crate::sidebar::view::render(
                 &state,
-                &view_input(&cfg, live, &toggled, None, None),
+                &view_input(&cfg, live, &toggled, None, None, None),
                 60,
                 0,
             )
@@ -3728,7 +3866,7 @@ mod tests {
 
         let toggled = std::collections::HashSet::new();
         let live = crate::sidebar::live::Live::from(&cfg);
-        let v = view_input(&cfg, &live, &toggled, Some("p1"), None);
+        let v = view_input(&cfg, &live, &toggled, Some("p1"), None, None);
         assert_eq!(v.theme, Theme::Lumon);
         assert_eq!(v.agent_mark, crate::sidebar::config::AgentMark::Initial);
         assert_eq!(v.auto_expand, crate::sidebar::config::AutoExpand::All);
