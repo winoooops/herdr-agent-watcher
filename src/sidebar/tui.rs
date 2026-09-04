@@ -1550,6 +1550,71 @@ fn daemon_settings_warning(live: &crate::sidebar::live::Live, running: DaemonSet
     )
 }
 
+fn trace_snapshot(call: &serde_json::Value, now_unix_ms: u64) -> (String, Vec<Row>) {
+    let tool = crate::sidebar::format::sanitise(
+        call.get("tool")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("?"),
+    );
+    let tool = if tool.is_empty() { "?" } else { &tool };
+
+    let failed = call.get("status").and_then(serde_json::Value::as_str) == Some("failed");
+    let mut status = if failed {
+        "✕ failed".to_string()
+    } else {
+        "✓ done".to_string()
+    };
+    if let Some(duration) = call.get("durationMs").and_then(serde_json::Value::as_u64) {
+        status.push_str(&format!(
+            " · {}",
+            crate::sidebar::format::duration_ms(duration)
+        ));
+    }
+
+    let when = call
+        .get("timestamp")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|stamp| {
+            crate::sidebar::format::parse_iso8601_ms(stamp).map(|then| {
+                format!(
+                    "{} · {}",
+                    crate::sidebar::format::sanitise(stamp),
+                    crate::sidebar::format::age(then, now_unix_ms)
+                )
+            })
+        })
+        .unwrap_or_else(|| "—".into());
+
+    let mut rows = vec![
+        Row::Entry {
+            label: "status".into(),
+            value: status,
+            enabled: false,
+        },
+        Row::Entry {
+            label: "when".into(),
+            value: when,
+            enabled: false,
+        },
+        Row::Rule,
+    ];
+    let args = call
+        .get("args")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    if args.is_empty() {
+        rows.push(Row::Text("(no arguments retained)".into()));
+    } else if let Ok(value) = serde_json::from_str::<serde_json::Value>(args) {
+        let pretty = serde_json::to_string_pretty(&value)
+            .unwrap_or_else(|_| crate::sidebar::format::sanitise(args));
+        rows.extend(pretty.split('\n').map(|line| Row::Text(line.into())));
+    } else {
+        rows.push(Row::Text(crate::sidebar::format::sanitise(args)));
+    }
+
+    (format!("Trace — {tool}"), rows)
+}
+
 fn trace_panel(title: &str, rows: &[Row], offset: usize) -> Panel {
     Panel {
         title: title.to_string(),
@@ -2625,6 +2690,63 @@ mod tests {
         // unclamped frame width (120, where the long line stays single)
         // would clamp at 39 and fail this assertion.
         assert_eq!(offset, 40);
+    }
+
+    #[test]
+    fn snapshot_freezes_pretty_args_and_metadata() {
+        let call = serde_json::json!({
+            "toolUseId": "t1", "tool": "Bash", "status": "failed",
+            "args": "{\"command\":\"cargo test\"}",
+            "timestamp": "2026-09-01T10:00:00.000Z", "durationMs": 1200,
+        });
+        let (title, rows) = trace_snapshot(&call, 1_764_000_000_000);
+        assert_eq!(title, "Trace — Bash");
+        let texts: Vec<String> = rows
+            .iter()
+            .map(|r| match r {
+                crate::sidebar::dialog::Row::Entry { label, value, .. } => {
+                    format!("{label}={value}")
+                }
+                crate::sidebar::dialog::Row::Text(t) => t.clone(),
+                crate::sidebar::dialog::Row::Note(n) => n.clone(),
+                crate::sidebar::dialog::Row::Warn(w) => w.clone(),
+                crate::sidebar::dialog::Row::Rule => "—rule—".into(),
+            })
+            .collect();
+        assert!(texts[0].starts_with("status=✕ failed · 1.2s"));
+        assert!(texts[1].starts_with("when=2026-09-01T10:00:00.000Z"));
+        assert!(
+            texts
+                .iter()
+                .any(|t| t.contains("\"command\": \"cargo test\"")),
+            "pretty-printed"
+        );
+        assert!(texts.iter().all(|t| !t.contains('\n')), "one Note per line");
+    }
+
+    #[test]
+    fn snapshot_degrades_malformed_metadata_per_spec() {
+        let call = serde_json::json!({ "toolUseId": "t1", "status": "done", "args": "" });
+        let (title, rows) = trace_snapshot(&call, 0);
+        assert_eq!(title, "Trace — ?");
+        let joined = rows
+            .iter()
+            .filter_map(|r| match r {
+                crate::sidebar::dialog::Row::Entry { label, value, .. } => {
+                    Some(format!("{label}={value}"))
+                }
+                crate::sidebar::dialog::Row::Text(t) => Some(t.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("|");
+        assert!(joined.contains("status=✓ done"));
+        assert!(
+            !joined.contains('·'),
+            "no duration segment without durationMs"
+        );
+        assert!(joined.contains("when=—"));
+        assert!(joined.contains("(no arguments retained)"));
     }
 
     #[test]
