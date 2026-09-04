@@ -364,3 +364,5 @@ failure paths: small-frame refusal keeps selection; an absent pair
 degrades to selection-only; snapshot fallbacks (`?`, `—`, omitted
 segments) for malformed metadata, with non-settled-status rows proven
 display-only end to end.
+
+<!-- codex-reviewed: 2026-09-04T09:10:24Z -->
