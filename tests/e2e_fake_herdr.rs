@@ -675,6 +675,7 @@ fn non_default_config_reaches_what_is_drawn() {
     let toggled = std::collections::HashSet::new();
     let input = view::ViewInput {
         cursor: None,
+        trace_focus: None,
         toggled: &toggled,
         hide_idle: cfg.hide_idle,
         scope: None,

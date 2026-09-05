@@ -77,6 +77,13 @@ pub fn card_at(spans: &[(String, LineSpan)], line: usize) -> Option<(&str, Hit)>
     })
 }
 
+pub fn trace_at(spans: &[(String, String, LineSpan)], line: usize) -> Option<(&str, &str)> {
+    spans.iter().find_map(|(card, id, span)| {
+        (line >= span.start && line < span.start + span.height)
+            .then_some((card.as_str(), id.as_str()))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -191,5 +198,32 @@ mod tests {
         assert_eq!(card_at(&spans, 24), None, "one past the last card");
         assert_eq!(card_at(&spans, 500), None, "past all content");
         assert_eq!(card_at(&[], 0), None, "empty span list");
+    }
+
+    #[test]
+    fn trace_at_maps_lines_to_rows() {
+        let spans = vec![
+            (
+                "a".to_string(),
+                "t1".to_string(),
+                LineSpan {
+                    start: 5,
+                    height: 1,
+                },
+            ),
+            (
+                "a".to_string(),
+                "t2".to_string(),
+                LineSpan {
+                    start: 6,
+                    height: 1,
+                },
+            ),
+        ];
+        assert_eq!(trace_at(&spans, 5), Some(("a", "t1")));
+        assert_eq!(trace_at(&spans, 6), Some(("a", "t2")));
+        assert_eq!(trace_at(&spans, 4), None, "line before the rows");
+        assert_eq!(trace_at(&spans, 7), None, "line past the rows");
+        assert_eq!(trace_at(&[], 5), None, "empty spans");
     }
 }

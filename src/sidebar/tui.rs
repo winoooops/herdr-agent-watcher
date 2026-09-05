@@ -5,11 +5,17 @@ use crate::sidebar::config::Theme;
 use crossterm::event::{Event, KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::text::Text;
 use ratatui::widgets::Paragraph;
+use serde_json::Value;
 
-use crate::sidebar::layout::{card_at, clamp_scroll, ensure_visible, reanchor, Hit};
+use crate::sidebar::dialog::{Panel, Row};
+use crate::sidebar::layout::{
+    card_at, clamp_scroll, ensure_visible, reanchor, trace_at, Hit, LineSpan,
+};
 use crate::sidebar::reducer::{apply_line, State};
 use crate::sidebar::state_stream::{Event as WireEvent, StateStream};
-use crate::sidebar::view::{Line, Rendered, Role, Semantic, ViewInput};
+use crate::sidebar::view::{
+    newest_selectable_id, selectable_call, Line, Rendered, Role, Semantic, ViewInput,
+};
 
 type DisableRawMode = fn() -> std::io::Result<()>;
 
@@ -181,9 +187,11 @@ fn view_input<'a>(
     toggled: &'a std::collections::HashSet<String>,
     cursor: Option<&'a str>,
     stale: Option<&'a str>,
+    trace_focus: Option<(&'a str, &'a str)>,
 ) -> ViewInput<'a> {
     ViewInput {
         cursor,
+        trace_focus,
         toggled,
         hide_idle: live.hide_idle,
         scope: live.workspace_filter(),
@@ -214,6 +222,68 @@ fn reconcile_cursor(cursor: &mut Option<String>, rendered: &Rendered, prev_index
     };
     let changed = *cursor != next;
     *cursor = next;
+    changed
+}
+
+/// Row-granularity follow (spec §2): while a trace is selected, the
+/// visibility contract tracks the row, not its card.
+fn follow_span(
+    cursor: &Option<String>,
+    trace_focus: &Option<String>,
+    rendered: &Rendered,
+) -> Option<LineSpan> {
+    let card = cursor.as_deref()?;
+    trace_focus
+        .as_deref()
+        .and_then(|id| rendered.trace_span_for(card, id))
+        .or_else(|| rendered.span_for(card))
+}
+
+/// Spec §2: the pair either still renders, snaps to the nearest surviving
+/// row on its card (newest side), or drops to the card zone. Never leaves
+/// focus on an unrendered row.
+fn reconcile_trace_focus(
+    previous_cursor: &Option<String>,
+    cursor: &Option<String>,
+    trace_focus: &mut Option<String>,
+    previous: &[(String, String, LineSpan)],
+    current: &[(String, String, LineSpan)],
+) -> bool {
+    let Some(id) = trace_focus.clone() else {
+        return false;
+    };
+    if previous_cursor != cursor {
+        // A rehomed or cleared anchor never carries trace focus with it:
+        // ids are pane-unique only (spec §2), so surviving onto the new
+        // card would be a stale pair masquerading as a valid one.
+        *trace_focus = None;
+        return true;
+    }
+    let Some(card) = cursor.clone() else {
+        return trace_focus.take().is_some();
+    };
+    let card_rows = |spans: &[(String, String, LineSpan)]| -> Vec<String> {
+        spans
+            .iter()
+            .filter(|(c, ..)| *c == card)
+            .map(|(_, id, _)| id.clone())
+            .collect()
+    };
+    let now = card_rows(current);
+    if now.contains(&id) {
+        return false;
+    }
+    let next = if now.is_empty() {
+        None
+    } else {
+        let prev_index = card_rows(previous)
+            .iter()
+            .position(|r| *r == id)
+            .unwrap_or(0);
+        Some(now[prev_index.min(now.len() - 1)].clone())
+    };
+    let changed = *trace_focus != next;
+    *trace_focus = next;
     changed
 }
 
@@ -249,6 +319,7 @@ fn to_line(line: &Line, theme: Theme, truecolor: bool) -> ratatui::text::Line<'s
 #[derive(Default)]
 struct Interaction {
     cursor: Option<String>,
+    trace_focus: Option<String>,
     toggled: std::collections::HashSet<String>,
     offset: u16,
     follow: bool,
@@ -261,6 +332,22 @@ struct Interaction {
 enum KeyOutcome {
     Quit,
     Handled,
+    EnterTraces {
+        card_id: String,
+    },
+    OpenTrace {
+        card_id: String,
+        tool_use_id: String,
+    },
+}
+
+enum MouseOutcome {
+    Inert,
+    Changed,
+    OpenTrace {
+        card_id: String,
+        tool_use_id: String,
+    },
 }
 
 #[derive(Debug)]
@@ -365,6 +452,11 @@ pub(crate) enum Dialog {
         report: Result<crate::agents::doctor::Report, String>,
         taken_at: u64,
     },
+    TraceDetail {
+        title: String,
+        rows: Vec<Row>,
+        offset: usize,
+    },
 }
 
 impl Dialog {
@@ -380,7 +472,8 @@ impl Dialog {
             Dialog::Doctor { .. }
             | Dialog::Update { .. }
             | Dialog::Bridges { .. }
-            | Dialog::Keybindings { .. } => None,
+            | Dialog::Keybindings { .. }
+            | Dialog::TraceDetail { .. } => None,
         }
     }
 
@@ -389,7 +482,8 @@ impl Dialog {
             Dialog::Doctor { offset, .. }
             | Dialog::Update { offset, .. }
             | Dialog::Bridges { offset, .. }
-            | Dialog::Keybindings { offset, .. } => Some(offset),
+            | Dialog::Keybindings { offset, .. }
+            | Dialog::TraceDetail { offset, .. } => Some(offset),
             _ => None,
         }
     }
@@ -406,7 +500,8 @@ impl Dialog {
             Dialog::Doctor { .. }
             | Dialog::Update { .. }
             | Dialog::Bridges { .. }
-            | Dialog::Keybindings { .. } => 0,
+            | Dialog::Keybindings { .. }
+            | Dialog::TraceDetail { .. } => 0,
         }
     }
 
@@ -422,6 +517,9 @@ impl Dialog {
             Dialog::Keybindings {
                 bindings, editing, ..
             } => keybinding_rows(bindings, editing.as_ref()).len(),
+            Dialog::TraceDetail { title, rows, .. } => {
+                crate::sidebar::dialog::line_count(&trace_panel(title, rows, 0), 60)
+            }
             other => other.len(),
         }
     }
@@ -1040,10 +1138,12 @@ const MENU_UPDATE: usize = 3;
 /// One inventory. The sheet is reachable from the card list, so it describes
 /// only keys that work there; each panel carries its own controls in its
 /// footer.
-const KEYS: [(&str, &str); 9] = [
+const KEYS: [(&str, &str); 11] = [
     ("j / ↓", "move down"),
     ("k / ↑", "move up"),
-    ("o / ↵", "expand a card"),
+    ("o / ↵", "expand a card, or open the selected trace"),
+    ("l", "into traces"),
+    ("h", "back to cards"),
     ("z", "hide idle agents"),
     ("PageUp / PageDown", "scroll"),
     ("x", "menu"),
@@ -1059,22 +1159,43 @@ const KEYS: [(&str, &str); 9] = [
 /// does nothing. A single start makes one of them look like an ignored key.
 ///
 #[cfg(test)]
-fn routed() -> [(&'static str, KeyCode, KeyModifiers, &'static str); 9] {
+fn routed() -> [(
+    &'static str,
+    KeyCode,
+    KeyModifiers,
+    &'static str,
+    Option<&'static str>,
+); 11] {
     [
-        ("j / ↓", KeyCode::Char('j'), KeyModifiers::NONE, "a"),
-        ("k / ↑", KeyCode::Char('k'), KeyModifiers::NONE, "b"),
-        ("o / ↵", KeyCode::Char('o'), KeyModifiers::NONE, "a"),
-        ("z", KeyCode::Char('z'), KeyModifiers::NONE, "a"),
+        ("j / ↓", KeyCode::Char('j'), KeyModifiers::NONE, "a", None),
+        ("k / ↑", KeyCode::Char('k'), KeyModifiers::NONE, "b", None),
+        ("o / ↵", KeyCode::Char('o'), KeyModifiers::NONE, "a", None),
+        ("l", KeyCode::Char('l'), KeyModifiers::NONE, "a", None),
+        (
+            "h",
+            KeyCode::Char('h'),
+            KeyModifiers::NONE,
+            "a",
+            Some("t-new"),
+        ),
+        ("z", KeyCode::Char('z'), KeyModifiers::NONE, "a", None),
         (
             "PageUp / PageDown",
             KeyCode::PageDown,
             KeyModifiers::NONE,
             "a",
+            None,
         ),
-        ("x", KeyCode::Char('x'), KeyModifiers::NONE, "a"),
-        ("?", KeyCode::Char('?'), KeyModifiers::NONE, "a"),
-        ("q / esc", KeyCode::Esc, KeyModifiers::NONE, "a"),
-        ("ctrl-c", KeyCode::Char('c'), KeyModifiers::CONTROL, "a"),
+        ("x", KeyCode::Char('x'), KeyModifiers::NONE, "a", None),
+        ("?", KeyCode::Char('?'), KeyModifiers::NONE, "a", None),
+        ("q / esc", KeyCode::Esc, KeyModifiers::NONE, "a", None),
+        (
+            "ctrl-c",
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL,
+            "a",
+            None,
+        ),
     ]
 }
 
@@ -1189,6 +1310,11 @@ fn route(
             (KeyCode::Char('c'), m) if m.contains(KeyModifiers::CONTROL) => {
                 return KeyOutcome::Quit
             }
+            (KeyCode::Esc, _) | (KeyCode::Char('q'), _)
+                if matches!(dialog, Dialog::TraceDetail { .. }) =>
+            {
+                *open = None;
+            }
             // Back one level, not out: a panel reached through the menu
             // returns to it. One reached with `s` or `d` was never under a
             // menu, and dropping into one you did not open is not going back.
@@ -1225,7 +1351,13 @@ fn route(
             }
             (KeyCode::Char('j'), _) | (KeyCode::Down, _) => {
                 let last = dialog.len().saturating_sub(1);
-                let rows = dialog.row_count();
+                let rows = match dialog {
+                    Dialog::TraceDetail { title, rows, .. } => crate::sidebar::dialog::line_count(
+                        &trace_panel(title, rows, 0),
+                        panel_width(width),
+                    ),
+                    _ => dialog.row_count(),
+                };
                 if let Some(cursor) = dialog.cursor_mut() {
                     *cursor = (*cursor + 1).min(last);
                 } else if let Some(offset) = dialog.offset_mut() {
@@ -1412,9 +1544,9 @@ fn route_mouse(
     rendered: &Rendered,
     viewport: u16,
     total: usize,
-) -> bool {
+) -> MouseOutcome {
     if open.is_some() || !mouse_enabled {
-        return false;
+        return MouseOutcome::Inert;
     }
     apply_mouse(mouse, it, rendered, viewport, total)
 }
@@ -1458,13 +1590,143 @@ fn daemon_settings_warning(live: &crate::sidebar::live::Live, running: DaemonSet
     )
 }
 
+fn canonical_call<'a>(ring: &'a std::collections::VecDeque<Value>, id: &str) -> Option<&'a Value> {
+    ring.iter()
+        .rev()
+        .find(|call| call.get("toolUseId").and_then(Value::as_str) == Some(id))
+}
+
+fn resolve_open_trace(
+    state: &State,
+    frame: ratatui::layout::Size,
+    now: u64,
+    it: &mut Interaction,
+    open: &mut Option<Dialog>,
+    card_id: &str,
+    tool_use_id: &str,
+) -> bool {
+    if frame.width < MIN_DIALOG_WIDTH || frame.height < MIN_DIALOG_HEIGHT {
+        it.notice = Some(format!(
+            "the frame is too small for a panel ({}x{}; needs {MIN_DIALOG_WIDTH}x{MIN_DIALOG_HEIGHT})",
+            frame.width, frame.height
+        ));
+        return true;
+    }
+    let Some(call) = state
+        .panes
+        .get(card_id)
+        .and_then(|telemetry| canonical_call(&telemetry.tool_calls, tool_use_id))
+        .filter(|call| selectable_call(call))
+    else {
+        return false;
+    };
+    let (title, rows) = trace_snapshot(call, now);
+    *open = Some(Dialog::TraceDetail {
+        title,
+        rows,
+        offset: 0,
+    });
+    true
+}
+
+fn resolve_enter_traces(state: &State, it: &mut Interaction, card_id: &str) -> bool {
+    let Some(id) = state
+        .panes
+        .get(card_id)
+        .and_then(|telemetry| newest_selectable_id(&telemetry.tool_calls))
+    else {
+        return false;
+    };
+    it.trace_focus = Some(id);
+    it.follow = true;
+    true
+}
+
+fn trace_snapshot(call: &serde_json::Value, now_unix_ms: u64) -> (String, Vec<Row>) {
+    let tool = crate::sidebar::format::sanitise(
+        call.get("tool")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("?"),
+    );
+    let tool = if tool.is_empty() { "?" } else { &tool };
+
+    let failed = call.get("status").and_then(serde_json::Value::as_str) == Some("failed");
+    let mut status = if failed {
+        "✕ failed".to_string()
+    } else {
+        "✓ done".to_string()
+    };
+    if let Some(duration) = call.get("durationMs").and_then(serde_json::Value::as_u64) {
+        status.push_str(&format!(
+            " · {}",
+            crate::sidebar::format::duration_ms(duration)
+        ));
+    }
+
+    let when = call
+        .get("timestamp")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|stamp| {
+            crate::sidebar::format::parse_iso8601_ms(stamp).map(|then| {
+                format!(
+                    "{} · {}",
+                    crate::sidebar::format::sanitise(stamp),
+                    crate::sidebar::format::age(then, now_unix_ms)
+                )
+            })
+        })
+        .unwrap_or_else(|| "—".into());
+
+    let mut rows = vec![
+        Row::Entry {
+            label: "status".into(),
+            value: status,
+            enabled: false,
+        },
+        Row::Entry {
+            label: "when".into(),
+            value: when,
+            enabled: false,
+        },
+        Row::Rule,
+    ];
+    let args = call
+        .get("args")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    if args.is_empty() {
+        rows.push(Row::Text("(no arguments retained)".into()));
+    } else if let Ok(value) = serde_json::from_str::<serde_json::Value>(args) {
+        let pretty = serde_json::to_string_pretty(&value)
+            .unwrap_or_else(|_| crate::sidebar::format::sanitise(args));
+        rows.extend(pretty.split('\n').map(|line| Row::Text(line.into())));
+    } else {
+        rows.push(Row::Text(crate::sidebar::format::sanitise(args)));
+    }
+
+    (format!("Trace — {tool}"), rows)
+}
+
+fn trace_panel(title: &str, rows: &[Row], offset: usize) -> Panel {
+    Panel {
+        title: title.to_string(),
+        rows: rows.to_vec(),
+        footer: "j/k scroll · esc close".into(),
+        cursor: None,
+        offset,
+    }
+}
+
+fn panel_width(frame: u16) -> u16 {
+    frame.min(60)
+}
+
 fn panel_for(
     dialog: &Dialog,
     live: &crate::sidebar::live::Live,
     _cfg: &crate::sidebar::config::Loaded,
     now: u64,
 ) -> crate::sidebar::dialog::Panel {
-    use crate::sidebar::dialog::{Panel, Row};
     match dialog {
         Dialog::Menu { cursor } => Panel {
             title: "Menu".into(),
@@ -1493,7 +1755,8 @@ fn panel_for(
                     // Outside KEYS on purpose: it names no key, so the
                     // sheet↔routed invariant stays exact (spec §4).
                     label: "mouse (when on)".into(),
-                    value: "click selects · header click toggles · wheel scrolls".into(),
+                    value: "click selects · header toggles · trace re-click opens · wheel scrolls"
+                        .into(),
                     enabled: false,
                 }))
                 .collect(),
@@ -1703,6 +1966,11 @@ fn panel_for(
             cursor: None,
             offset: *offset,
         },
+        Dialog::TraceDetail {
+            title,
+            rows,
+            offset,
+        } => trace_panel(title, rows, *offset),
     }
 }
 
@@ -1714,6 +1982,52 @@ fn apply_key(
     viewport: u16,
     total: usize,
 ) -> KeyOutcome {
+    if it.trace_focus.is_some() {
+        match (key.code, key.modifiers) {
+            (KeyCode::Char('j'), _) | (KeyCode::Char('k'), _) => {
+                let rows: Vec<&str> = rendered
+                    .trace_spans
+                    .iter()
+                    .filter(|(card, ..)| Some(card.as_str()) == it.cursor.as_deref())
+                    .map(|(_, id, _)| id.as_str())
+                    .collect();
+                if !rows.is_empty() {
+                    let at = it
+                        .trace_focus
+                        .as_deref()
+                        .and_then(|id| rows.iter().position(|row| *row == id))
+                        .unwrap_or(0) as isize;
+                    let delta = if key.code == KeyCode::Char('j') {
+                        1
+                    } else {
+                        -1
+                    };
+                    let next = (at + delta).clamp(0, rows.len() as isize - 1) as usize;
+                    it.trace_focus = Some(rows[next].to_string());
+                }
+                it.follow = true;
+                return KeyOutcome::Handled;
+            }
+            (KeyCode::Char('h'), _) => {
+                it.trace_focus = None;
+                return KeyOutcome::Handled;
+            }
+            (KeyCode::Char('o'), _) | (KeyCode::Enter, _) => {
+                if let (Some(card_id), Some(tool_use_id)) =
+                    (it.cursor.clone(), it.trace_focus.clone())
+                {
+                    return KeyOutcome::OpenTrace {
+                        card_id,
+                        tool_use_id,
+                    };
+                }
+                return KeyOutcome::Handled;
+            }
+            (KeyCode::Char('l'), _) => return KeyOutcome::Handled,
+            _ => {}
+        }
+    }
+
     match (key.code, key.modifiers) {
         (KeyCode::Char('q'), _) | (KeyCode::Esc, _) => return KeyOutcome::Quit,
         (KeyCode::Char('c'), m) if m.contains(KeyModifiers::CONTROL) => return KeyOutcome::Quit,
@@ -1737,6 +2051,17 @@ fn apply_key(
             live.hide_idle = !live.hide_idle;
             it.follow = true;
         }
+        (KeyCode::Char('l'), _) => {
+            if let Some(id) = it.cursor.as_deref() {
+                let expanded = matches!(live.auto_expand, crate::sidebar::config::AutoExpand::All)
+                    ^ it.toggled.contains(id);
+                if expanded {
+                    return KeyOutcome::EnterTraces {
+                        card_id: id.to_string(),
+                    };
+                }
+            }
+        }
         (KeyCode::Up, _) | (KeyCode::Down, _) | (KeyCode::PageUp, _) | (KeyCode::PageDown, _) => {
             if viewport == 0 {
                 return KeyOutcome::Handled;
@@ -1759,37 +2084,51 @@ fn apply_key(
     KeyOutcome::Handled
 }
 
-/// The card-list mutation for one mouse event (spec §3). Returns whether
-/// state changed: mouse events arrive in floods, so an inert click or a
-/// saturated scroll must not cost a redraw.
+/// The card-list result for one mouse event (spec §3). Mouse events arrive in
+/// floods, so inert clicks and saturated scrolls must not cost a redraw.
 fn apply_mouse(
     mouse: MouseEvent,
     it: &mut Interaction,
     rendered: &Rendered,
     viewport: u16,
     total: usize,
-) -> bool {
+) -> MouseOutcome {
     if viewport == 0 {
-        return false;
+        return MouseOutcome::Inert;
     }
     match mouse.kind {
         MouseEventKind::Down(MouseButton::Left) if mouse.modifiers.is_empty() => {
             if mouse.row >= viewport {
-                return false;
+                return MouseOutcome::Inert;
             }
             let line = it.offset as usize + mouse.row as usize;
+            if let Some((card_id, tool_use_id)) = trace_at(&rendered.trace_spans, line) {
+                if it.cursor.as_deref() == Some(card_id)
+                    && it.trace_focus.as_deref() == Some(tool_use_id)
+                {
+                    return MouseOutcome::OpenTrace {
+                        card_id: card_id.to_string(),
+                        tool_use_id: tool_use_id.to_string(),
+                    };
+                }
+                it.cursor = Some(card_id.to_string());
+                it.trace_focus = Some(tool_use_id.to_string());
+                it.follow = true;
+                return MouseOutcome::Changed;
+            }
             let Some((id, hit)) = card_at(&rendered.spans, line) else {
-                return false;
+                return MouseOutcome::Inert;
             };
             let id = id.to_string();
             match hit {
                 Hit::Header => {
+                    it.trace_focus = None;
                     it.cursor = Some(id.clone());
                     if !it.toggled.remove(&id) {
                         it.toggled.insert(id);
                     }
                     it.follow = true;
-                    true
+                    MouseOutcome::Changed
                 }
                 // follow stays off: `ensure_visible` would scroll a
                 // partially visible card into view and pin an oversized
@@ -1798,9 +2137,16 @@ fn apply_mouse(
                 // no-op that must say so (spec §3 dirty discipline).
                 Hit::Body => {
                     let changed = it.cursor.as_deref() != Some(id.as_str()) || it.follow;
+                    if it.cursor.as_deref() != Some(id.as_str()) {
+                        it.trace_focus = None;
+                    }
                     it.cursor = Some(id);
                     it.follow = false;
-                    changed
+                    if changed {
+                        MouseOutcome::Changed
+                    } else {
+                        MouseOutcome::Inert
+                    }
                 }
             }
         }
@@ -1815,12 +2161,12 @@ fn apply_mouse(
                 ),
             };
             if it.offset == before {
-                return false;
+                return MouseOutcome::Inert;
             }
             it.follow = false;
-            true
+            MouseOutcome::Changed
         }
-        _ => false,
+        _ => MouseOutcome::Inert,
     }
 }
 
@@ -1971,6 +2317,7 @@ pub fn run() -> i32 {
         scrollable: Vec::new(),
         pinned: Vec::new(),
         spans: Vec::new(),
+        trace_spans: Vec::new(),
     };
     let mut last_age_tick_ms: u64 = now_unix_ms();
     let mut dirty = true;
@@ -2118,10 +2465,7 @@ pub fn run() -> i32 {
             it.toggled.retain(|id| state.panes.contains_key(id));
 
             let prev_index = index_of(&last_rendered, it.cursor.as_deref());
-            let prev_span = it
-                .cursor
-                .as_deref()
-                .and_then(|id| last_rendered.span_for(id));
+            let prev_span = follow_span(&it.cursor, &it.trace_focus, &last_rendered);
 
             let mut out = crate::sidebar::view::render(
                 &state,
@@ -2131,12 +2475,23 @@ pub fn run() -> i32 {
                     &it.toggled,
                     it.cursor.as_deref(),
                     stale_against(&state),
+                    it.trace_focus
+                        .as_deref()
+                        .and_then(|id| it.cursor.as_deref().map(|c| (c, id))),
                 ),
                 size.width,
                 now,
             );
+            let previous_cursor = it.cursor.clone();
             let recovered = reconcile_cursor(&mut it.cursor, &out, prev_index);
-            if recovered {
+            let trace_recovered = reconcile_trace_focus(
+                &previous_cursor,
+                &it.cursor,
+                &mut it.trace_focus,
+                &last_rendered.trace_spans,
+                &out.trace_spans,
+            );
+            if recovered || trace_recovered {
                 out = crate::sidebar::view::render(
                     &state,
                     &view_input(
@@ -2145,6 +2500,9 @@ pub fn run() -> i32 {
                         &it.toggled,
                         it.cursor.as_deref(),
                         stale_against(&state),
+                        it.trace_focus
+                            .as_deref()
+                            .and_then(|id| it.cursor.as_deref().map(|c| (c, id))),
                     ),
                     size.width,
                     now,
@@ -2159,7 +2517,7 @@ pub fn run() -> i32 {
             let pinned_keep = out.pinned.len().min(size.height as usize);
             viewport = size.height.saturating_sub(pinned_keep as u16);
             total = out.scrollable.len();
-            it.offset = match it.cursor.as_deref().and_then(|id| out.span_for(id)) {
+            it.offset = match follow_span(&it.cursor, &it.trace_focus, &out) {
                 Some(span) if it.follow || recovered => {
                     ensure_visible(it.offset, span, viewport, total)
                 }
@@ -2201,7 +2559,7 @@ pub fn run() -> i32 {
                     frame.render_widget(Paragraph::new(foot.clone()), split[1]);
                     if let Some(dialog) = open.as_ref() {
                         let panel = panel_for(dialog, &live, &cfg, now);
-                        let w = area.width.min(60);
+                        let w = panel_width(area.width);
                         let h = area.height.saturating_sub(2).min(20);
                         let rect = ratatui::layout::Rect {
                             x: area.x + (area.width - w) / 2,
@@ -2231,9 +2589,8 @@ pub fn run() -> i32 {
         }
         match crossterm::event::read() {
             Ok(Event::Key(key)) => {
-                dirty = true;
                 it.live_panes = state.panes.keys().cloned().collect();
-                if let KeyOutcome::Quit = route(
+                match route(
                     key,
                     &mut open,
                     &mut it,
@@ -2244,11 +2601,33 @@ pub fn run() -> i32 {
                     frame_size.width,
                     frame_size.height,
                 ) {
-                    return 0;
+                    KeyOutcome::Quit => return 0,
+                    KeyOutcome::Handled => dirty = true,
+                    KeyOutcome::EnterTraces { card_id } => {
+                        if resolve_enter_traces(&state, &mut it, &card_id) {
+                            dirty = true;
+                        }
+                    }
+                    KeyOutcome::OpenTrace {
+                        card_id,
+                        tool_use_id,
+                    } => {
+                        if resolve_open_trace(
+                            &state,
+                            frame_size,
+                            now,
+                            &mut it,
+                            &mut open,
+                            &card_id,
+                            &tool_use_id,
+                        ) {
+                            dirty = true;
+                        }
+                    }
                 }
             }
             Ok(Event::Mouse(mouse)) => {
-                if route_mouse(
+                match route_mouse(
                     mouse,
                     &open,
                     live.mouse,
@@ -2257,7 +2636,24 @@ pub fn run() -> i32 {
                     viewport,
                     total,
                 ) {
-                    dirty = true;
+                    MouseOutcome::Inert => {}
+                    MouseOutcome::Changed => dirty = true,
+                    MouseOutcome::OpenTrace {
+                        card_id,
+                        tool_use_id,
+                    } => {
+                        if resolve_open_trace(
+                            &state,
+                            frame_size,
+                            now,
+                            &mut it,
+                            &mut open,
+                            &card_id,
+                            &tool_use_id,
+                        ) {
+                            dirty = true;
+                        }
+                    }
                 }
             }
             Ok(Event::Resize(_, _)) => dirty = true,
@@ -2293,7 +2689,632 @@ mod tests {
                     },
                 ),
             ],
+            trace_spans: vec![
+                (
+                    "a".into(),
+                    "t-new".into(),
+                    LineSpan {
+                        start: 1,
+                        height: 1,
+                    },
+                ),
+                (
+                    "a".into(),
+                    "t-old".into(),
+                    LineSpan {
+                        start: 2,
+                        height: 1,
+                    },
+                ),
+            ],
         }
+    }
+
+    fn tspan(card: &str, id: &str, start: usize) -> (String, String, LineSpan) {
+        (card.into(), id.into(), LineSpan { start, height: 1 })
+    }
+
+    fn focused(cursor: &str, id: &str) -> Interaction {
+        Interaction {
+            cursor: Some(cursor.into()),
+            trace_focus: Some(id.into()),
+            ..Default::default()
+        }
+    }
+
+    fn detail_rows() -> Vec<crate::sidebar::dialog::Row> {
+        // 39 short lines plus one 100-char line: at panel width 60 the long
+        // line wraps into TWO rendered lines, at an unclamped 120 it stays
+        // ONE — so a bound computed at the frame width undercounts and this
+        // test catches the exact clamp mismatch the spec names (§4).
+        let mut rows: Vec<crate::sidebar::dialog::Row> = (0..39)
+            .map(|i| crate::sidebar::dialog::Row::Text(format!("line {i}")))
+            .collect();
+        rows.push(crate::sidebar::dialog::Row::Text("x".repeat(100)));
+        rows
+    }
+
+    #[test]
+    fn text_rows_wrap_verbatim_preserving_indentation() {
+        let panel = trace_panel(
+            "Trace — Bash",
+            &[crate::sidebar::dialog::Row::Text(
+                "  \"command\": \"cargo test\"".into(),
+            )],
+            0,
+        );
+        let lines = crate::sidebar::dialog::render(&panel, 60, 10);
+        let body: String = lines
+            .iter()
+            .flat_map(|line| line.iter().map(|s| s.text.clone()))
+            .collect();
+        assert!(
+            body.contains("  \"command\": \"cargo test\""),
+            "leading indentation survives verbatim, got: {body}"
+        );
+        // Embedded hard newlines flatten to distinct rendered lines.
+        let panel = trace_panel("t", &[crate::sidebar::dialog::Row::Text("a\nb".into())], 0);
+        assert_eq!(crate::sidebar::dialog::line_count(&panel, 60), 2);
+    }
+
+    #[test]
+    fn trace_detail_closes_to_none_keeping_the_selection() {
+        let mut it = focused("a", "t-new");
+        let mut live = live_default();
+        let rendered = two_cards();
+        for key in [KeyCode::Esc, KeyCode::Char('q')] {
+            let mut open = Some(Dialog::TraceDetail {
+                title: "Trace — Bash".into(),
+                rows: detail_rows(),
+                offset: 0,
+            });
+            route(
+                press(key),
+                &mut open,
+                &mut it,
+                &mut live,
+                &rendered,
+                20,
+                40,
+                120,
+                40,
+            );
+            assert!(open.is_none(), "no menu detour for {key:?}");
+            assert_eq!(it.cursor.as_deref(), Some("a"));
+            assert_eq!(it.trace_focus.as_deref(), Some("t-new"));
+        }
+    }
+
+    #[test]
+    fn trace_detail_scrolls_to_the_last_rendered_line_on_wide_frames() {
+        let mut open = Some(Dialog::TraceDetail {
+            title: "Trace — Bash".into(),
+            rows: detail_rows(),
+            offset: 0,
+        });
+        let mut it = Interaction::default();
+        let mut live = live_default();
+        let rendered = two_cards();
+        for _ in 0..200 {
+            route(
+                press(KeyCode::Char('j')),
+                &mut open,
+                &mut it,
+                &mut live,
+                &rendered,
+                20,
+                40,
+                120,
+                40,
+            );
+        }
+        let Some(Dialog::TraceDetail { offset, .. }) = open else {
+            panic!("panel stays open");
+        };
+        // 39 one-line rows + one line that wraps to 2 AT PANEL WIDTH 60:
+        // line_count = 41, so the clamp is 40. A bound computed at the
+        // unclamped frame width (120, where the long line stays single)
+        // would clamp at 39 and fail this assertion.
+        assert_eq!(offset, 40);
+    }
+
+    #[test]
+    fn snapshot_freezes_pretty_args_and_metadata() {
+        let call = serde_json::json!({
+            "toolUseId": "t1", "tool": "Bash", "status": "failed",
+            "args": "{\"command\":\"cargo test\"}",
+            "timestamp": "2026-09-01T10:00:00.000Z", "durationMs": 1200,
+        });
+        let (title, rows) = trace_snapshot(&call, 1_764_000_000_000);
+        assert_eq!(title, "Trace — Bash");
+        let texts: Vec<String> = rows
+            .iter()
+            .map(|r| match r {
+                crate::sidebar::dialog::Row::Entry { label, value, .. } => {
+                    format!("{label}={value}")
+                }
+                crate::sidebar::dialog::Row::Text(t) => t.clone(),
+                crate::sidebar::dialog::Row::Note(n) => n.clone(),
+                crate::sidebar::dialog::Row::Warn(w) => w.clone(),
+                crate::sidebar::dialog::Row::Rule => "—rule—".into(),
+            })
+            .collect();
+        assert!(texts[0].starts_with("status=✕ failed · 1.2s"));
+        assert!(texts[1].starts_with("when=2026-09-01T10:00:00.000Z"));
+        assert!(
+            texts
+                .iter()
+                .any(|t| t.contains("\"command\": \"cargo test\"")),
+            "pretty-printed"
+        );
+        assert!(texts.iter().all(|t| !t.contains('\n')), "one Note per line");
+    }
+
+    #[test]
+    fn snapshot_degrades_malformed_metadata_per_spec() {
+        let call = serde_json::json!({ "toolUseId": "t1", "status": "done", "args": "" });
+        let (title, rows) = trace_snapshot(&call, 0);
+        assert_eq!(title, "Trace — ?");
+        let joined = rows
+            .iter()
+            .filter_map(|r| match r {
+                crate::sidebar::dialog::Row::Entry { label, value, .. } => {
+                    Some(format!("{label}={value}"))
+                }
+                crate::sidebar::dialog::Row::Text(t) => Some(t.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("|");
+        assert!(joined.contains("status=✓ done"));
+        assert!(
+            !joined.contains('·'),
+            "no duration segment without durationMs"
+        );
+        assert!(joined.contains("when=—"));
+        assert!(joined.contains("(no arguments retained)"));
+    }
+
+    #[test]
+    fn canonical_call_and_newest_selectable_follow_ring_rules() {
+        let mut ring = std::collections::VecDeque::new();
+        ring.push_back(serde_json::json!({"toolUseId":"dup","status":"done","tool":"Old"}));
+        ring.push_back(serde_json::json!({"status":"done","tool":"NoId"}));
+        ring.push_back(serde_json::json!({"toolUseId":"run","status":"running"}));
+        ring.push_back(serde_json::json!({"toolUseId":"dup","status":"failed","tool":"New"}));
+        assert_eq!(
+            canonical_call(&ring, "dup")
+                .and_then(|c| c.get("tool"))
+                .and_then(Value::as_str),
+            Some("New"),
+            "newest occurrence wins, matching the view's dedup"
+        );
+        assert_eq!(newest_selectable_id(&ring).as_deref(), Some("dup"));
+        // Dedup-first: a newer running dup SHADOWS an older done one, so the
+        // shadowed settled entry is not selectable (it has no rendered row).
+        let shadowed: std::collections::VecDeque<Value> = [
+            serde_json::json!({"toolUseId":"dup","status":"done","tool":"Old"}),
+            serde_json::json!({"toolUseId":"other","status":"done"}),
+            serde_json::json!({"toolUseId":"dup","status":"running"}),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(
+            newest_selectable_id(&shadowed).as_deref(),
+            Some("other"),
+            "the shadowed dup is skipped; the next unshadowed selectable wins"
+        );
+        // An empty toolUseId is a non-identity (connector finding F2): it is
+        // neither selectable nor a dedup key, so resolution can never anchor
+        // to it — matching the view's display-only treatment exactly.
+        let empty_id: std::collections::VecDeque<Value> =
+            [serde_json::json!({"toolUseId":"","status":"done"})]
+                .into_iter()
+                .collect();
+        assert!(!selectable_call(&empty_id[0]));
+        assert_eq!(newest_selectable_id(&empty_id), None);
+        let empty: std::collections::VecDeque<Value> = [
+            serde_json::json!({"status":"done"}),
+            serde_json::json!({"toolUseId":"r","status":"running"}),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(
+            newest_selectable_id(&empty),
+            None,
+            "no selectable row anywhere"
+        );
+    }
+
+    fn one_pane_state(card: &str, ring: Vec<Value>) -> crate::sidebar::reducer::State {
+        let mut state = crate::sidebar::reducer::State::default();
+        let mut t = crate::daemon::store::PaneTelemetry::with_agent("claude");
+        t.tool_calls = ring.into_iter().collect();
+        state.panes.insert(card.into(), t);
+        state
+    }
+
+    fn frame(w: u16, h: u16) -> ratatui::layout::Size {
+        ratatui::layout::Size {
+            width: w,
+            height: h,
+        }
+    }
+
+    #[test]
+    fn resolve_open_trace_installs_a_frozen_panel() {
+        let call = serde_json::json!({
+            "toolUseId":"t1","tool":"Bash","status":"done",
+            "args":"{\"command\":\"ls\"}","timestamp":"2026-09-01T10:00:00.000Z","durationMs":5,
+        });
+        let mut state = one_pane_state("a", vec![call]);
+        let mut it = focused("a", "t1");
+        let mut open = None;
+        assert!(resolve_open_trace(
+            &state,
+            frame(120, 40),
+            0,
+            &mut it,
+            &mut open,
+            "a",
+            "t1"
+        ));
+        let Some(Dialog::TraceDetail { title, rows, .. }) = &open else {
+            panic!("panel installed");
+        };
+        assert_eq!(title, "Trace — Bash");
+        let before = rows.len();
+        // Snapshot survival: mutate the ring, the installed panel is a copy
+        // — content-compared, not length-compared.
+        let frozen: Vec<String> = rows
+            .iter()
+            .filter_map(|r| match r {
+                crate::sidebar::dialog::Row::Entry { label, value, .. } => {
+                    Some(format!("{label}={value}"))
+                }
+                crate::sidebar::dialog::Row::Text(t) => Some(t.clone()),
+                _ => None,
+            })
+            .collect();
+        state.panes.get_mut("a").unwrap().tool_calls.clear();
+        let Some(Dialog::TraceDetail { rows, .. }) = &open else {
+            unreachable!()
+        };
+        assert_eq!(rows.len(), before);
+        let after: Vec<String> = rows
+            .iter()
+            .filter_map(|r| match r {
+                crate::sidebar::dialog::Row::Entry { label, value, .. } => {
+                    Some(format!("{label}={value}"))
+                }
+                crate::sidebar::dialog::Row::Text(t) => Some(t.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            frozen, after,
+            "the panel text is byte-identical after churn"
+        );
+        // Frozen clock: a second install with a different `now` bakes a
+        // different when-line — proving age is computed once, at build.
+        let state2 = one_pane_state(
+            "a",
+            vec![serde_json::json!({
+                "toolUseId":"t1","tool":"Bash","status":"done",
+                "args":"","timestamp":"2026-09-01T10:00:00.000Z","durationMs":5,
+            })],
+        );
+        let mut it2 = focused("a", "t1");
+        let mut open2 = None;
+        resolve_open_trace(
+            &state2,
+            frame(120, 40),
+            3_600_000_000_000,
+            &mut it2,
+            &mut open2,
+            "a",
+            "t1",
+        );
+        let Some(Dialog::TraceDetail { rows: rows2, .. }) = &open2 else {
+            panic!()
+        };
+        let when = |rows: &[crate::sidebar::dialog::Row]| {
+            rows.iter().find_map(|r| match r {
+                crate::sidebar::dialog::Row::Entry { label, value, .. } if label == "when" => {
+                    Some(value.clone())
+                }
+                _ => None,
+            })
+        };
+        assert_ne!(
+            when(rows),
+            when(rows2),
+            "the when-line is a function of the now at open"
+        );
+    }
+
+    #[test]
+    fn resolve_open_trace_refuses_small_frames_and_bad_pairs() {
+        let call = serde_json::json!({"toolUseId":"t1","tool":"Bash","status":"done","args":""});
+        let running = serde_json::json!({"toolUseId":"t2","status":"running","args":""});
+        let state = one_pane_state("a", vec![call, running]);
+        // Small frame: notice, no panel, selection kept.
+        let mut it = focused("a", "t1");
+        let mut open = None;
+        assert!(resolve_open_trace(
+            &state,
+            frame(10, 5),
+            0,
+            &mut it,
+            &mut open,
+            "a",
+            "t1"
+        ));
+        assert!(open.is_none());
+        assert!(it.notice.as_deref().unwrap_or("").contains("too small"));
+        assert_eq!(it.trace_focus.as_deref(), Some("t1"));
+        // Absent pair: selection-only degrade, no panel, no notice.
+        let mut it = focused("a", "gone");
+        let mut open = None;
+        assert!(!resolve_open_trace(
+            &state,
+            frame(120, 40),
+            0,
+            &mut it,
+            &mut open,
+            "a",
+            "gone"
+        ));
+        assert!(open.is_none());
+        // Display-only (non-settled) rows never open.
+        let mut it = focused("a", "t2");
+        let mut open = None;
+        assert!(!resolve_open_trace(
+            &state,
+            frame(120, 40),
+            0,
+            &mut it,
+            &mut open,
+            "a",
+            "t2"
+        ));
+        assert!(open.is_none());
+    }
+
+    #[test]
+    fn resolve_enter_traces_selects_only_from_the_canonical_ring() {
+        let state = one_pane_state(
+            "a",
+            vec![
+                serde_json::json!({"toolUseId":"t-old","status":"done","args":""}),
+                serde_json::json!({"status":"done","args":""}), // id-less, newest
+            ],
+        );
+        let mut it = Interaction {
+            cursor: Some("a".into()),
+            ..Default::default()
+        };
+        assert!(resolve_enter_traces(&state, &mut it, "a"));
+        assert_eq!(
+            it.trace_focus.as_deref(),
+            Some("t-old"),
+            "hidden selectable row found"
+        );
+        assert!(it.follow);
+        // An all-unselectable ring resolves to nothing.
+        let state = one_pane_state("b", vec![serde_json::json!({"status":"done","args":""})]);
+        let mut it = Interaction {
+            cursor: Some("b".into()),
+            ..Default::default()
+        };
+        assert!(!resolve_enter_traces(&state, &mut it, "b"));
+        assert_eq!(it.trace_focus, None);
+    }
+
+    #[test]
+    fn follow_prefers_the_selected_trace_row_over_its_card() {
+        let rendered = two_cards();
+        let cursor = Some("a".to_string());
+        let span = follow_span(&cursor, &Some("t-old".to_string()), &rendered).expect("row");
+        assert_eq!(span.start, 2, "the row, not the card header");
+        let span = follow_span(&cursor, &None, &rendered).expect("card");
+        assert_eq!(span.start, 0, "card zone follows the card");
+        assert_eq!(follow_span(&None, &Some("t-old".into()), &rendered), None);
+    }
+
+    #[test]
+    fn l_yields_enter_traces_only_from_an_expanded_card() {
+        let rendered = two_cards();
+        let mut live = live_default();
+        let mut it = Interaction {
+            cursor: Some("a".into()),
+            ..Default::default()
+        };
+        assert!(matches!(
+            apply_key(
+                press(KeyCode::Char('l')),
+                &mut it,
+                &mut live,
+                &rendered,
+                20,
+                40
+            ),
+            KeyOutcome::Handled
+        ));
+        it.toggled.insert("a".into());
+        assert!(matches!(
+            apply_key(
+                press(KeyCode::Char('l')),
+                &mut it,
+                &mut live,
+                &rendered,
+                20,
+                40
+            ),
+            KeyOutcome::EnterTraces { ref card_id } if card_id == "a"
+        ));
+        let mut it = focused("a", "t-new");
+        assert!(matches!(
+            apply_key(
+                press(KeyCode::Char('l')),
+                &mut it,
+                &mut live,
+                &rendered,
+                20,
+                40
+            ),
+            KeyOutcome::Handled
+        ));
+        assert_eq!(it.trace_focus.as_deref(), Some("t-new"));
+    }
+
+    #[test]
+    fn trace_zone_navigation_clamps_and_h_returns() {
+        let rendered = two_cards();
+        let mut live = live_default();
+        let mut it = focused("a", "t-new");
+        apply_key(
+            press(KeyCode::Char('j')),
+            &mut it,
+            &mut live,
+            &rendered,
+            20,
+            40,
+        );
+        assert_eq!(it.trace_focus.as_deref(), Some("t-old"));
+        assert!(it.follow);
+        apply_key(
+            press(KeyCode::Char('j')),
+            &mut it,
+            &mut live,
+            &rendered,
+            20,
+            40,
+        );
+        assert_eq!(
+            it.trace_focus.as_deref(),
+            Some("t-old"),
+            "clamped at the end"
+        );
+        apply_key(
+            press(KeyCode::Char('k')),
+            &mut it,
+            &mut live,
+            &rendered,
+            20,
+            40,
+        );
+        assert_eq!(it.trace_focus.as_deref(), Some("t-new"));
+        apply_key(
+            press(KeyCode::Char('h')),
+            &mut it,
+            &mut live,
+            &rendered,
+            20,
+            40,
+        );
+        assert_eq!(it.trace_focus, None);
+        assert_eq!(it.cursor.as_deref(), Some("a"), "cursor stays");
+    }
+
+    #[test]
+    fn o_in_the_trace_zone_requests_the_pair() {
+        let rendered = two_cards();
+        let mut live = live_default();
+        let mut it = focused("a", "t-old");
+        assert!(matches!(
+            apply_key(
+                press(KeyCode::Char('o')),
+                &mut it,
+                &mut live,
+                &rendered,
+                20,
+                40
+            ),
+            KeyOutcome::OpenTrace { ref card_id, ref tool_use_id }
+                if card_id == "a" && tool_use_id == "t-old"
+        ));
+        let mut it = Interaction {
+            cursor: Some("a".into()),
+            ..Default::default()
+        };
+        apply_key(
+            press(KeyCode::Char('o')),
+            &mut it,
+            &mut live,
+            &rendered,
+            20,
+            40,
+        );
+        assert!(it.toggled.contains("a"));
+    }
+
+    #[test]
+    fn trace_focus_survives_when_the_pair_still_renders() {
+        let cur = Some("a".to_string());
+        let mut focus = Some("t1".to_string());
+        let spans = vec![tspan("a", "t0", 5), tspan("a", "t1", 6)];
+        assert!(!reconcile_trace_focus(
+            &cur, &cur, &mut focus, &spans, &spans
+        ));
+        assert_eq!(focus.as_deref(), Some("t1"));
+    }
+
+    #[test]
+    fn an_evicted_id_snaps_to_the_nearest_surviving_row() {
+        let cur = Some("a".to_string());
+        let mut focus = Some("t9".to_string());
+        let previous = vec![tspan("a", "t8", 5), tspan("a", "t9", 6)];
+        let current = vec![tspan("a", "t8", 5), tspan("a", "t7", 6)];
+        assert!(reconcile_trace_focus(
+            &cur, &cur, &mut focus, &previous, &current
+        ));
+        assert_eq!(focus.as_deref(), Some("t7"), "same index, newest side");
+    }
+
+    #[test]
+    fn an_empty_or_foreign_ring_drops_focus() {
+        let cur = Some("a".to_string());
+        let mut focus = Some("t1".to_string());
+        assert!(reconcile_trace_focus(&cur, &cur, &mut focus, &[], &[]));
+        assert_eq!(focus, None);
+        let mut focus = Some("t1".to_string());
+        let other = vec![tspan("b", "t1", 3)];
+        assert!(reconcile_trace_focus(
+            &cur, &cur, &mut focus, &other, &other
+        ));
+        assert_eq!(focus, None, "same id on another card is not our pair");
+    }
+
+    #[test]
+    fn a_rehomed_cursor_clears_focus_even_when_the_new_card_has_the_id() {
+        let previous_cursor = Some("a".to_string());
+        let cursor = Some("b".to_string());
+        let mut focus = Some("t1".to_string());
+        let spans = vec![tspan("b", "t1", 3)];
+        assert!(reconcile_trace_focus(
+            &previous_cursor,
+            &cursor,
+            &mut focus,
+            &spans,
+            &spans
+        ));
+        assert_eq!(focus, None);
+    }
+
+    #[test]
+    fn collapse_and_expansion_flips_drop_focus_via_absent_spans() {
+        let cur = Some("a".to_string());
+        let mut focus = Some("t1".to_string());
+        let previous = vec![tspan("a", "t1", 5)];
+        assert!(reconcile_trace_focus(
+            &cur,
+            &cur,
+            &mut focus,
+            &previous,
+            &[]
+        ));
+        assert_eq!(focus, None);
     }
 
     fn press(code: KeyCode) -> crossterm::event::KeyEvent {
@@ -2945,18 +3966,23 @@ mod tests {
     #[test]
     fn every_key_the_sheet_describes_does_something() {
         let r = two_cards();
-        for (key, code, modifiers, start) in routed() {
+        for (key, code, modifiers, start, trace_focus) in routed() {
             let mut it = Interaction {
                 follow: true,
                 offset: 5,
                 cursor: Some(start.into()),
+                trace_focus: trace_focus.map(str::to_string),
                 ..Default::default()
             };
+            if key == "l" {
+                it.toggled.insert("a".into());
+            }
             let mut live = live_default();
             let mut open = None;
             let before = (
                 it.offset,
                 it.cursor.clone(),
+                it.trace_focus.clone(),
                 it.toggled.clone(),
                 // The whole of `live`, not just `hide_idle`: a key that only
                 // moves a setting is still a key that did something.
@@ -2981,6 +4007,7 @@ mod tests {
             let after = (
                 it.offset,
                 it.cursor.clone(),
+                it.trace_focus.clone(),
                 it.toggled.clone(),
                 live.clone(),
                 open.is_some(),
@@ -2990,7 +4017,12 @@ mod tests {
                 bridge_state(&open),
             );
             assert!(
-                matches!(outcome, KeyOutcome::Quit) || before != after,
+                matches!(
+                    outcome,
+                    KeyOutcome::Quit
+                        | KeyOutcome::EnterTraces { .. }
+                        | KeyOutcome::OpenTrace { .. }
+                ) || before != after,
                 "{key} is in the sheet but the router ignores it"
             );
         }
@@ -3040,7 +4072,7 @@ mod tests {
         let order = |live: &crate::sidebar::live::Live| {
             crate::sidebar::view::render(
                 &state,
-                &view_input(&cfg, live, &toggled, None, None),
+                &view_input(&cfg, live, &toggled, None, None, None),
                 60,
                 0,
             )
@@ -3104,6 +4136,7 @@ mod tests {
             .map(|row| match row {
                 Row::Entry { label, value, .. } => format!("{label} {value}"),
                 Row::Note(note) | Row::Warn(note) => note.clone(),
+                Row::Text(text) => text.clone(),
                 Row::Rule => String::new(),
             })
             .collect::<Vec<_>>()
@@ -3708,7 +4741,7 @@ mod tests {
 
         let toggled = std::collections::HashSet::new();
         let live = crate::sidebar::live::Live::from(&cfg);
-        let v = view_input(&cfg, &live, &toggled, Some("p1"), None);
+        let v = view_input(&cfg, &live, &toggled, Some("p1"), None, None);
         assert_eq!(v.theme, Theme::Lumon);
         assert_eq!(v.agent_mark, crate::sidebar::config::AgentMark::Initial);
         assert_eq!(v.auto_expand, crate::sidebar::config::AutoExpand::All);
@@ -4173,15 +5206,56 @@ mod tests {
     }
 
     #[test]
+    fn a_trace_click_deep_selects_and_a_second_click_opens() {
+        let rendered = two_cards();
+        let mut it = Interaction::default();
+        assert!(matches!(
+            apply_mouse(click(1), &mut it, &rendered, 20, 40),
+            MouseOutcome::Changed
+        ));
+        assert_eq!(it.cursor.as_deref(), Some("a"));
+        assert_eq!(it.trace_focus.as_deref(), Some("t-new"));
+        assert!(it.follow);
+        assert!(matches!(
+            apply_mouse(click(1), &mut it, &rendered, 20, 40),
+            MouseOutcome::OpenTrace { ref card_id, ref tool_use_id }
+                if card_id == "a" && tool_use_id == "t-new"
+        ));
+    }
+
+    #[test]
+    fn card_clicks_that_move_or_collapse_clear_trace_focus() {
+        let rendered = two_cards();
+        let mut it = focused("a", "t-new");
+        apply_mouse(click(6), &mut it, &rendered, 20, 40);
+        assert_eq!(it.cursor.as_deref(), Some("b"));
+        assert_eq!(it.trace_focus, None, "pair cannot leak across cards");
+        let mut it = focused("a", "t-new");
+        it.toggled.insert("a".into());
+        apply_mouse(click(0), &mut it, &rendered, 20, 40);
+        assert_eq!(it.trace_focus, None);
+        let mut it = focused("a", "t-new");
+        apply_mouse(click(4), &mut it, &rendered, 20, 40);
+        assert_eq!(it.cursor.as_deref(), Some("b"));
+        assert_eq!(it.trace_focus, None);
+    }
+
+    #[test]
     fn a_header_click_selects_toggles_and_follows() {
         let rendered = two_cards();
         let mut it = Interaction::default();
-        assert!(apply_mouse(click(0), &mut it, &rendered, 20, 40));
+        assert!(matches!(
+            apply_mouse(click(0), &mut it, &rendered, 20, 40),
+            MouseOutcome::Changed
+        ));
         assert_eq!(it.cursor.as_deref(), Some("a"));
         assert!(it.toggled.contains("a"));
         assert!(it.follow);
         // Idempotence: the second header click un-toggles.
-        assert!(apply_mouse(click(0), &mut it, &rendered, 20, 40));
+        assert!(matches!(
+            apply_mouse(click(0), &mut it, &rendered, 20, 40),
+            MouseOutcome::Changed
+        ));
         assert!(!it.toggled.contains("a"));
     }
 
@@ -4194,13 +5268,19 @@ mod tests {
             ..Default::default()
         };
         // Row 3 + offset 2 = line 5, inside card b's body.
-        assert!(apply_mouse(click(3), &mut it, &rendered, 20, 40));
+        assert!(matches!(
+            apply_mouse(click(3), &mut it, &rendered, 20, 40),
+            MouseOutcome::Changed
+        ));
         assert_eq!(it.cursor.as_deref(), Some("b"));
         assert!(it.toggled.is_empty());
         assert!(!it.follow, "spec §3: a body click detaches, never scrolls");
         assert_eq!(it.offset, 2, "offset untouched");
         // The identical body click again changes nothing — and reports it.
-        assert!(!apply_mouse(click(3), &mut it, &rendered, 20, 40));
+        assert!(matches!(
+            apply_mouse(click(3), &mut it, &rendered, 20, 40),
+            MouseOutcome::Inert
+        ));
     }
 
     #[test]
@@ -4211,7 +5291,10 @@ mod tests {
             ..Default::default()
         };
         // Row 0 + offset 4 = line 4 = card b's header.
-        assert!(apply_mouse(click(0), &mut it, &rendered, 20, 40));
+        assert!(matches!(
+            apply_mouse(click(0), &mut it, &rendered, 20, 40),
+            MouseOutcome::Changed
+        ));
         assert_eq!(it.cursor.as_deref(), Some("b"));
         assert!(it.toggled.contains("b"));
     }
@@ -4221,17 +5304,29 @@ mod tests {
         let rendered = two_cards();
         let mut it = Interaction::default();
         // The separator line between the cards.
-        assert!(!apply_mouse(click(3), &mut it, &rendered, 20, 40));
+        assert!(matches!(
+            apply_mouse(click(3), &mut it, &rendered, 20, 40),
+            MouseOutcome::Inert
+        ));
         // The pinned footer region.
-        assert!(!apply_mouse(click(20), &mut it, &rendered, 20, 40));
+        assert!(matches!(
+            apply_mouse(click(20), &mut it, &rendered, 20, 40),
+            MouseOutcome::Inert
+        ));
         // A modified click.
         let shifted = MouseEvent {
             modifiers: KeyModifiers::SHIFT,
             ..click(0)
         };
-        assert!(!apply_mouse(shifted, &mut it, &rendered, 20, 40));
+        assert!(matches!(
+            apply_mouse(shifted, &mut it, &rendered, 20, 40),
+            MouseOutcome::Inert
+        ));
         // A zero viewport.
-        assert!(!apply_mouse(click(0), &mut it, &rendered, 0, 40));
+        assert!(matches!(
+            apply_mouse(click(0), &mut it, &rendered, 0, 40),
+            MouseOutcome::Inert
+        ));
         assert_eq!(it.cursor, None, "no inert event moved the cursor");
         assert!(it.toggled.is_empty());
     }
@@ -4244,20 +5339,20 @@ mod tests {
             ..Default::default()
         };
         // At the top, ScrollUp cannot move: no change, follow untouched.
-        assert!(!apply_mouse(
-            wheel(MouseEventKind::ScrollUp),
-            &mut it,
-            &rendered,
-            20,
-            40
+        assert!(matches!(
+            apply_mouse(wheel(MouseEventKind::ScrollUp), &mut it, &rendered, 20, 40),
+            MouseOutcome::Inert
         ));
         assert!(it.follow);
-        assert!(apply_mouse(
-            wheel(MouseEventKind::ScrollDown),
-            &mut it,
-            &rendered,
-            20,
-            40
+        assert!(matches!(
+            apply_mouse(
+                wheel(MouseEventKind::ScrollDown),
+                &mut it,
+                &rendered,
+                20,
+                40
+            ),
+            MouseOutcome::Changed
         ));
         assert_eq!(it.offset, 3);
         assert!(!it.follow, "a moved wheel detaches like PageDown");
@@ -4272,12 +5367,15 @@ mod tests {
             );
         }
         assert_eq!(it.offset, 20);
-        assert!(!apply_mouse(
-            wheel(MouseEventKind::ScrollDown),
-            &mut it,
-            &rendered,
-            20,
-            40
+        assert!(matches!(
+            apply_mouse(
+                wheel(MouseEventKind::ScrollDown),
+                &mut it,
+                &rendered,
+                20,
+                40
+            ),
+            MouseOutcome::Inert
         ));
     }
 
@@ -4286,14 +5384,9 @@ mod tests {
         let rendered = two_cards();
         let mut it = Interaction::default();
         let open = Some(keys_dialog());
-        assert!(!route_mouse(
-            click(0),
-            &open,
-            true,
-            &mut it,
-            &rendered,
-            20,
-            40
+        assert!(matches!(
+            route_mouse(click(0), &open, true, &mut it, &rendered, 20, 40),
+            MouseOutcome::Inert
         ));
         assert_eq!(it.cursor, None);
         assert!(it.toggled.is_empty());
@@ -4305,14 +5398,9 @@ mod tests {
         // disable; events from a stuck capture must not mutate cards.
         let rendered = two_cards();
         let mut it = Interaction::default();
-        assert!(!route_mouse(
-            click(0),
-            &None,
-            false,
-            &mut it,
-            &rendered,
-            20,
-            40
+        assert!(matches!(
+            route_mouse(click(0), &None, false, &mut it, &rendered, 20, 40),
+            MouseOutcome::Inert
         ));
         assert_eq!(it.cursor, None);
     }
@@ -4321,14 +5409,9 @@ mod tests {
     fn an_open_gate_delegates_to_apply_mouse() {
         let rendered = two_cards();
         let mut it = Interaction::default();
-        assert!(route_mouse(
-            click(0),
-            &None,
-            true,
-            &mut it,
-            &rendered,
-            20,
-            40
+        assert!(matches!(
+            route_mouse(click(0), &None, true, &mut it, &rendered, 20, 40),
+            MouseOutcome::Changed
         ));
         assert_eq!(it.cursor.as_deref(), Some("a"));
     }
@@ -4460,7 +5543,7 @@ mod tests {
         assert_eq!(label, "mouse (when on)");
         assert_eq!(
             value,
-            "click selects · header click toggles · wheel scrolls"
+            "click selects · header toggles · trace re-click opens · wheel scrolls"
         );
     }
 }

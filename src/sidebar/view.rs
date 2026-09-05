@@ -26,6 +26,7 @@ pub struct CardCtx<'a> {
     pub cwd_label: Option<&'a str>,
     pub width: u16,
     pub selected: bool,
+    pub trace_focus: Option<&'a str>,
     pub now_unix_ms: u64,
 }
 
@@ -638,6 +639,13 @@ fn plan_usage_rows(t: &PaneTelemetry, cx: &CardCtx<'_>) -> Vec<Line> {
 }
 
 pub fn expanded_card(t: &PaneTelemetry, cx: &CardCtx<'_>) -> Vec<Line> {
+    expanded_card_with_traces(t, cx).0
+}
+
+fn expanded_card_with_traces(
+    t: &PaneTelemetry,
+    cx: &CardCtx<'_>,
+) -> (Vec<Line>, Vec<(String, usize)>) {
     let width = cx.width;
     let mut lines = vec![header(t, cx, true), task_line(t, cx)];
     if width >= MODEL_LINE_MIN {
@@ -768,13 +776,59 @@ pub fn expanded_card(t: &PaneTelemetry, cx: &CardCtx<'_>) -> Vec<Line> {
     ));
     lines.extend(tool_rows(t, cx));
     lines.push(blank());
-    lines.extend(trace_rows(t, cx));
-    lines
+    let traces_at = lines.len();
+    let (trace_lines, trace_offsets) = trace_rows(t, cx);
+    lines.extend(trace_lines);
+    (
+        lines,
+        trace_offsets
+            .into_iter()
+            .map(|(id, offset)| (id, traces_at + offset))
+            .collect(),
+    )
 }
 
-/// Settled calls only, newest first. In-flight rows are cut from v1 (§1.3);
-/// work in progress reads as the card state.
-fn trace_rows(t: &PaneTelemetry, cx: &CardCtx<'_>) -> Vec<Line> {
+/// Newest first. Off-contract rows still display, but only id-bearing calls
+/// with an exact settled status export selectable geometry.
+/// A trace call's identity: a NONEMPTY `toolUseId`. Replay summaries copy
+/// unvalidated shapes into the ring, and an empty string is a non-identity
+/// that must behave exactly like a missing one — display-only, never
+/// deduplicated away, never exported as geometry.
+pub fn call_id(call: &Value) -> Option<&str> {
+    call.get("toolUseId")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+}
+
+/// Spec §2's selectable predicate, in ONE place: id-bearing (nonempty) and
+/// settled. The shell's resolvers import this so rendering and resolution
+/// can never disagree on what counts as a row.
+pub fn selectable_call(call: &Value) -> bool {
+    call_id(call).is_some()
+        && matches!(
+            call.get("status").and_then(Value::as_str),
+            Some("done") | Some("failed")
+        )
+}
+
+/// Newest selectable id under the view's own dedup order: the newest
+/// occurrence of an id shadows older ones, selectable or not. Single source
+/// for the footer's descendability and the run loop's `EnterTraces`
+/// resolution — computing either from rendered spans alone disagrees with
+/// the key's behavior whenever the selectable row sits outside the
+/// unfocused `trace_lines` window.
+pub fn newest_selectable_id(ring: &std::collections::VecDeque<Value>) -> Option<String> {
+    let mut seen = std::collections::HashSet::new();
+    ring.iter().rev().find_map(|call| {
+        let id = call_id(call)?;
+        if !seen.insert(id) {
+            return None;
+        }
+        selectable_call(call).then(|| id.to_string())
+    })
+}
+
+fn trace_rows(t: &PaneTelemetry, cx: &CardCtx<'_>) -> (Vec<Line>, Vec<(String, usize)>) {
     let width = cx.width;
     let retained = t.tool_calls.len();
     let mut out = vec![vec![
@@ -782,8 +836,24 @@ fn trace_rows(t: &PaneTelemetry, cx: &CardCtx<'_>) -> Vec<Line> {
         Span::emphasis(format::count(retained as u64)),
         Span::body(" retained"),
     ]];
+    let mut rows = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let calls: Vec<&Value> = t
+        .tool_calls
+        .iter()
+        .rev()
+        .filter(|call| match call_id(call) {
+            Some(id) => seen.insert(id.to_string()),
+            None => true,
+        })
+        .collect();
+    let window = if cx.trace_focus.is_some() {
+        usize::MAX
+    } else {
+        cx.trace_lines as usize
+    };
 
-    for call in t.tool_calls.iter().rev().take(cx.trace_lines as usize) {
+    for call in calls.iter().take(window) {
         let failed = call.get("status").and_then(Value::as_str) == Some("failed");
         let (glyph, semantic) = if failed {
             ("✕", Semantic::Bad)
@@ -818,7 +888,7 @@ fn trace_rows(t: &PaneTelemetry, cx: &CardCtx<'_>) -> Vec<Line> {
             .saturating_sub(used + format::width(&age))
             .max(1);
 
-        out.push(vec![
+        let mut row = vec![
             Span::body("  "),
             Span::new(format!("{glyph} "), Style::semantic(Role::Body, semantic)),
             Span::emphasis(format::pad(&tool, 6)),
@@ -828,17 +898,29 @@ fn trace_rows(t: &PaneTelemetry, cx: &CardCtx<'_>) -> Vec<Line> {
             // §2.5 forbids load-bearing spans from taking a role that can dim
             // out of existence.
             Span::body(age),
-        ]);
+        ];
+        let id = call_id(call);
+        let selectable = selectable_call(call);
+        if selectable {
+            let id = id.expect("selectable rows have ids");
+            rows.push((id.to_string(), out.len()));
+            if cx.trace_focus == Some(id) {
+                for span in &mut row {
+                    span.style.reverse = true;
+                }
+            }
+        }
+        out.push(row);
     }
 
-    let shown = retained.min(cx.trace_lines as usize);
-    if retained > shown {
+    let shown = calls.len().min(window);
+    if calls.len() > shown {
         out.push(vec![Span::label(format!(
             "    +{} older",
-            retained - shown
+            calls.len() - shown
         ))]);
     }
-    out
+    (out, rows)
 }
 
 /// Everything the view needs that is not telemetry. Owned by the shell,
@@ -847,6 +929,7 @@ fn trace_rows(t: &PaneTelemetry, cx: &CardCtx<'_>) -> Vec<Line> {
 #[derive(Debug, Clone)]
 pub struct ViewInput<'a> {
     pub cursor: Option<&'a str>,
+    pub trace_focus: Option<(&'a str, &'a str)>,
     /// Pane ids whose expansion is FLIPPED from the auto_expand default (§3.2).
     pub toggled: &'a std::collections::HashSet<String>,
     pub hide_idle: bool,
@@ -892,6 +975,7 @@ pub fn render(
 
     let mut scrollable: Vec<Line> = Vec::new();
     let mut spans: Vec<(String, crate::sidebar::layout::LineSpan)> = Vec::new();
+    let mut trace_spans: Vec<(String, String, crate::sidebar::layout::LineSpan)> = Vec::new();
     if visible.panes.is_empty() && visible.hidden_idle == 0 {
         scrollable.push(vec![Span::label("  no agents bound")]);
     }
@@ -914,15 +998,28 @@ pub fn render(
             cwd_label: labels.get(id.as_str()).map(String::as_str),
             width,
             selected: view.cursor == Some(id.as_str()),
+            trace_focus: view
+                .trace_focus
+                .and_then(|(card, trace)| (card == id).then_some(trace)),
             now_unix_ms,
         };
-        let card = if open {
-            expanded_card(t, &cx)
+        let (card, trace_offsets) = if open {
+            expanded_card_with_traces(t, &cx)
         } else {
-            compact_card(t, &cx)
+            (compact_card(t, &cx), Vec::new())
         };
         let height = card.len();
         scrollable.extend(card);
+        trace_spans.extend(trace_offsets.into_iter().map(|(trace, offset)| {
+            (
+                id.clone(),
+                trace,
+                crate::sidebar::layout::LineSpan {
+                    start: start + offset,
+                    height: 1,
+                },
+            )
+        }));
         spans.push((
             id.clone(),
             crate::sidebar::layout::LineSpan { start, height },
@@ -946,12 +1043,31 @@ pub fn render(
         };
         pinned.push(vec![Span::label(text)]);
     }
-    pinned.push(footer(width));
+    let zone = if view.trace_focus.is_some() {
+        FooterZone::Traces
+    } else if view.cursor.is_some_and(|c| {
+        // Descendability comes from the CANONICAL ring, not the rendered
+        // window: with `trace_lines = 1` and a display-only newest row the
+        // spans are empty while `l` still enters the hidden selectable row,
+        // and the footer must agree with the key.
+        let expanded = expanded_by_default(view.auto_expand) ^ view.toggled.contains(c);
+        expanded
+            && telemetry
+                .panes
+                .get(c)
+                .is_some_and(|t| newest_selectable_id(&t.tool_calls).is_some())
+    }) {
+        FooterZone::CardsDescendable
+    } else {
+        FooterZone::Cards
+    };
+    pinned.push(footer(width, zone));
 
     crate::sidebar::style::Rendered {
         scrollable,
         pinned,
         spans,
+        trace_spans,
     }
 }
 
@@ -999,16 +1115,47 @@ fn stale_notice(daemon: &str, width: u16) -> String {
     }
 }
 
-fn footer(width: u16) -> Line {
-    // `x` first among the ones that drop: a panel layer nothing points at is
-    // a panel layer nobody finds. The order here is the order they survive
-    // narrowing, so this keeps `x` longer than `idle`.
-    let hints = [
-        ("j/k", "move"),
-        ("o/↵", "expand"),
-        ("x", "menu"),
-        ("z", "idle"),
-    ];
+/// Which dialect the key footer speaks: the hints name what the keys do
+/// RIGHT NOW, so the bar doubles as a zone indicator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FooterZone {
+    /// Card list, cursor not on a descendable card (or no cursor).
+    Cards,
+    /// Card list, cursor on an expanded card with ≥1 selectable trace —
+    /// exactly the state where `l` acts, so only here does it advertise.
+    CardsDescendable,
+    /// Inside a card's traces.
+    Traces,
+}
+
+fn footer(width: u16, zone: FooterZone) -> Line {
+    // The order here is the order they survive narrowing (drop from the
+    // right). `x` outlives `z`: a panel layer nothing points at is a panel
+    // layer nobody finds. `l traces` outlives `x` in its zone: it is primary
+    // navigation for the card under the cursor, and the hint only exists
+    // while descending actually works.
+    let hints: &[(&str, &str)] = match zone {
+        FooterZone::Cards => &[
+            ("j/k", "move"),
+            ("o/↵", "expand"),
+            ("x", "menu"),
+            ("z", "idle"),
+        ],
+        FooterZone::CardsDescendable => &[
+            ("j/k", "move"),
+            ("o/↵", "expand"),
+            ("l", "traces"),
+            ("x", "menu"),
+            ("z", "idle"),
+        ],
+        FooterZone::Traces => &[
+            ("j/k", "move"),
+            ("o/↵", "open"),
+            ("h", "back"),
+            ("x", "menu"),
+            ("z", "idle"),
+        ],
+    };
     let cost = |keep: usize| -> usize {
         if keep == 0 {
             return 3;
@@ -1076,6 +1223,7 @@ mod tests {
             cwd_label: None,
             width: width.max(MIN_WIDTH),
             selected: false,
+            trace_focus: None,
             now_unix_ms: 0,
         }
     }
@@ -2109,6 +2257,7 @@ mod tests {
     ) -> ViewInput<'a> {
         ViewInput {
             cursor,
+            trace_focus: None,
             toggled,
             hide_idle: false,
             scope: None,
@@ -2123,6 +2272,96 @@ mod tests {
             config: crate::sidebar::style::ConfigStatus::default(),
             stale: None,
         }
+    }
+
+    fn call(id: Option<&str>, status: &str) -> Value {
+        let mut v = serde_json::json!({
+            "tool": "Bash", "args": "cargo test", "status": status,
+            "timestamp": "2026-09-01T10:00:00.000Z", "durationMs": 1200,
+        });
+        if let Some(id) = id {
+            v["toolUseId"] = Value::String(id.into());
+        }
+        v
+    }
+
+    fn render_one_expanded(
+        id: &str,
+        telemetry: PaneTelemetry,
+        trace_focus: Option<(&str, &str)>,
+    ) -> Rendered {
+        let state = crate::sidebar::reducer::State {
+            panes: [(id.to_string(), telemetry)].into_iter().collect(),
+            last_seq: 1,
+            ..Default::default()
+        };
+        let toggled = [id.to_string()].into_iter().collect();
+        let app = appearances();
+        let mut view = view_input(Some(id), &toggled, &app);
+        view.trace_focus = trace_focus;
+        render(&state, &view, 80, 0)
+    }
+
+    #[test]
+    fn trace_spans_export_selectable_rows_only() {
+        let mut t = PaneTelemetry::with_agent("claude");
+        t.card_state = CardState::Running;
+        t.tool_calls.push_back(call(Some("t-old"), "done"));
+        t.tool_calls.push_back(call(None, "done"));
+        t.tool_calls.push_back(call(Some("t-run"), "running"));
+        t.tool_calls.push_back(call(Some("t-new"), "failed"));
+        let rendered = render_one_expanded("p1", t, None);
+        let ids: Vec<&str> = rendered
+            .trace_spans
+            .iter()
+            .map(|(_, id, _)| id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["t-new", "t-old"], "newest-first, selectable only");
+        assert!(rendered.trace_span_for("p1", "t-new").is_some());
+        assert!(rendered.trace_span_for("p1", "t-run").is_none());
+    }
+
+    #[test]
+    fn duplicate_ids_render_once_newest_wins() {
+        let mut t = PaneTelemetry::with_agent("claude");
+        t.card_state = CardState::Running;
+        t.tool_calls.push_back(call(Some("dup"), "done"));
+        t.tool_calls.push_back(call(Some("dup"), "failed"));
+        let rendered = render_one_expanded("p1", t, None);
+        let dups = rendered
+            .trace_spans
+            .iter()
+            .filter(|(_, id, _)| id == "dup")
+            .count();
+        assert_eq!(dups, 1);
+    }
+
+    #[test]
+    fn focus_renders_the_full_ring_and_reverses_the_selected_row() {
+        let mut t = PaneTelemetry::with_agent("claude");
+        t.card_state = CardState::Running;
+        for i in 0..10 {
+            t.tool_calls.push_back(call(Some(&format!("t{i}")), "done"));
+        }
+        let windowed = render_one_expanded("p1", t.clone(), None);
+        assert_eq!(windowed.trace_spans.len(), 5);
+        let focused = render_one_expanded("p1", t, Some(("p1", "t3")));
+        assert_eq!(focused.trace_spans.len(), 10);
+        let text: String = focused
+            .scrollable
+            .iter()
+            .flat_map(|line| line.iter().map(|s| s.text.clone()))
+            .collect();
+        assert!(
+            !text.contains("older"),
+            "no false +N older under the full ring"
+        );
+        let span = focused.trace_span_for("p1", "t3").expect("selected row");
+        let row = &focused.scrollable[span.start];
+        assert!(
+            row.iter().any(|s| s.style.reverse),
+            "selected trace row renders reversed"
+        );
     }
 
     #[test]
@@ -2382,15 +2621,206 @@ mod tests {
     #[test]
     fn the_footer_reads_exactly_as_specified_and_drops_from_the_end() {
         assert_eq!(
-            plain(&[footer(60)])[0],
+            plain(&[footer(60, FooterZone::Cards)])[0],
             "── j/k move · o/↵ expand · x menu · z idle"
         );
         // `x menu` outlives `z idle` as the frame narrows: a panel layer
         // nothing points at is a panel layer nobody finds, whereas `z` is
         // discoverable from the `?` sheet once you know `x`.
-        assert_eq!(plain(&[footer(34)])[0], "── j/k move · o/↵ expand · x menu");
-        assert_eq!(plain(&[footer(30)])[0], "── j/k move · o/↵ expand");
-        assert_eq!(plain(&[footer(12)])[0], "── j/k move");
+        assert_eq!(
+            plain(&[footer(34, FooterZone::Cards)])[0],
+            "── j/k move · o/↵ expand · x menu"
+        );
+        assert_eq!(
+            plain(&[footer(30, FooterZone::Cards)])[0],
+            "── j/k move · o/↵ expand"
+        );
+        assert_eq!(plain(&[footer(12, FooterZone::Cards)])[0], "── j/k move");
+    }
+
+    #[test]
+    fn the_footer_advertises_l_only_over_a_descendable_card() {
+        assert_eq!(
+            plain(&[footer(60, FooterZone::CardsDescendable)])[0],
+            "── j/k move · o/↵ expand · l traces · x menu · z idle"
+        );
+        // `l traces` outlives `x menu` in the narrowing order: it is primary
+        // navigation for the card under the cursor, and this footer state
+        // exists only while that card can actually be descended into.
+        assert_eq!(
+            plain(&[footer(45, FooterZone::CardsDescendable)])[0],
+            "── j/k move · o/↵ expand · l traces · x menu"
+        );
+        assert_eq!(
+            plain(&[footer(38, FooterZone::CardsDescendable)])[0],
+            "── j/k move · o/↵ expand · l traces"
+        );
+        assert_eq!(
+            plain(&[footer(28, FooterZone::CardsDescendable)])[0],
+            "── j/k move · o/↵ expand"
+        );
+    }
+
+    #[test]
+    fn the_footer_speaks_the_trace_zone_dialect_while_focused() {
+        assert_eq!(
+            plain(&[footer(60, FooterZone::Traces)])[0],
+            "── j/k move · o/↵ open · h back · x menu · z idle"
+        );
+        assert_eq!(
+            plain(&[footer(40, FooterZone::Traces)])[0],
+            "── j/k move · o/↵ open · h back · x menu"
+        );
+        assert_eq!(
+            plain(&[footer(32, FooterZone::Traces)])[0],
+            "── j/k move · o/↵ open · h back"
+        );
+    }
+
+    #[test]
+    fn descendability_reads_the_canonical_ring_not_the_rendered_window() {
+        // trace_lines = 1 with a display-only newest row: the window shows
+        // no selectable rows, but `l` still enters the hidden older one —
+        // the footer must agree with the key (connector finding F1).
+        let mut t = PaneTelemetry::with_agent("claude");
+        t.card_state = CardState::Running;
+        t.tool_calls.push_back(json!({
+            "toolUseId": "t-old", "tool": "Bash", "status": "done", "args": "ls",
+        }));
+        t.tool_calls
+            .push_back(json!({ "status": "done", "args": "replay" })); // id-less newest
+        let mut state = crate::sidebar::reducer::State::default();
+        state.panes.insert("p1".into(), t);
+        let app = appearances();
+        let toggled: std::collections::HashSet<String> = ["p1".to_string()].into();
+        let view = ViewInput {
+            cursor: Some("p1"),
+            toggled: &toggled,
+            hide_idle: false,
+            scope: None,
+            sort: crate::sidebar::select::Sort::Position,
+            auto_expand: crate::sidebar::config::AutoExpand::None,
+            agent_mark: AgentMark::Dot,
+            tool_calls: crate::sidebar::config::ToolCallStyle::Bars,
+            plan_usage: true,
+            theme: crate::sidebar::config::Theme::Inherit,
+            trace_lines: 1,
+            agents: &app,
+            config: crate::sidebar::style::ConfigStatus {
+                problems: 0,
+                log_written: false,
+            },
+            stale: None,
+            trace_focus: None,
+        };
+        let out = render(&state, &view, 60, 0);
+        let foot = plain(&[out.pinned.last().unwrap().clone()])[0].clone();
+        assert!(
+            foot.contains("l traces"),
+            "hidden selectable row still makes the card descendable: {foot}"
+        );
+        // A newer running duplicate shadows the only settled call: `l`
+        // resolves nothing, so the footer must NOT advertise it.
+        let mut t = PaneTelemetry::with_agent("claude");
+        t.card_state = CardState::Running;
+        t.tool_calls
+            .push_back(json!({"toolUseId": "dup", "status": "done", "args": ""}));
+        t.tool_calls
+            .push_back(json!({"toolUseId": "dup", "status": "running", "args": ""}));
+        let mut state = crate::sidebar::reducer::State::default();
+        state.panes.insert("p1".into(), t);
+        let out = render(&state, &view, 60, 0);
+        let foot = plain(&[out.pinned.last().unwrap().clone()])[0].clone();
+        assert!(
+            !foot.contains("l traces"),
+            "a shadowed settled dup is not descendable: {foot}"
+        );
+    }
+
+    #[test]
+    fn empty_tool_use_ids_are_non_identities() {
+        // Replay shapes can carry "toolUseId": "" — it must behave exactly
+        // like a missing id: display-only, never deduped away, never a span
+        // (connector finding F2).
+        let mut t = PaneTelemetry::with_agent("claude");
+        t.card_state = CardState::Running;
+        t.tool_calls
+            .push_back(json!({"toolUseId": "", "tool": "A", "status": "done", "args": ""}));
+        t.tool_calls
+            .push_back(json!({"toolUseId": "", "tool": "B", "status": "done", "args": ""}));
+        let rendered = render_one_expanded("p1", t, None);
+        assert!(
+            rendered.trace_spans.is_empty(),
+            "empty ids export no geometry: {:?}",
+            rendered.trace_spans
+        );
+        let text: String = rendered
+            .scrollable
+            .iter()
+            .flat_map(|line| line.iter().map(|s| s.text.clone()))
+            .collect();
+        assert!(
+            text.contains('A') && text.contains('B'),
+            "both empty-id rows still render (no dedup vanishing): {text}"
+        );
+    }
+
+    #[test]
+    fn render_picks_the_footer_zone_from_focus_and_descendability() {
+        let mut t = PaneTelemetry::with_agent("claude");
+        t.card_state = CardState::Running;
+        t.tool_calls.push_back(json!({
+            "toolUseId": "t1", "tool": "Bash", "status": "done",
+            "args": "ls", "timestamp": "2026-09-01T10:00:00.000Z",
+        }));
+        let mut state = crate::sidebar::reducer::State::default();
+        state.panes.insert("p1".into(), t);
+        let app = appearances();
+        let toggled: std::collections::HashSet<String> = ["p1".to_string()].into();
+        let base = ViewInput {
+            cursor: Some("p1"),
+            toggled: &toggled,
+            hide_idle: false,
+            scope: None,
+            sort: crate::sidebar::select::Sort::Position,
+            auto_expand: crate::sidebar::config::AutoExpand::None,
+            agent_mark: AgentMark::Dot,
+            tool_calls: crate::sidebar::config::ToolCallStyle::Bars,
+            plan_usage: true,
+            theme: crate::sidebar::config::Theme::Inherit,
+            trace_lines: 5,
+            agents: &app,
+            config: crate::sidebar::style::ConfigStatus {
+                problems: 0,
+                log_written: false,
+            },
+            stale: None,
+            trace_focus: None,
+        };
+        // Cursor on an expanded, traced card: the l hint appears.
+        let out = render(&state, &base, 60, 0);
+        let foot = plain(&[out.pinned.last().unwrap().clone()])[0].clone();
+        assert!(
+            foot.contains("l traces"),
+            "descendable card advertises l: {foot}"
+        );
+        // Trace zone: the dialect flips.
+        let focused = ViewInput {
+            trace_focus: Some(("p1", "t1")),
+            ..base.clone()
+        };
+        let out = render(&state, &focused, 60, 0);
+        let foot = plain(&[out.pinned.last().unwrap().clone()])[0].clone();
+        assert!(foot.contains("h back"), "trace zone advertises h: {foot}");
+        assert!(!foot.contains("l traces"));
+        // Cursor elsewhere (no cursor): plain card footer.
+        let bare = ViewInput {
+            cursor: None,
+            ..base.clone()
+        };
+        let out = render(&state, &bare, 60, 0);
+        let foot = plain(&[out.pinned.last().unwrap().clone()])[0].clone();
+        assert!(!foot.contains("l traces"), "no cursor, no l hint: {foot}");
     }
 
     #[test]

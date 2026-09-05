@@ -168,6 +168,18 @@ pub fn age(then_unix_ms: u64, now_unix_ms: u64) -> String {
     }
 }
 
+/// Durations, not ages: `age` reports sub-minute deltas as "now", which
+/// erases every real tool-call duration (spec §4).
+pub fn duration_ms(ms: u64) -> String {
+    if ms < 1000 {
+        format!("{ms}ms")
+    } else if ms < 60_000 {
+        format!("{:.1}s", (ms / 100) as f64 / 10.0)
+    } else {
+        format!("{}m{:02}s", ms / 60_000, (ms % 60_000) / 1000)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -265,6 +277,17 @@ mod tests {
         assert_eq!(age(now - 99 * 86_400_000, now), "99d");
         assert_eq!(age(now - 100 * 86_400_000, now), "99d+");
         assert_eq!(age(now + 5_000, now), "now", "clock skew clamps");
+    }
+
+    #[test]
+    fn duration_ms_has_three_regimes_with_exact_boundaries() {
+        assert_eq!(duration_ms(0), "0ms");
+        assert_eq!(duration_ms(999), "999ms");
+        assert_eq!(duration_ms(1000), "1.0s");
+        assert_eq!(duration_ms(1234), "1.2s");
+        assert_eq!(duration_ms(59_949), "59.9s");
+        assert_eq!(duration_ms(60_000), "1m00s");
+        assert_eq!(duration_ms(125_000), "2m05s");
     }
 
     #[test]
