@@ -790,6 +790,44 @@ fn expanded_card_with_traces(
 
 /// Newest first. Off-contract rows still display, but only id-bearing calls
 /// with an exact settled status export selectable geometry.
+/// A trace call's identity: a NONEMPTY `toolUseId`. Replay summaries copy
+/// unvalidated shapes into the ring, and an empty string is a non-identity
+/// that must behave exactly like a missing one — display-only, never
+/// deduplicated away, never exported as geometry.
+pub fn call_id(call: &Value) -> Option<&str> {
+    call.get("toolUseId")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+}
+
+/// Spec §2's selectable predicate, in ONE place: id-bearing (nonempty) and
+/// settled. The shell's resolvers import this so rendering and resolution
+/// can never disagree on what counts as a row.
+pub fn selectable_call(call: &Value) -> bool {
+    call_id(call).is_some()
+        && matches!(
+            call.get("status").and_then(Value::as_str),
+            Some("done") | Some("failed")
+        )
+}
+
+/// Newest selectable id under the view's own dedup order: the newest
+/// occurrence of an id shadows older ones, selectable or not. Single source
+/// for the footer's descendability and the run loop's `EnterTraces`
+/// resolution — computing either from rendered spans alone disagrees with
+/// the key's behavior whenever the selectable row sits outside the
+/// unfocused `trace_lines` window.
+pub fn newest_selectable_id(ring: &std::collections::VecDeque<Value>) -> Option<String> {
+    let mut seen = std::collections::HashSet::new();
+    ring.iter().rev().find_map(|call| {
+        let id = call_id(call)?;
+        if !seen.insert(id) {
+            return None;
+        }
+        selectable_call(call).then(|| id.to_string())
+    })
+}
+
 fn trace_rows(t: &PaneTelemetry, cx: &CardCtx<'_>) -> (Vec<Line>, Vec<(String, usize)>) {
     let width = cx.width;
     let retained = t.tool_calls.len();
@@ -804,7 +842,7 @@ fn trace_rows(t: &PaneTelemetry, cx: &CardCtx<'_>) -> (Vec<Line>, Vec<(String, u
         .tool_calls
         .iter()
         .rev()
-        .filter(|call| match call.get("toolUseId").and_then(Value::as_str) {
+        .filter(|call| match call_id(call) {
             Some(id) => seen.insert(id.to_string()),
             None => true,
         })
@@ -861,12 +899,8 @@ fn trace_rows(t: &PaneTelemetry, cx: &CardCtx<'_>) -> (Vec<Line>, Vec<(String, u
             // out of existence.
             Span::body(age),
         ];
-        let id = call.get("toolUseId").and_then(Value::as_str);
-        let selectable = id.is_some()
-            && matches!(
-                call.get("status").and_then(Value::as_str),
-                Some("done") | Some("failed")
-            );
+        let id = call_id(call);
+        let selectable = selectable_call(call);
         if selectable {
             let id = id.expect("selectable rows have ids");
             rows.push((id.to_string(), out.len()));
@@ -1011,10 +1045,18 @@ pub fn render(
     }
     let zone = if view.trace_focus.is_some() {
         FooterZone::Traces
-    } else if view
-        .cursor
-        .is_some_and(|c| trace_spans.iter().any(|(card, ..)| card == c))
-    {
+    } else if view.cursor.is_some_and(|c| {
+        // Descendability comes from the CANONICAL ring, not the rendered
+        // window: with `trace_lines = 1` and a display-only newest row the
+        // spans are empty while `l` still enters the hidden selectable row,
+        // and the footer must agree with the key.
+        let expanded = expanded_by_default(view.auto_expand) ^ view.toggled.contains(c);
+        expanded
+            && telemetry
+                .panes
+                .get(c)
+                .is_some_and(|t| newest_selectable_id(&t.tool_calls).is_some())
+    }) {
         FooterZone::CardsDescendable
     } else {
         FooterZone::Cards
@@ -2632,6 +2674,94 @@ mod tests {
         assert_eq!(
             plain(&[footer(32, FooterZone::Traces)])[0],
             "── j/k move · o/↵ open · h back"
+        );
+    }
+
+    #[test]
+    fn descendability_reads_the_canonical_ring_not_the_rendered_window() {
+        // trace_lines = 1 with a display-only newest row: the window shows
+        // no selectable rows, but `l` still enters the hidden older one —
+        // the footer must agree with the key (connector finding F1).
+        let mut t = PaneTelemetry::with_agent("claude");
+        t.card_state = CardState::Running;
+        t.tool_calls.push_back(json!({
+            "toolUseId": "t-old", "tool": "Bash", "status": "done", "args": "ls",
+        }));
+        t.tool_calls
+            .push_back(json!({ "status": "done", "args": "replay" })); // id-less newest
+        let mut state = crate::sidebar::reducer::State::default();
+        state.panes.insert("p1".into(), t);
+        let app = appearances();
+        let toggled: std::collections::HashSet<String> = ["p1".to_string()].into();
+        let view = ViewInput {
+            cursor: Some("p1"),
+            toggled: &toggled,
+            hide_idle: false,
+            scope: None,
+            sort: crate::sidebar::select::Sort::Position,
+            auto_expand: crate::sidebar::config::AutoExpand::None,
+            agent_mark: AgentMark::Dot,
+            tool_calls: crate::sidebar::config::ToolCallStyle::Bars,
+            plan_usage: true,
+            theme: crate::sidebar::config::Theme::Inherit,
+            trace_lines: 1,
+            agents: &app,
+            config: crate::sidebar::style::ConfigStatus {
+                problems: 0,
+                log_written: false,
+            },
+            stale: None,
+            trace_focus: None,
+        };
+        let out = render(&state, &view, 60, 0);
+        let foot = plain(&[out.pinned.last().unwrap().clone()])[0].clone();
+        assert!(
+            foot.contains("l traces"),
+            "hidden selectable row still makes the card descendable: {foot}"
+        );
+        // A newer running duplicate shadows the only settled call: `l`
+        // resolves nothing, so the footer must NOT advertise it.
+        let mut t = PaneTelemetry::with_agent("claude");
+        t.card_state = CardState::Running;
+        t.tool_calls
+            .push_back(json!({"toolUseId": "dup", "status": "done", "args": ""}));
+        t.tool_calls
+            .push_back(json!({"toolUseId": "dup", "status": "running", "args": ""}));
+        let mut state = crate::sidebar::reducer::State::default();
+        state.panes.insert("p1".into(), t);
+        let out = render(&state, &view, 60, 0);
+        let foot = plain(&[out.pinned.last().unwrap().clone()])[0].clone();
+        assert!(
+            !foot.contains("l traces"),
+            "a shadowed settled dup is not descendable: {foot}"
+        );
+    }
+
+    #[test]
+    fn empty_tool_use_ids_are_non_identities() {
+        // Replay shapes can carry "toolUseId": "" — it must behave exactly
+        // like a missing id: display-only, never deduped away, never a span
+        // (connector finding F2).
+        let mut t = PaneTelemetry::with_agent("claude");
+        t.card_state = CardState::Running;
+        t.tool_calls
+            .push_back(json!({"toolUseId": "", "tool": "A", "status": "done", "args": ""}));
+        t.tool_calls
+            .push_back(json!({"toolUseId": "", "tool": "B", "status": "done", "args": ""}));
+        let rendered = render_one_expanded("p1", t, None);
+        assert!(
+            rendered.trace_spans.is_empty(),
+            "empty ids export no geometry: {:?}",
+            rendered.trace_spans
+        );
+        let text: String = rendered
+            .scrollable
+            .iter()
+            .flat_map(|line| line.iter().map(|s| s.text.clone()))
+            .collect();
+        assert!(
+            text.contains('A') && text.contains('B'),
+            "both empty-id rows still render (no dedup vanishing): {text}"
         );
     }
 

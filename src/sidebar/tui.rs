@@ -13,7 +13,9 @@ use crate::sidebar::layout::{
 };
 use crate::sidebar::reducer::{apply_line, State};
 use crate::sidebar::state_stream::{Event as WireEvent, StateStream};
-use crate::sidebar::view::{Line, Rendered, Role, Semantic, ViewInput};
+use crate::sidebar::view::{
+    newest_selectable_id, selectable_call, Line, Rendered, Role, Semantic, ViewInput,
+};
 
 type DisableRawMode = fn() -> std::io::Result<()>;
 
@@ -1588,29 +1590,10 @@ fn daemon_settings_warning(live: &crate::sidebar::live::Live, running: DaemonSet
     )
 }
 
-fn selectable_call(call: &Value) -> bool {
-    call.get("toolUseId").and_then(Value::as_str).is_some()
-        && matches!(
-            call.get("status").and_then(Value::as_str),
-            Some("done") | Some("failed")
-        )
-}
-
 fn canonical_call<'a>(ring: &'a std::collections::VecDeque<Value>, id: &str) -> Option<&'a Value> {
     ring.iter()
         .rev()
         .find(|call| call.get("toolUseId").and_then(Value::as_str) == Some(id))
-}
-
-fn newest_selectable_id(ring: &std::collections::VecDeque<Value>) -> Option<String> {
-    let mut seen = std::collections::HashSet::new();
-    ring.iter().rev().find_map(|call| {
-        let id = call.get("toolUseId").and_then(Value::as_str)?;
-        if !seen.insert(id) {
-            return None;
-        }
-        selectable_call(call).then(|| id.to_string())
-    })
 }
 
 fn resolve_open_trace(
@@ -2921,6 +2904,15 @@ mod tests {
             Some("other"),
             "the shadowed dup is skipped; the next unshadowed selectable wins"
         );
+        // An empty toolUseId is a non-identity (connector finding F2): it is
+        // neither selectable nor a dedup key, so resolution can never anchor
+        // to it — matching the view's display-only treatment exactly.
+        let empty_id: std::collections::VecDeque<Value> =
+            [serde_json::json!({"toolUseId":"","status":"done"})]
+                .into_iter()
+                .collect();
+        assert!(!selectable_call(&empty_id[0]));
+        assert_eq!(newest_selectable_id(&empty_id), None);
         let empty: std::collections::VecDeque<Value> = [
             serde_json::json!({"status":"done"}),
             serde_json::json!({"toolUseId":"r","status":"running"}),
