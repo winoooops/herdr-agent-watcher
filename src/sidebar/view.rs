@@ -1009,7 +1009,17 @@ pub fn render(
         };
         pinned.push(vec![Span::label(text)]);
     }
-    pinned.push(footer(width));
+    let zone = if view.trace_focus.is_some() {
+        FooterZone::Traces
+    } else if view
+        .cursor
+        .is_some_and(|c| trace_spans.iter().any(|(card, ..)| card == c))
+    {
+        FooterZone::CardsDescendable
+    } else {
+        FooterZone::Cards
+    };
+    pinned.push(footer(width, zone));
 
     crate::sidebar::style::Rendered {
         scrollable,
@@ -1063,16 +1073,47 @@ fn stale_notice(daemon: &str, width: u16) -> String {
     }
 }
 
-fn footer(width: u16) -> Line {
-    // `x` first among the ones that drop: a panel layer nothing points at is
-    // a panel layer nobody finds. The order here is the order they survive
-    // narrowing, so this keeps `x` longer than `idle`.
-    let hints = [
-        ("j/k", "move"),
-        ("o/↵", "expand"),
-        ("x", "menu"),
-        ("z", "idle"),
-    ];
+/// Which dialect the key footer speaks: the hints name what the keys do
+/// RIGHT NOW, so the bar doubles as a zone indicator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FooterZone {
+    /// Card list, cursor not on a descendable card (or no cursor).
+    Cards,
+    /// Card list, cursor on an expanded card with ≥1 selectable trace —
+    /// exactly the state where `l` acts, so only here does it advertise.
+    CardsDescendable,
+    /// Inside a card's traces.
+    Traces,
+}
+
+fn footer(width: u16, zone: FooterZone) -> Line {
+    // The order here is the order they survive narrowing (drop from the
+    // right). `x` outlives `z`: a panel layer nothing points at is a panel
+    // layer nobody finds. `l traces` outlives `x` in its zone: it is primary
+    // navigation for the card under the cursor, and the hint only exists
+    // while descending actually works.
+    let hints: &[(&str, &str)] = match zone {
+        FooterZone::Cards => &[
+            ("j/k", "move"),
+            ("o/↵", "expand"),
+            ("x", "menu"),
+            ("z", "idle"),
+        ],
+        FooterZone::CardsDescendable => &[
+            ("j/k", "move"),
+            ("o/↵", "expand"),
+            ("l", "traces"),
+            ("x", "menu"),
+            ("z", "idle"),
+        ],
+        FooterZone::Traces => &[
+            ("j/k", "move"),
+            ("o/↵", "open"),
+            ("h", "back"),
+            ("x", "menu"),
+            ("z", "idle"),
+        ],
+    };
     let cost = |keep: usize| -> usize {
         if keep == 0 {
             return 3;
@@ -2538,15 +2579,118 @@ mod tests {
     #[test]
     fn the_footer_reads_exactly_as_specified_and_drops_from_the_end() {
         assert_eq!(
-            plain(&[footer(60)])[0],
+            plain(&[footer(60, FooterZone::Cards)])[0],
             "── j/k move · o/↵ expand · x menu · z idle"
         );
         // `x menu` outlives `z idle` as the frame narrows: a panel layer
         // nothing points at is a panel layer nobody finds, whereas `z` is
         // discoverable from the `?` sheet once you know `x`.
-        assert_eq!(plain(&[footer(34)])[0], "── j/k move · o/↵ expand · x menu");
-        assert_eq!(plain(&[footer(30)])[0], "── j/k move · o/↵ expand");
-        assert_eq!(plain(&[footer(12)])[0], "── j/k move");
+        assert_eq!(
+            plain(&[footer(34, FooterZone::Cards)])[0],
+            "── j/k move · o/↵ expand · x menu"
+        );
+        assert_eq!(
+            plain(&[footer(30, FooterZone::Cards)])[0],
+            "── j/k move · o/↵ expand"
+        );
+        assert_eq!(plain(&[footer(12, FooterZone::Cards)])[0], "── j/k move");
+    }
+
+    #[test]
+    fn the_footer_advertises_l_only_over_a_descendable_card() {
+        assert_eq!(
+            plain(&[footer(60, FooterZone::CardsDescendable)])[0],
+            "── j/k move · o/↵ expand · l traces · x menu · z idle"
+        );
+        // `l traces` outlives `x menu` in the narrowing order: it is primary
+        // navigation for the card under the cursor, and this footer state
+        // exists only while that card can actually be descended into.
+        assert_eq!(
+            plain(&[footer(45, FooterZone::CardsDescendable)])[0],
+            "── j/k move · o/↵ expand · l traces · x menu"
+        );
+        assert_eq!(
+            plain(&[footer(38, FooterZone::CardsDescendable)])[0],
+            "── j/k move · o/↵ expand · l traces"
+        );
+        assert_eq!(
+            plain(&[footer(28, FooterZone::CardsDescendable)])[0],
+            "── j/k move · o/↵ expand"
+        );
+    }
+
+    #[test]
+    fn the_footer_speaks_the_trace_zone_dialect_while_focused() {
+        assert_eq!(
+            plain(&[footer(60, FooterZone::Traces)])[0],
+            "── j/k move · o/↵ open · h back · x menu · z idle"
+        );
+        assert_eq!(
+            plain(&[footer(40, FooterZone::Traces)])[0],
+            "── j/k move · o/↵ open · h back · x menu"
+        );
+        assert_eq!(
+            plain(&[footer(32, FooterZone::Traces)])[0],
+            "── j/k move · o/↵ open · h back"
+        );
+    }
+
+    #[test]
+    fn render_picks_the_footer_zone_from_focus_and_descendability() {
+        let mut t = PaneTelemetry::with_agent("claude");
+        t.card_state = CardState::Running;
+        t.tool_calls.push_back(json!({
+            "toolUseId": "t1", "tool": "Bash", "status": "done",
+            "args": "ls", "timestamp": "2026-09-01T10:00:00.000Z",
+        }));
+        let mut state = crate::sidebar::reducer::State::default();
+        state.panes.insert("p1".into(), t);
+        let app = appearances();
+        let toggled: std::collections::HashSet<String> = ["p1".to_string()].into();
+        let base = ViewInput {
+            cursor: Some("p1"),
+            toggled: &toggled,
+            hide_idle: false,
+            scope: None,
+            sort: crate::sidebar::select::Sort::Position,
+            auto_expand: crate::sidebar::config::AutoExpand::None,
+            agent_mark: AgentMark::Dot,
+            tool_calls: crate::sidebar::config::ToolCallStyle::Bars,
+            plan_usage: true,
+            theme: crate::sidebar::config::Theme::Inherit,
+            trace_lines: 5,
+            agents: &app,
+            config: crate::sidebar::style::ConfigStatus {
+                problems: 0,
+                log_written: false,
+            },
+            stale: None,
+            trace_focus: None,
+        };
+        // Cursor on an expanded, traced card: the l hint appears.
+        let out = render(&state, &base, 60, 0);
+        let foot = plain(&[out.pinned.last().unwrap().clone()])[0].clone();
+        assert!(
+            foot.contains("l traces"),
+            "descendable card advertises l: {foot}"
+        );
+        // Trace zone: the dialect flips.
+        let focused = ViewInput {
+            trace_focus: Some(("p1", "t1")),
+            ..base.clone()
+        };
+        let out = render(&state, &focused, 60, 0);
+        let foot = plain(&[out.pinned.last().unwrap().clone()])[0].clone();
+        assert!(foot.contains("h back"), "trace zone advertises h: {foot}");
+        assert!(!foot.contains("l traces"));
+        // Cursor elsewhere (no cursor): plain card footer.
+        let bare = ViewInput {
+            cursor: None,
+            ..base.clone()
+        };
+        let out = render(&state, &bare, 60, 0);
+        let foot = plain(&[out.pinned.last().unwrap().clone()])[0].clone();
+        assert!(!foot.contains("l traces"), "no cursor, no l hint: {foot}");
     }
 
     #[test]

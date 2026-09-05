@@ -262,6 +262,14 @@ table gains an optional **initial trace-focus seed** per case, and
 active rather than sheet-only decoration. The `o / ↵` description widens
 to "expand a card, or open the selected trace".
 
+**Key footer (zone-aware, added post-verification at Will's request).**
+The pinned footer speaks the active zone's dialect so it doubles as a
+zone indicator: card zone shows the existing hints; when the cursor sits
+on an expanded card with ≥1 selectable trace — exactly the state where
+`l` acts — it gains `l traces` (which outlives `x menu` in the
+narrowing order); inside the trace zone it reads
+`j/k move · o/↵ open · h back · x menu · z idle`.
+
 **Mouse hint trailer** (v0.2.5) updates to: label `mouse (when on)`,
 value `click selects · header toggles · trace re-click opens · wheel
 scrolls` — and the v0.2.5 test that asserts the exact trailer string
@@ -368,4 +376,4 @@ degrades to selection-only; snapshot fallbacks (`?`, `—`, omitted
 segments) for malformed metadata, with non-settled-status rows proven
 display-only end to end.
 
-<!-- codex-reviewed: 2026-09-04T09:40:20Z -->
+<!-- codex-reviewed: 2026-09-05T02:39:56Z -->
