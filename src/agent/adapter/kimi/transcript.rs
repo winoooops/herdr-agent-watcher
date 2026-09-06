@@ -1414,6 +1414,7 @@ mod tests {
             0,
             std::time::SystemTime::UNIX_EPOCH,
             None,
+            None,
         ))
     }
 
@@ -1728,6 +1729,7 @@ mod tests {
             kimi_home.path().to_path_buf(),
             4242,
             SystemTime::UNIX_EPOCH,
+            None,
             None,
         ));
         let located = locator.locate(work.path(), "pty").expect("initial locate");

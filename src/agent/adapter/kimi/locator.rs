@@ -3,6 +3,11 @@
 //! Resolves the attach cwd to a `wire.jsonl` for the DETECTED kimi
 //! process, in priority order:
 //!
+//! 0. reported session id: exact `session_index.jsonl` `sessionId` match,
+//!    then a bounded one-level scan of `sessions/wd_*/<session_id>` when the
+//!    index has no row. Both require a trusted session directory and existing
+//!    main wire. When Herdr reports an id, a miss is authoritative and returns
+//!    a retryable error; inference steps 1–4 are only for legacy callers.
 //! 1. proc-fd (Linux): if a wire flush is in progress, read the kimi process's
 //!    open `agents/main/wire.jsonl` from `<proc_root>/<pid>/fd/*`, keep trusted
 //!    main-wire candidates, and choose the most recently active one. Kimi may
@@ -99,6 +104,8 @@ pub(crate) struct KimiLocator {
     // `Some("/proc")` on Linux (or a tempdir in tests); `None` on macOS,
     // where the proc-fd / proc-environ fast-paths skip themselves.
     proc_root: Option<PathBuf>,
+    // Herdr's agent session id. `None` preserves legacy cwd/process inference.
+    reported_session: Option<String>,
     // The session dir of the LAST successful `locate`, shared with the
     // decoder (same Arc) so it can read sibling `agents/agent-*` wires.
     resolved_session_dir: Arc<Mutex<Option<PathBuf>>>,
@@ -156,8 +163,16 @@ impl KimiLocator {
         agent_pid: u32,
         pty_start: SystemTime,
         proc_root: Option<PathBuf>,
+        reported_session: Option<String>,
     ) -> Self {
-        Self::with_proc_env_home(kimi_home, agent_pid, pty_start, proc_root, true)
+        Self::with_proc_env_home(
+            kimi_home,
+            agent_pid,
+            pty_start,
+            proc_root,
+            true,
+            reported_session,
+        )
     }
 
     pub(crate) fn with_proc_env_home(
@@ -166,6 +181,7 @@ impl KimiLocator {
         pty_start: SystemTime,
         proc_root: Option<PathBuf>,
         honor_proc_env_home: bool,
+        reported_session: Option<String>,
     ) -> Self {
         let kimi_home = if honor_proc_env_home {
             proc_root
@@ -183,6 +199,7 @@ impl KimiLocator {
             agent_pid,
             pty_start,
             proc_root,
+            reported_session,
             resolved_session_dir: Arc::new(Mutex::new(None)),
             resolved_cwd: Arc::new(Mutex::new(None)),
             usage: Arc::new(Mutex::new(UsageState::default())),
@@ -326,6 +343,86 @@ impl KimiLocator {
         home.join("session_index.jsonl")
     }
 
+    /// Resolve the Herdr-reported session id before inferring ownership from
+    /// cwd or process timing. An indexed id is authoritative only when its
+    /// session directory remains trusted and its main wire exists; only a
+    /// genuinely absent index row permits the bounded bucket scan.
+    fn try_resolve_by_session_id(
+        &self,
+        home: &Path,
+        session_id: &str,
+    ) -> Option<LocatedStatusSource> {
+        if session_id.is_empty() {
+            return None;
+        }
+
+        let resolve = |session_dir: &Path| {
+            let session_dir = session_dir.to_str()?;
+            if !path_under(session_dir, home) {
+                return None;
+            }
+            let status_path = PathBuf::from(session_dir)
+                .join("agents")
+                .join("main")
+                .join("wire.jsonl");
+            if !status_path.exists() {
+                return None;
+            }
+            Some(LocatedStatusSource {
+                static_transcript_hint: status_path.to_str().map(str::to_owned),
+                status_path,
+                trust_root: home.to_path_buf(),
+                agent_session_id: Some(session_id.to_owned()),
+                resolved_directory: None,
+            })
+        };
+
+        let mut index_has_match = false;
+        if let Ok(raw) = std::fs::read_to_string(self.session_index_path(home)) {
+            for line in raw.lines() {
+                let Ok(entry) = serde_json::from_str::<SessionIndexEntry>(line.trim()) else {
+                    continue;
+                };
+                if entry.session_id.as_deref() != Some(session_id) {
+                    continue;
+                }
+                index_has_match = true;
+                if let Some(located) = entry
+                    .session_dir
+                    .as_deref()
+                    .and_then(|session_dir| resolve(Path::new(session_dir)))
+                {
+                    return Some(located);
+                }
+            }
+        }
+        if index_has_match {
+            return None;
+        }
+
+        let buckets = std::fs::read_dir(home.join("sessions")).ok()?;
+        for bucket in buckets
+            .flatten()
+            .filter(|bucket| {
+                bucket.path().is_dir()
+                    && bucket
+                        .file_name()
+                        .to_str()
+                        .is_some_and(|name| name.starts_with("wd_"))
+            })
+            .take(MAX_RECOVERY_PATHS)
+        {
+            let bucket_path = bucket.path();
+            let session_dir = bucket_path.join(session_id);
+            if session_dir.is_dir() {
+                if let Some(located) = resolve(&session_dir) {
+                    return Some(located);
+                }
+            }
+        }
+        None
+    }
+
     /// The detected kimi process's actual cwd (`/proc/<pid>/cwd`) when available —
     /// authoritative because kimi derives its session workDir from its own cwd, and
     /// the PTY-supplied cwd can be the stale spawn-time cwd. Falls back to `passed`
@@ -342,17 +439,20 @@ impl KimiLocator {
     /// Re-run the locator for the cwd discovered during the initial attach.
     ///
     /// Kimi can create the real `session_*` after the PTY process is already
-    /// attached, so the transcript supervisor uses this to move from an older
-    /// same-cwd session to the one that actually starts receiving main-agent
-    /// writes. OS-specific details stay inside the locator: proc-fd wins on
-    /// Linux, while macOS/no-proc falls back through index/activity ranking.
+    /// attached, so the transcript supervisor retries the reported id without
+    /// re-inferring another session. Legacy locators without a reported id
+    /// retain the proc-fd/index/bucket refresh chain.
     pub(crate) fn refresh_located_source(&self) -> Option<LocatedStatusSource> {
         let cwd = self.resolved_cwd()?;
         let home = self.effective_home();
-        self.try_resolve_from_proc_fds(&home)
-            .or_else(|| self.try_resolve_from_index(&home, &cwd))
-            .or_else(|| self.try_resolve_fallback(&home, &cwd))
-            .map(|located| self.remember(located))
+        let located = match self.reported_session.as_deref() {
+            Some(session_id) => self.try_resolve_by_session_id(&home, session_id),
+            None => self
+                .try_resolve_from_proc_fds(&home)
+                .or_else(|| self.try_resolve_from_index(&home, &cwd))
+                .or_else(|| self.try_resolve_fallback(&home, &cwd)),
+        };
+        located.map(|located| self.remember(located))
     }
 
     /// Wall-clock start time of the detected kimi process, from
@@ -714,6 +814,30 @@ impl StatusSourceLocator for KimiLocator {
         let cwd = self.process_cwd(cwd);
         *self.resolved_cwd.lock().expect("resolved_cwd lock") = Some(cwd.clone());
         kdbg(&format!("LOCATE process_cwd={}", cwd.display()));
+
+        if let Some(session_id) = self.reported_session.as_deref() {
+            let by_session_id = self.try_resolve_by_session_id(&home, session_id);
+            kdbg(&format!(
+                "LOCATE reported_session={} => {}",
+                session_id,
+                if by_session_id.is_some() {
+                    "hit"
+                } else {
+                    "miss"
+                }
+            ));
+            if let Some(located) = by_session_id {
+                kdbg(&format!(
+                    "LOCATE => OK status_path={} sid={:?}",
+                    located.status_path.display(),
+                    located.agent_session_id
+                ));
+                return Ok(self.remember(located));
+            }
+            let err = format!("kimi locator: reported session {session_id} not on disk yet");
+            kdbg(&format!("LOCATE => ERR {err}"));
+            return Err(err);
+        }
 
         // proc-fd is authoritative and unambiguous — try it first.
         let proc_fd = self.try_resolve_from_proc_fds(&home);
@@ -1140,7 +1264,7 @@ mod tests {
     }
 
     fn locator_with(kimi_home: &Path, pid: u32, pty_start: SystemTime) -> KimiLocator {
-        KimiLocator::new(kimi_home.to_path_buf(), pid, pty_start, None)
+        KimiLocator::new(kimi_home.to_path_buf(), pid, pty_start, None, None)
     }
 
     fn locator_with_proc(
@@ -1154,6 +1278,23 @@ mod tests {
             pid,
             pty_start,
             Some(proc_root.to_path_buf()),
+            None,
+        )
+    }
+
+    fn locator_with_reported(
+        kimi_home: &Path,
+        pid: u32,
+        pty_start: SystemTime,
+        proc_root: &Path,
+        reported_session: &str,
+    ) -> KimiLocator {
+        KimiLocator::new(
+            kimi_home.to_path_buf(),
+            pid,
+            pty_start,
+            Some(proc_root.to_path_buf()),
+            Some(reported_session.to_string()),
         )
     }
 
@@ -1921,6 +2062,230 @@ mod tests {
         );
     }
 
+    #[test]
+    fn the_reported_session_id_wins_over_inference() {
+        let kimi_home = tempfile::tempdir().expect("kimi home");
+        let work = tempfile::tempdir().expect("work dir");
+        let proc_root = tempfile::tempdir().expect("proc root");
+        let pid = 4242u32;
+        let hz = clock_ticks_per_sec();
+        let btime = 1_700_000_000u64;
+        let process_start_ms = (btime + 50) * 1000;
+        write_proc_btime(proc_root.path(), btime);
+        write_proc_stat(proc_root.path(), pid, 50 * hz);
+
+        let near_dir = session_under(kimi_home.path(), "wd_a", "session_near");
+        write_wire_created(&near_dir, process_start_ms);
+        let far_dir = session_under(kimi_home.path(), "wd_a", "session_far");
+        let far_wire = write_wire_created(&far_dir, process_start_ms + 5 * 60 * 1000);
+        write_index(
+            kimi_home.path(),
+            &[
+                ("session_near", &near_dir, work.path()),
+                ("session_far", &far_dir, work.path()),
+            ],
+        );
+
+        let locator = locator_with_reported(
+            kimi_home.path(),
+            pid,
+            SystemTime::now(),
+            proc_root.path(),
+            "session_far",
+        );
+        let located = locator
+            .locate(work.path(), "pane-id")
+            .expect("reported session resolves");
+        assert_eq!(located.status_path, far_wire);
+        assert_eq!(located.agent_session_id.as_deref(), Some("session_far"));
+    }
+
+    #[test]
+    fn two_processes_sharing_a_cwd_bind_their_own_sessions() {
+        let kimi_home = tempfile::tempdir().expect("kimi home");
+        let work = tempfile::tempdir().expect("work dir");
+        let proc_root = tempfile::tempdir().expect("proc root");
+        let hz = clock_ticks_per_sec();
+        let btime = 1_700_000_000u64;
+        let process_a_start_ms = (btime + 50) * 1000;
+        let process_b_start_ms = (btime + 100) * 1000;
+        write_proc_btime(proc_root.path(), btime);
+        write_proc_stat(proc_root.path(), 4242, 50 * hz);
+        write_proc_stat(proc_root.path(), 4343, 100 * hz);
+
+        let bucket = kimi_home
+            .path()
+            .join("sessions")
+            .join(bucket_for(work.path()));
+        let session_a_dir = bucket.join("session_a");
+        let session_a_wire = write_wire_created(&session_a_dir, process_a_start_ms + 5 * 60 * 1000);
+        let session_b_dir = bucket.join("session_b");
+        let session_b_wire = write_wire_created(&session_b_dir, process_b_start_ms);
+        write_index(
+            kimi_home.path(),
+            &[("session_b", &session_b_dir, work.path())],
+        );
+
+        let locator_b = locator_with_reported(
+            kimi_home.path(),
+            4343,
+            SystemTime::now(),
+            proc_root.path(),
+            "session_b",
+        );
+        let located_b = locator_b
+            .locate(work.path(), "pane-b")
+            .expect("process B session resolves");
+        assert_eq!(located_b.status_path, session_b_wire);
+
+        let locator_a = locator_with_reported(
+            kimi_home.path(),
+            4242,
+            SystemTime::now(),
+            proc_root.path(),
+            "session_a",
+        );
+        let located_a = locator_a
+            .locate(work.path(), "pane-a")
+            .expect("process A session resolves");
+        assert_eq!(located_a.status_path, session_a_wire);
+    }
+
+    #[test]
+    fn a_reported_id_missing_from_disk_errs() {
+        let kimi_home = tempfile::tempdir().expect("kimi home");
+        let work = tempfile::tempdir().expect("work dir");
+        let proc_root = tempfile::tempdir().expect("proc root");
+        let pid = 4242u32;
+        let hz = clock_ticks_per_sec();
+        let btime = 1_700_000_000u64;
+        let process_start_ms = (btime + 50) * 1000;
+        write_proc_btime(proc_root.path(), btime);
+        write_proc_stat(proc_root.path(), pid, 50 * hz);
+
+        let session_dir = session_under(kimi_home.path(), "wd_a", "session_lazy");
+        write_wire_created(&session_dir, process_start_ms + 5 * 60 * 1000);
+        write_index(
+            kimi_home.path(),
+            &[("session_lazy", &session_dir, work.path())],
+        );
+
+        let locator = locator_with_reported(
+            kimi_home.path(),
+            pid,
+            SystemTime::now(),
+            proc_root.path(),
+            "session_ghost",
+        );
+        let error = locator
+            .locate(work.path(), "pane-id")
+            .expect_err("reported id miss must not infer another session");
+        assert_eq!(
+            error,
+            "kimi locator: reported session session_ghost not on disk yet"
+        );
+    }
+
+    #[test]
+    fn a_legacy_caller_without_a_reported_id_still_infers() {
+        let kimi_home = tempfile::tempdir().expect("kimi home");
+        let work = tempfile::tempdir().expect("work dir");
+        let proc_root = tempfile::tempdir().expect("proc root");
+        let pid = 4242u32;
+        let hz = clock_ticks_per_sec();
+        let btime = 1_700_000_000u64;
+        let process_start_ms = (btime + 50) * 1000;
+        write_proc_btime(proc_root.path(), btime);
+        write_proc_stat(proc_root.path(), pid, 50 * hz);
+
+        let session_dir = session_under(kimi_home.path(), "wd_a", "session_lazy");
+        let wire = write_wire_created(&session_dir, process_start_ms + 5 * 60 * 1000);
+        write_index(
+            kimi_home.path(),
+            &[("session_lazy", &session_dir, work.path())],
+        );
+
+        let locator = locator_with_proc(kimi_home.path(), pid, SystemTime::now(), proc_root.path());
+        let located = locator
+            .locate(work.path(), "pane-id")
+            .expect("legacy caller infers the lazy session");
+        assert_eq!(located.status_path, wire);
+        assert_eq!(located.agent_session_id.as_deref(), Some("session_lazy"));
+    }
+
+    #[test]
+    fn the_refresh_path_keeps_the_reported_session() {
+        let kimi_home = tempfile::tempdir().expect("kimi home");
+        let work = tempfile::tempdir().expect("work dir");
+        let proc_root = tempfile::tempdir().expect("proc root");
+        let pid = 4242u32;
+        let hz = clock_ticks_per_sec();
+        let btime = 1_700_000_000u64;
+        let process_start_ms = (btime + 50) * 1000;
+        write_proc_btime(proc_root.path(), btime);
+        write_proc_stat(proc_root.path(), pid, 50 * hz);
+
+        let session_a_dir = session_under(kimi_home.path(), "wd_a", "session_a");
+        let session_a_wire = write_wire_created(&session_a_dir, process_start_ms + 5 * 60 * 1000);
+        let session_b_dir = session_under(kimi_home.path(), "wd_a", "session_b");
+        write_wire_created(&session_b_dir, process_start_ms);
+        write_index(
+            kimi_home.path(),
+            &[
+                ("session_a", &session_a_dir, work.path()),
+                ("session_b", &session_b_dir, work.path()),
+            ],
+        );
+
+        let locator = locator_with_reported(
+            kimi_home.path(),
+            pid,
+            SystemTime::now(),
+            proc_root.path(),
+            "session_a",
+        );
+        let initial = locator
+            .locate(work.path(), "pane-id")
+            .expect("reported session resolves initially");
+        assert_eq!(initial.status_path, session_a_wire);
+
+        let refreshed = locator
+            .refresh_located_source()
+            .expect("reported session remains on disk");
+        assert_eq!(refreshed.status_path, session_a_wire);
+
+        std::fs::remove_dir_all(&session_a_dir).expect("remove reported session");
+        assert!(
+            locator.refresh_located_source().is_none(),
+            "missing reported session must keep the current source"
+        );
+    }
+
+    #[test]
+    fn a_session_id_match_outside_the_home_is_rejected() {
+        let kimi_home = tempfile::tempdir().expect("kimi home");
+        let outside = tempfile::tempdir().expect("outside home");
+        let work = tempfile::tempdir().expect("work dir");
+        let outside_dir = session_under(outside.path(), "wd_a", "session_escape");
+        write_wire(&outside_dir);
+        write_index(
+            kimi_home.path(),
+            &[("session_escape", &outside_dir, work.path())],
+        );
+
+        let locator = KimiLocator::new(
+            kimi_home.path().to_path_buf(),
+            4242,
+            SystemTime::now(),
+            None,
+            Some("session_escape".to_string()),
+        );
+        assert!(
+            locator.locate(work.path(), "pane-id").is_err(),
+            "reported id must not bypass the kimi-home trust boundary"
+        );
+    }
+
     /// `sha256("/home/will/projects/vimeflow")[:12]` sanity anchor.
     #[test]
     fn cwd_bucket_name_hex_matches_known_sha() {
@@ -2264,6 +2629,7 @@ mod tests {
             kimi_home.path().to_path_buf(),
             4242,
             SystemTime::now() - Duration::from_secs(60),
+            None,
             None,
         );
         let located = locator.locate(work.path(), "pty-1").expect("index binds");

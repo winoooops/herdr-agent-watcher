@@ -195,6 +195,7 @@ mod adapter_tests {
             0,
             std::time::SystemTime::UNIX_EPOCH,
             None,
+            None,
         )))
     }
 
@@ -318,6 +319,7 @@ mod adapter_tests {
             pid,
             std::time::SystemTime::UNIX_EPOCH,
             Some(proc_root.path().to_path_buf()),
+            None,
         )));
         std::fs::remove_file(proc_root.path().join(pid.to_string()).join("environ"))
             .expect("remove process environ after attach");

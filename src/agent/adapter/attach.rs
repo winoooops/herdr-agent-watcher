@@ -50,6 +50,9 @@ use crate::terminal::PtyState;
 pub(crate) struct AttachContext {
     /// Vimeflow PTY session id.
     pub(crate) session_id: String,
+    /// Agent session id reported by Herdr, when available. This is distinct
+    /// from the PTY/pane id above and is currently consumed by Kimi only.
+    pub(crate) reported_session: Option<String>,
     /// CWD known at attach time. SNAPSHOT — see module-level note.
     pub(crate) initial_cwd: PathBuf,
     /// PID of the shell process the agent runs under.
@@ -159,6 +162,7 @@ mod tests {
     fn attach_context_holds_all_attach_facts() {
         let attach = AttachContext {
             session_id: "sid-1".to_string(),
+            reported_session: Some("agent-sid-1".to_string()),
             initial_cwd: PathBuf::from("/workspace"),
             shell_pid: 100,
             agent_pid: 200,
@@ -171,6 +175,7 @@ mod tests {
         };
 
         assert_eq!(attach.session_id, "sid-1");
+        assert_eq!(attach.reported_session.as_deref(), Some("agent-sid-1"));
         assert_eq!(attach.initial_cwd, PathBuf::from("/workspace"));
         assert_eq!(attach.shell_pid, 100);
         assert_eq!(attach.agent_pid, 200);
@@ -192,6 +197,7 @@ mod tests {
     fn attach_context_is_clone() {
         let original = AttachContext {
             session_id: "sid".to_string(),
+            reported_session: None,
             initial_cwd: PathBuf::from("/ws"),
             shell_pid: 1,
             agent_pid: 2,
@@ -219,6 +225,7 @@ mod tests {
     fn agent_type_is_copy() {
         let attach = AttachContext {
             session_id: "sid".to_string(),
+            reported_session: None,
             initial_cwd: PathBuf::from("/ws"),
             shell_pid: 1,
             agent_pid: 2,
