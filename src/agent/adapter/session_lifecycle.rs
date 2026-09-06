@@ -6,9 +6,9 @@
 //! `TranscriptState`, `Arc<dyn EventSink>`) and exposes the two
 //! lifecycle verbs the IPC layer needs:
 //!
-//! - `start(session_id, app_data_dir)` — resolve the [`AttachContext`] from
-//!   live `PtyState`, build the typed [`AgentBindings`], and run the verb
-//!   sequence on the blocking pool.
+//! - `start(session_id, reported_session, app_data_dir)` — resolve the
+//!   [`AttachContext`] from live `PtyState`, build the typed [`AgentBindings`],
+//!   and run the verb sequence on the blocking pool.
 //! - `stop(session_id)` — remove the session's watcher from
 //!   `AgentWatcherState` (its `Drop` cascades the transcript-tail
 //!   teardown).
@@ -72,6 +72,7 @@ mod tests {
     fn make_attach_ctx(cwd: &std::path::Path) -> AttachContext {
         AttachContext {
             session_id: "test-sess".to_string(),
+            reported_session: None,
             initial_cwd: cwd.to_path_buf(),
             shell_pid: 1,
             agent_pid: 2,
@@ -166,7 +167,7 @@ mod tests {
         );
 
         let attach = lifecycle
-            .resolve_attach(&sid, app_data.path(), None, |_pid| {
+            .resolve_attach(&sid, None, app_data.path(), None, |_pid| {
                 Some((AgentType::Codex, 4242))
             })
             .expect("resolve_attach");
@@ -187,6 +188,7 @@ mod tests {
     fn t_verb_bind_services() {
         let ctx = AttachContext {
             session_id: "pty-codex".to_string(),
+            reported_session: None,
             initial_cwd: PathBuf::from("/tmp/ws"),
             shell_pid: 1,
             agent_pid: 12345,
@@ -216,6 +218,7 @@ mod tests {
         let sid = "test-sess".to_string();
         let ctx = AttachContext {
             session_id: sid.clone(),
+            reported_session: None,
             initial_cwd: tmp.path().to_path_buf(),
             shell_pid: 1,
             agent_pid: 2,
@@ -268,6 +271,7 @@ mod tests {
         let spec = crate::agent::config::spec_for(AgentType::Kimi);
         let ctx = AttachContext {
             session_id: sid.clone(),
+            reported_session: None,
             initial_cwd: PathBuf::from(&stale_cwd),
             shell_pid: 1,
             agent_pid,
@@ -465,6 +469,7 @@ mod tests {
 
         let ctx = AttachContext {
             session_id: sid.clone(),
+            reported_session: None,
             initial_cwd: tmp.path().to_path_buf(),
             shell_pid: 1,
             agent_pid: 2,
@@ -814,6 +819,7 @@ impl SessionLifecycle {
     fn resolve_attach<F>(
         &self,
         sid: &SessionId,
+        reported_session: Option<String>,
         app_data_dir: &Path,
         provider_home_override: Option<PathBuf>,
         detect: F,
@@ -825,6 +831,7 @@ impl SessionLifecycle {
             &self.pty_state,
             app_data_dir,
             sid,
+            reported_session,
             provider_home_override,
             detect,
         )
@@ -968,12 +975,14 @@ impl SessionLifecycle {
     pub(crate) async fn start(
         &self,
         session_id: String,
+        reported_session: Option<String>,
         app_data_dir: PathBuf,
         provider_home_override: Option<PathBuf>,
     ) -> Result<bool, String> {
         crate::debug::debug_log("agent-attach", &format!("start session={}", session_id));
         let attach = match self.resolve_attach(
             &session_id,
+            reported_session,
             &app_data_dir,
             provider_home_override,
             |shell_pid| {

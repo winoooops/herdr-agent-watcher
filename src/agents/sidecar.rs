@@ -130,6 +130,7 @@ impl AgentAdapter for SidecarAdapter {
         );
         self.seed_claude_status(&pane)?;
         self.seed_opencode_index(&pane)?;
+        let reported_session = (!pane.agent_session.is_empty()).then(|| pane.agent_session.clone());
         self.runtime.block_on(adapter::start_agent_watcher_inner(
             self.pty_state.clone(),
             self.watcher_state.clone(),
@@ -137,6 +138,7 @@ impl AgentAdapter for SidecarAdapter {
             self.events.clone(),
             self.app_data_dir.clone(),
             pane.pane_id.clone(),
+            reported_session,
             None,
         ))?;
         let agent_type = self

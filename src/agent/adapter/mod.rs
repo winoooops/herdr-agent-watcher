@@ -230,6 +230,7 @@ impl AgentAdapter for NoOpAdapter {
 }
 
 /// Start watching an agent status source for a PTY session.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn start_agent_watcher_inner(
     pty_state: PtyState,
     watcher_state: AgentWatcherState,
@@ -237,6 +238,7 @@ pub(crate) async fn start_agent_watcher_inner(
     events: Arc<dyn EventSink>,
     app_data_dir: PathBuf,
     session_id: String,
+    reported_session: Option<String>,
     provider_home_override: Option<PathBuf>,
 ) -> Result<bool, String> {
     // Step F.5: delegate to `SessionLifecycle`. The service owns the
@@ -247,7 +249,12 @@ pub(crate) async fn start_agent_watcher_inner(
     // trust boundary and inlined orchestration; PR #302 cycle 3 docs
     // refresh).
     session_lifecycle::SessionLifecycle::new(pty_state, watcher_state, transcript_state, events)
-        .start(session_id, app_data_dir, provider_home_override)
+        .start(
+            session_id,
+            reported_session,
+            app_data_dir,
+            provider_home_override,
+        )
         .await
 }
 
@@ -255,6 +262,7 @@ fn resolve_bind_inputs<F>(
     pty_state: &PtyState,
     app_data_dir: &Path,
     session_id: &SessionId,
+    reported_session: Option<String>,
     provider_home_override: Option<PathBuf>,
     detect: F,
 ) -> Result<AttachContext, String>
@@ -283,6 +291,7 @@ where
 
     Ok(AttachContext {
         session_id: session_id.clone(),
+        reported_session,
         initial_cwd: PathBuf::from(cwd),
         shell_pid,
         agent_pid,
@@ -495,6 +504,7 @@ mod noop_tests {
     fn for_attach_returns_real_codex_adapter() {
         let ctx = AttachContext {
             session_id: "pty-codex".to_string(),
+            reported_session: None,
             initial_cwd: PathBuf::from("/tmp/ws"),
             shell_pid: 1,
             agent_pid: 12345,
@@ -526,7 +536,7 @@ mod noop_tests {
             .try_insert(session_id.clone(), super::make_test_session(), 64)
             .unwrap_or_else(|_| panic!("insert session"));
 
-        let attach = resolve_bind_inputs(&state, app_data.path(), &session_id, None, |_| {
+        let attach = resolve_bind_inputs(&state, app_data.path(), &session_id, None, None, |_| {
             Some((AgentType::Codex, 4242))
         })
         .expect("bind inputs");
@@ -545,13 +555,19 @@ mod noop_tests {
             .try_insert(session_id.clone(), super::make_test_session(), 64)
             .unwrap_or_else(|_| panic!("insert session"));
 
-        let attach = resolve_bind_inputs(&state, app_data.path(), &session_id, None, |_| {
-            Some((AgentType::Codex, 4242))
-        })
+        let attach = resolve_bind_inputs(
+            &state,
+            app_data.path(),
+            &session_id,
+            Some("reported-sid".to_string()),
+            None,
+            |_| Some((AgentType::Codex, 4242)),
+        )
         .expect("bind inputs");
 
         // Identity / attach facts surfaced into the typed struct.
         assert_eq!(attach.session_id, "sid-populate");
+        assert_eq!(attach.reported_session.as_deref(), Some("reported-sid"));
         assert_eq!(attach.initial_cwd, PathBuf::from("/tmp/workspace"));
         assert_eq!(attach.pty_start, SystemTime::UNIX_EPOCH);
         assert_eq!(attach.agent_pid, 4242);
@@ -583,7 +599,7 @@ mod noop_tests {
             .try_insert(session_id.clone(), super::make_test_session(), 64)
             .unwrap_or_else(|_| panic!("insert session"));
 
-        let attach = resolve_bind_inputs(&state, app_data.path(), &session_id, None, |_| {
+        let attach = resolve_bind_inputs(&state, app_data.path(), &session_id, None, None, |_| {
             Some((AgentType::Aider, 9999))
         })
         .expect("bind inputs");

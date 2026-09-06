@@ -207,6 +207,7 @@ impl AgentBindings {
                     ctx.pty_start,
                     ctx.proc_root.clone(),
                     ctx.provider_home_override.is_none(),
+                    ctx.reported_session.clone(),
                 ));
                 let locator: Arc<dyn StatusSourceLocator> = kimi_locator.clone();
                 let adapter: Arc<KimiAdapter> = Arc::new(KimiAdapter::with_locator(kimi_locator));
@@ -309,6 +310,7 @@ mod tests {
     fn claude_ctx() -> AttachContext {
         AttachContext {
             session_id: "sid".to_string(),
+            reported_session: None,
             initial_cwd: PathBuf::from("/tmp/ws"),
             shell_pid: 1,
             agent_pid: 2,
@@ -324,6 +326,7 @@ mod tests {
     fn codex_ctx(home: Option<PathBuf>) -> AttachContext {
         AttachContext {
             session_id: "sid".to_string(),
+            reported_session: None,
             initial_cwd: PathBuf::from("/tmp/ws"),
             shell_pid: 1,
             agent_pid: 2,
@@ -339,6 +342,7 @@ mod tests {
     fn kimi_ctx(home: Option<PathBuf>) -> AttachContext {
         AttachContext {
             session_id: "sid".to_string(),
+            reported_session: None,
             initial_cwd: PathBuf::from("/tmp/ws"),
             shell_pid: 1,
             agent_pid: 2,
@@ -354,6 +358,7 @@ mod tests {
     fn opencode_ctx(home: Option<PathBuf>) -> AttachContext {
         AttachContext {
             session_id: "sid".to_string(),
+            reported_session: None,
             initial_cwd: PathBuf::from("/tmp/ws"),
             shell_pid: 1,
             agent_pid: 2,
@@ -388,6 +393,7 @@ mod tests {
     fn aider_ctx() -> AttachContext {
         AttachContext {
             session_id: "sid".to_string(),
+            reported_session: None,
             initial_cwd: PathBuf::from("/tmp/ws"),
             shell_pid: 1,
             agent_pid: 2,
@@ -647,6 +653,44 @@ mod tests {
         assert_eq!(
             located.agent_session_id.as_deref(),
             Some("session_override")
+        );
+    }
+
+    #[test]
+    fn the_reported_session_reaches_the_locator_from_bindings() {
+        let kimi_home = tempfile::tempdir().expect("kimi home");
+        let work = tempfile::tempdir().expect("work dir");
+        let reported_dir = kimi_home.path().join("sessions/wd_x/session_reported");
+        let other_dir = kimi_home.path().join("sessions/wd_x/session_other");
+        for session_dir in [&reported_dir, &other_dir] {
+            let wire = session_dir.join("agents/main/wire.jsonl");
+            std::fs::create_dir_all(wire.parent().expect("wire parent")).expect("mkdir wire");
+            std::fs::write(wire, b"{\"type\":\"metadata\"}\n").expect("write wire");
+        }
+        std::fs::write(
+            kimi_home.path().join("session_index.jsonl"),
+            format!(
+                "{{\"sessionId\":\"session_reported\",\"sessionDir\":\"{}\",\"workDir\":\"{}\"}}\n{{\"sessionId\":\"session_other\",\"sessionDir\":\"{}\",\"workDir\":\"{}\"}}\n",
+                reported_dir.display(),
+                work.path().display(),
+                other_dir.display(),
+                work.path().display(),
+            ),
+        )
+        .expect("write index");
+
+        let mut ctx = kimi_ctx(None);
+        ctx.provider_home_override = Some(kimi_home.path().to_path_buf());
+        ctx.reported_session = Some("session_reported".to_string());
+        let bindings = AgentBindings::for_attach(&ctx).expect("kimi binds");
+        let located = bindings
+            .locator
+            .locate(work.path(), "pane-id")
+            .expect("reported session resolves");
+
+        assert_eq!(
+            located.agent_session_id.as_deref(),
+            Some("session_reported")
         );
     }
 
