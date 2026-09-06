@@ -22,7 +22,9 @@
 //!    later empty index row.
 //! 4. exact-bucket sha256 scan: last-resort newest `session_*` under
 //!    this cwd's `wd_<basename>_<hex>` bucket. When process start is known,
-//!    creation or resume evidence must identify its session; otherwise a
+//!    creation at or after process start (minus clock slack), or in-window
+//!    resume evidence, must identify its session. Kimi creates the session at
+//!    the first prompt, which can be minutes after process start. Otherwise a
 //!    `pty_start` mtime freshness check keeps stale same-cwd sessions out.
 //!
 //! On macOS (no `/proc`, `proc_root == None`) steps 1-2 cleanly skip and
@@ -51,14 +53,14 @@ pub(crate) fn kdbg(msg: &str) {
 pub(crate) const KIMI_BIND_RETRY_INTERVAL_MS: u64 = 100;
 pub(crate) const KIMI_BIND_RETRY_MAX_ATTEMPTS: u32 = 5;
 
-// Slack subtracted from `pty_start` before the index freshness check, so a
-// session whose wire.jsonl was created a moment before the PTY clock read
-// still counts as fresh.
+// Slack subtracted from process/PTY start for creation and mtime freshness
+// checks, so clock skew does not reject a session created a moment earlier.
+// Kimi creates the session at the first prompt, which can be minutes after
+// process start, so creation has no upper time bound.
 const KIMI_INDEX_FRESHNESS_SLACK: Duration = Duration::from_secs(3);
 
-// Upper bound of the window after the process start in which a session may
-// have been created BY this process (session creation lags the fork slightly).
-// Paired with `KIMI_INDEX_FRESHNESS_SLACK` as the lower (clock-skew) bound.
+// Upper bound only for a `session resume` diagnostic after process start;
+// session creation uses the open-ended lower bound above.
 const KIMI_OWN_WINDOW: Duration = Duration::from_secs(30);
 const KIMI_RESUME_LOG_TAIL_BYTES: u64 = 64 * 1024;
 const MAX_RECOVERY_PATHS: usize = 256;
@@ -543,12 +545,11 @@ impl KimiLocator {
         }
 
         // Per-process discriminator: when the process start is KNOWN, choose
-        // the closest evidence in the narrow ownership window. A new session
-        // provides wire `created_at`; a resumed session keeps its old creation
-        // time but emits a startup `session resume` diagnostic. The latter
-        // still works when Kimi closes wire.jsonl after each flush and proc-fd
-        // is empty. Without a platform process start, retain newest activity
-        // ranking.
+        // the closest qualifying ownership evidence. A new session provides
+        // wire `created_at`; a resumed session keeps its old creation time but
+        // emits a startup `session resume` diagnostic. The latter still works
+        // when Kimi closes wire.jsonl after each flush and proc-fd is empty.
+        // Without a platform process start, retain newest activity ranking.
         let (entry, session_dir) = match process_start {
             Some(start) => matches
                 .into_iter()
@@ -804,14 +805,14 @@ fn path_under(candidate: &str, root: &Path) -> bool {
     candidate.starts_with(root)
 }
 
-/// True when `created` falls in the window a session created by a process
-/// started at `start` would: from a touch before (clock skew) through
-/// `KIMI_OWN_WINDOW` after (creation lags the fork).
+/// True when `created` is no earlier than process start minus clock slack.
+/// Kimi creates the session at the first prompt, which can be minutes after
+/// process start, so the upper bound must remain open-ended.
 fn created_in_own_window(created: SystemTime, start: SystemTime) -> bool {
     let lower = start
         .checked_sub(KIMI_INDEX_FRESHNESS_SLACK)
         .unwrap_or(start);
-    created >= lower && created <= start + KIMI_OWN_WINDOW
+    created >= lower
 }
 
 fn resumed_in_own_window(resumed: SystemTime, start: ProcessStartEvidence) -> bool {
@@ -1751,6 +1752,173 @@ mod tests {
         let digest = Sha256::digest(cwd.to_string_lossy().as_bytes());
         let hex: String = digest.iter().take(6).map(|b| format!("{b:02x}")).collect();
         format!("wd_{basename}_{hex}")
+    }
+
+    // Lazy-session bind-loop bug: an index session created five minutes after process start must bind.
+    #[test]
+    fn a_lazily_created_session_binds_from_the_index() {
+        let kimi_home = tempfile::tempdir().expect("kimi home");
+        let work = tempfile::tempdir().expect("work dir");
+        let proc_root = tempfile::tempdir().expect("proc root");
+        let pid = 4242u32;
+        let hz = clock_ticks_per_sec();
+        let btime = 1_700_000_000u64;
+        let process_start_ms = (btime + 50) * 1000;
+        write_proc_btime(proc_root.path(), btime);
+        write_proc_stat(proc_root.path(), pid, 50 * hz);
+
+        let session_dir = session_under(kimi_home.path(), "wd_a", "session_lazy");
+        let wire = write_wire_created(&session_dir, process_start_ms + 5 * 60 * 1000);
+        write_index(
+            kimi_home.path(),
+            &[("session_lazy", &session_dir, work.path())],
+        );
+
+        let locator = locator_with_proc(kimi_home.path(), pid, SystemTime::now(), proc_root.path());
+        assert_eq!(
+            locator
+                .try_resolve_from_index(kimi_home.path(), work.path())
+                .map(|located| located.status_path),
+            Some(wire)
+        );
+    }
+
+    // Lazy-session bind-loop bug: an exact-bucket session created five minutes late must bind.
+    #[test]
+    fn a_lazily_created_session_binds_from_the_bucket_fallback() {
+        let kimi_home = tempfile::tempdir().expect("kimi home");
+        let work = tempfile::tempdir().expect("work dir");
+        let proc_root = tempfile::tempdir().expect("proc root");
+        let pid = 4242u32;
+        let hz = clock_ticks_per_sec();
+        let btime = 1_700_000_000u64;
+        let process_start_ms = (btime + 50) * 1000;
+        write_proc_btime(proc_root.path(), btime);
+        write_proc_stat(proc_root.path(), pid, 50 * hz);
+
+        let session_dir = kimi_home
+            .path()
+            .join("sessions")
+            .join(bucket_for(work.path()))
+            .join("session_lazy");
+        let wire = write_wire_created(&session_dir, process_start_ms + 5 * 60 * 1000);
+        write_index(kimi_home.path(), &[]);
+
+        let locator = locator_with_proc(kimi_home.path(), pid, SystemTime::now(), proc_root.path());
+        assert_eq!(
+            locator
+                .try_resolve_fallback(kimi_home.path(), work.path())
+                .map(|located| located.status_path),
+            Some(wire)
+        );
+    }
+
+    // Lazy-session bind-loop guard: a promptly created session must keep binding.
+    #[test]
+    fn a_promptly_created_session_still_binds() {
+        let kimi_home = tempfile::tempdir().expect("kimi home");
+        let work = tempfile::tempdir().expect("work dir");
+        let proc_root = tempfile::tempdir().expect("proc root");
+        let pid = 4242u32;
+        let hz = clock_ticks_per_sec();
+        let btime = 1_700_000_000u64;
+        let process_start_ms = (btime + 50) * 1000;
+        write_proc_btime(proc_root.path(), btime);
+        write_proc_stat(proc_root.path(), pid, 50 * hz);
+
+        let session_dir = session_under(kimi_home.path(), "wd_a", "session_prompt");
+        let wire = write_wire_created(&session_dir, process_start_ms + 10_000);
+        write_index(
+            kimi_home.path(),
+            &[("session_prompt", &session_dir, work.path())],
+        );
+
+        let locator = locator_with_proc(kimi_home.path(), pid, SystemTime::now(), proc_root.path());
+        assert_eq!(
+            locator
+                .try_resolve_from_index(kimi_home.path(), work.path())
+                .map(|located| located.status_path),
+            Some(wire)
+        );
+    }
+
+    // Lazy-session bind-loop guard: a stale session from two hours earlier must stay rejected.
+    #[test]
+    fn a_stale_session_from_an_earlier_run_still_loses() {
+        let kimi_home = tempfile::tempdir().expect("kimi home");
+        let work = tempfile::tempdir().expect("work dir");
+        let proc_root = tempfile::tempdir().expect("proc root");
+        let pid = 4242u32;
+        let hz = clock_ticks_per_sec();
+        let btime = 1_700_000_000u64;
+        let process_start_ms = (btime + 50) * 1000;
+        write_proc_btime(proc_root.path(), btime);
+        write_proc_stat(proc_root.path(), pid, 50 * hz);
+
+        let session_dir = kimi_home
+            .path()
+            .join("sessions")
+            .join(bucket_for(work.path()))
+            .join("session_stale");
+        write_wire_created(&session_dir, process_start_ms - 2 * 60 * 60 * 1000);
+        write_index(
+            kimi_home.path(),
+            &[("session_stale", &session_dir, work.path())],
+        );
+
+        let locator = locator_with_proc(kimi_home.path(), pid, SystemTime::now(), proc_root.path());
+        assert!(locator
+            .try_resolve_from_index(kimi_home.path(), work.path())
+            .is_none());
+        assert!(locator
+            .try_resolve_fallback(kimi_home.path(), work.path())
+            .is_none());
+    }
+
+    // Lazy-session bind-loop guard: a stale creation with current resume evidence must still bind.
+    #[test]
+    fn a_resumed_session_still_binds() {
+        let kimi_home = tempfile::tempdir().expect("kimi home");
+        let work = tempfile::tempdir().expect("work dir");
+        let proc_root = tempfile::tempdir().expect("proc root");
+        let pid = 4242u32;
+        let hz = clock_ticks_per_sec();
+        let btime = 1_700_000_000u64;
+        let process_start_ms = (btime + 50) * 1000;
+        write_proc_btime(proc_root.path(), btime);
+        write_proc_stat(proc_root.path(), pid, 50 * hz);
+
+        let session_dir = kimi_home
+            .path()
+            .join("sessions")
+            .join(bucket_for(work.path()))
+            .join("session_resumed");
+        let wire = write_wire_created(&session_dir, process_start_ms - 2 * 60 * 60 * 1000);
+        let log = session_dir.join("logs").join("kimi-code.log");
+        std::fs::create_dir_all(log.parent().expect("log parent")).expect("mkdir log");
+        std::fs::write(
+            log,
+            b"2023-11-14T22:14:10.000Z INFO  session resume  app_version=0.27.0\n",
+        )
+        .expect("write session log");
+        write_index(
+            kimi_home.path(),
+            &[("session_resumed", &session_dir, work.path())],
+        );
+
+        let locator = locator_with_proc(kimi_home.path(), pid, SystemTime::now(), proc_root.path());
+        assert_eq!(
+            locator
+                .try_resolve_from_index(kimi_home.path(), work.path())
+                .map(|located| located.status_path),
+            Some(wire.clone())
+        );
+        assert_eq!(
+            locator
+                .try_resolve_fallback(kimi_home.path(), work.path())
+                .map(|located| located.status_path),
+            Some(wire)
+        );
     }
 
     /// `sha256("/home/will/projects/vimeflow")[:12]` sanity anchor.
