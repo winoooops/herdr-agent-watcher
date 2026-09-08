@@ -642,7 +642,11 @@ pub fn expanded_card(t: &PaneTelemetry, cx: &CardCtx<'_>) -> Vec<Line> {
     expanded_card_with_traces(t, cx).0
 }
 
-fn expanded_card_with_traces(
+/// The card plus `(toolUseId, line index)` for every selectable trace row it
+/// rendered. Public because a host that draws these cards has to hit-test
+/// them, and recovering row positions from the rendered lines would be a
+/// second, drifting implementation of the rules in `selectable_call`.
+pub fn expanded_card_with_traces(
     t: &PaneTelemetry,
     cx: &CardCtx<'_>,
 ) -> (Vec<Line>, Vec<(String, usize)>) {

@@ -18,7 +18,10 @@ pub(crate) mod bars;
 pub mod format;
 pub(crate) mod metrics;
 pub(crate) mod select;
-pub(crate) mod style;
+/// Public for the same reason as `format`: `CardCtx` requires
+/// `AgentAppearances`, so a host cannot build a card without naming this
+/// module's types.
+pub mod style;
 
 #[cfg(unix)]
 pub mod settings_file;
