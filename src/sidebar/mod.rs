@@ -12,10 +12,16 @@ pub mod view;
 pub mod state_stream;
 
 pub(crate) mod bars;
-pub(crate) mod format;
+/// Public so embedders reuse the sidebar's own formatters instead of
+/// reimplementing them: `duration_ms` and `age` back the trace detail panel,
+/// and a second implementation would drift from what the cards render.
+pub mod format;
 pub(crate) mod metrics;
 pub(crate) mod select;
-pub(crate) mod style;
+/// Public for the same reason as `format`: `CardCtx` requires
+/// `AgentAppearances`, so a host cannot build a card without naming this
+/// module's types.
+pub mod style;
 
 #[cfg(unix)]
 pub mod settings_file;
