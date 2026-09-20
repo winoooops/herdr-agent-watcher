@@ -14,6 +14,7 @@ Key constraint: `src/agent/**` is a **frozen port** from the Vimeflow Electron s
 cargo build                                # debug build
 cargo build --release                      # release; install with: herdr plugin link "$PWD" && herdr plugin action invoke restart-daemon --plugin agent-watcher
 cargo test                                 # all unit tests + tier-A e2e (regenerates bindings/)
+sh scripts/fetch-or-build-selftest.sh        # verify fallback preserves inherited TMP/TEMP
 cargo test --test e2e_fake_herdr           # tier A only: deterministic fake Herdr socket
 cargo test --test e2e_real_herdr -- --ignored  # tier B: real herdr, isolated HOME/XDG
 cargo run --example probe                  # manual live probe against local Herdr socket
