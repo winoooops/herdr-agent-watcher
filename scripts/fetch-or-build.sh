@@ -9,6 +9,7 @@
 # used to do unconditionally: the worst case is the old behaviour, never a
 # failed install.
 set -eu
+workdir=
 
 REPO="winoooops/herdr-agent-watcher"
 BIN="herdr-agent-watcher"
@@ -17,7 +18,7 @@ OUT="target/release/$BIN"
 # `exec` so the fallback replaces this shell: cargo's exit status becomes ours,
 # and a failed compile fails the install exactly as it did before.
 build() {
-    [ -n "${TMP:-}" ] && rm -rf "$TMP"
+    [ -n "$workdir" ] && rm -rf "$workdir"
     echo "herdr-agent-watcher: building from source ($*)" >&2
     exec cargo build --release
 }
@@ -48,22 +49,22 @@ asset="$BIN-$version-$target"
 # a local file:// tree in tests. Anyone able to set this already controls the
 # environment the build runs in.
 base="${HERDR_AGENT_WATCHER_RELEASE_BASE:-https://github.com/$REPO/releases/download/v$version}"
-TMP=$(mktemp -d) || build "cannot create a temp dir"
+workdir=$(mktemp -d) || build "cannot create a temp dir"
 
-curl -fsSL --retry 2 --max-time 120 "$base/$asset" -o "$TMP/$BIN" \
+curl -fsSL --retry 2 --max-time 120 "$base/$asset" -o "$workdir/$BIN" \
     || build "no asset $asset in release v$version"
-curl -fsSL --retry 2 --max-time 30 "$base/SHA256SUMS" -o "$TMP/SHA256SUMS" \
+curl -fsSL --retry 2 --max-time 30 "$base/SHA256SUMS" -o "$workdir/SHA256SUMS" \
     || build "release v$version has no SHA256SUMS"
 
-want=$(grep "  $asset\$" "$TMP/SHA256SUMS" | cut -d' ' -f1)
+want=$(grep "  $asset\$" "$workdir/SHA256SUMS" | cut -d' ' -f1)
 [ -n "$want" ] || build "$asset is not listed in SHA256SUMS"
 
-got=$(sha "$TMP/$BIN")
+got=$(sha "$workdir/$BIN")
 # A mismatch is not a reason to guess. Compile instead, and say why.
 [ "$want" = "$got" ] || build "checksum mismatch for $asset: expected $want, got $got"
 
 mkdir -p target/release
-chmod +x "$TMP/$BIN"
-mv "$TMP/$BIN" "$OUT"
-rm -rf "$TMP"
+chmod +x "$workdir/$BIN"
+mv "$workdir/$BIN" "$OUT"
+rm -rf "$workdir"
 echo "herdr-agent-watcher: installed prebuilt $asset" >&2

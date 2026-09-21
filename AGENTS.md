@@ -99,6 +99,7 @@ Requires Rust 1.85+ and (for install/e2e tier B) Herdr 0.8.0+.
 cargo build                                # debug build
 cargo build --release                      # release binary at target/release/agent-watcher
 cargo test                                 # all unit tests + tier-A e2e (also regenerates bindings/)
+sh scripts/fetch-or-build-selftest.sh        # verify fallback preserves inherited TMP/TEMP
 cargo test --test e2e_fake_herdr           # tier A only: deterministic fake Herdr socket
 cargo test --test e2e_real_herdr -- --ignored   # tier B: real installed herdr, isolated HOME/XDG
 ./tests/verify-live-agents.sh              # scan live panes for agent_watcher_* tokens (needs live Herdr + jq + nc)
