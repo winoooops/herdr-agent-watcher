@@ -26,7 +26,7 @@ failed=0
 for scenario in no-curl unknown-platform empty-version no-sha256; do
   mkdir -p sentinel
   printf 'keep me\n' > sentinel/keep
-  printf '[package]\nname = "herdr-agent-watcher"\nversion = "0.2.8"\n' > Cargo.toml
+  printf '[package]\nname = "herdr-agent-watcher"\nversion = "0.0.0"\n' > Cargo.toml
   system=Linux
   case "$scenario" in
     unknown-platform) system=Unknown ;;
