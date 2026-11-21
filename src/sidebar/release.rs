@@ -120,7 +120,7 @@ impl Check {
     }
 }
 
-#[cfg(any(test, all(feature = "runtime", unix)))]
+#[cfg(any(test, feature = "runtime"))]
 #[derive(Debug, PartialEq, Eq)]
 enum UpdateDecision {
     Install(String),
@@ -128,7 +128,7 @@ enum UpdateDecision {
     Refuse(String),
 }
 
-#[cfg(any(test, all(feature = "runtime", unix)))]
+#[cfg(any(test, feature = "runtime"))]
 fn update_decision(check: Check, current: &str) -> UpdateDecision {
     match check {
         Check::Ready {
@@ -159,14 +159,14 @@ fn update_decision(check: Check, current: &str) -> UpdateDecision {
     }
 }
 
-#[cfg(any(test, all(feature = "runtime", unix)))]
+#[cfg(any(test, feature = "runtime"))]
 enum RestartOutcome {
     Confirmed(String),
     Rejected(String),
     TimedOut(Option<String>),
 }
 
-#[cfg(any(test, all(feature = "runtime", unix)))]
+#[cfg(any(test, feature = "runtime"))]
 fn wait_for_build_with(
     expected: &str,
     mut read: impl FnMut() -> Option<String>,
@@ -188,7 +188,7 @@ fn wait_for_build_with(
     }
 }
 
-#[cfg(any(test, all(feature = "runtime", unix)))]
+#[cfg(any(test, feature = "runtime"))]
 fn finish_upgrade(installed: &str, restarted: RestartOutcome) -> Result<String, String> {
     let installed = if installed.is_empty() {
         "plugin installed".to_string()
@@ -213,11 +213,10 @@ fn finish_upgrade(installed: &str, restarted: RestartOutcome) -> Result<String, 
 
 /// Everything below talks to the network or to `herdr`, so it only exists in
 /// the runtime build. The comparison above stays testable without either.
-#[cfg(all(feature = "runtime", unix))]
+#[cfg(feature = "runtime")]
 mod io {
     use super::*;
     use std::io::{BufRead, BufReader, Write};
-    use std::os::unix::net::UnixStream;
     use std::sync::mpsc::{channel, Receiver};
     use std::time::{Duration, Instant};
 
@@ -392,9 +391,10 @@ mod io {
     }
 
     fn reported_build() -> Option<String> {
-        let mut stream = UnixStream::connect(crate::daemon::state_socket_path()).ok()?;
-        stream.set_read_timeout(Some(Duration::from_secs(1))).ok()?;
+        let mut stream = crate::ipc::connect(&crate::daemon::state_socket_path()).ok()?;
+        let _ = crate::ipc::set_read_timeout(&stream, Some(Duration::from_secs(1)));
         stream.write_all(b"{\"method\":\"snapshot\"}\n").ok()?;
+        let _ = stream.flush();
         let mut line = String::new();
         BufReader::new(stream).read_line(&mut line).ok()?;
         let mut state = crate::sidebar::reducer::State::default();
@@ -444,7 +444,7 @@ mod io {
     }
 }
 
-#[cfg(all(feature = "runtime", unix))]
+#[cfg(feature = "runtime")]
 pub use io::{check, cli_update, upgrade};
 
 #[cfg(test)]

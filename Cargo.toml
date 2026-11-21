@@ -1,6 +1,6 @@
 [package]
 name = "herdr-agent-watcher"
-version = "0.2.9"
+version = "0.3.0"
 description = "Coding-agent observability plugin for herdr: transcript watchers, metrics, and notifications for Claude Code, Codex, Kimi Code, and OpenCode."
 license = "Apache-2.0"
 edition = "2021"
@@ -14,7 +14,7 @@ path = "src/lib.rs"
 default = ["runtime"]
 e2e-test = []
 runtime = [
-  "dep:libc", "dep:ratatui", "dep:crossterm", "dep:tokio", "dep:tokio-util",
+  "dep:ratatui", "dep:crossterm", "dep:tokio", "dep:tokio-util",
   "dep:notify", "dep:rusqlite", "dep:ureq", "dep:portable-pty", "dep:shell-words",
   "dep:regex", "dep:once_cell", "dep:env_logger", "dep:dirs", "dep:sha2",
   "dep:tempfile",
@@ -46,10 +46,22 @@ dirs = { version = "6", optional = true }
 ureq = { version = "2", optional = true }
 toml = "0.8"
 toml_edit = "0.22"
-libc = { version = "0.2", optional = true }
+interprocess = "2.4.2"
 ratatui = { version = "0.30", default-features = false, features = ["crossterm_0_29"], optional = true }
 crossterm = { version = "0.29", optional = true }
 unicode-width = "0.2"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_IO",
+    "Win32_System_Threading",
+] }
 
 [dev-dependencies]
 ts-rs = "10"

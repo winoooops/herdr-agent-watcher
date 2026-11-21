@@ -311,10 +311,12 @@ fn run_with_options(
                         }
                     };
                     match result {
-                        Ok(()) => applied.push(action),
-                        // error!, not warn!: a failed bind visibly blinks its
-                        // card, and env_logger hides warnings by default.
-                        Err(error) => log::error!("[daemon] {action:?} failed: {error}"),
+                        Ok(()) => {
+                            applied.push(action);
+                        }
+                        Err(ref error) => {
+                            log::error!("[daemon] {action:?} failed: {error}");
+                        }
                     }
                 }
                 bindings.apply(&applied);
@@ -443,7 +445,6 @@ mod service_tests {
     use super::*;
     use crate::test_env::with_env;
     use std::io::{BufRead, BufReader, Write};
-    use std::os::unix::net::{UnixListener, UnixStream};
     use std::process::{Child, Command};
     use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -482,13 +483,14 @@ mod service_tests {
     }
 
     fn bound_status_path(path: &std::path::Path) -> Option<String> {
-        let mut client = UnixStream::connect(path).ok()?;
-        client.set_read_timeout(Some(Duration::from_secs(1))).ok()?;
+        let mut client = crate::ipc::connect(path).ok()?;
+        let _ = crate::ipc::set_read_timeout(&client, Some(Duration::from_secs(1)));
         client
             .write_all(
                 b"{\"method\":\"status-path\",\"pane_id\":\"p1\",\"session_id\":\"sess-1\"}\n",
             )
             .ok()?;
+        let _ = client.flush();
         let mut line = String::new();
         BufReader::new(client).read_line(&mut line).ok()?;
         serde_json::from_str::<serde_json::Value>(&line).ok()?["path"]
@@ -497,28 +499,26 @@ mod service_tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn start_stop_start_reuses_one_root_without_leaks() {
         let temporary = tempfile::tempdir().expect("tempdir");
         let herdr_socket = temporary.path().join("herdr.sock");
-        let listener = UnixListener::bind(&herdr_socket).expect("bind fake herdr");
-        listener.set_nonblocking(true).expect("nonblocking");
+        let listener = crate::ipc::bind(&herdr_socket).expect("bind fake herdr");
+        crate::ipc::set_listener_nonblocking(&listener, true).expect("nonblocking");
         let fake_shutdown = Arc::new(AtomicBool::new(false));
         let fake_stop = fake_shutdown.clone();
         let fake = std::thread::spawn(move || {
             while !fake_stop.load(Ordering::Relaxed) {
-                match listener.accept() {
-                    Ok((stream, _)) => {
-                        let _ = stream.set_nonblocking(false);
-                        let mut request = String::new();
-                        if BufReader::new(stream.try_clone().expect("clone"))
-                            .read_line(&mut request)
-                            .is_err()
-                        {
-                            continue;
-                        }
+                match crate::ipc::accept(&listener) {
+                    Ok(mut stream) => {
+                        let _ = crate::ipc::set_nonblocking(&stream, false);
+                        // Read request, then write response (avoids try_clone)
+                        let request = match crate::ipc::read_line(&mut stream) {
+                            Ok(line) => line,
+                            Err(_) => continue,
+                        };
                         let request: serde_json::Value =
                             serde_json::from_str(&request).expect("request");
-                        let mut stream = stream;
                         let response = serde_json::json!({
                             "id": request["id"],
                             "result": { "panes": [] },
@@ -578,6 +578,7 @@ mod service_tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn shutdown_finishes_after_a_real_agent_watcher_was_bound() {
         let temporary = tempfile::tempdir().expect("tempdir");
         let state = temporary.path().join("state");

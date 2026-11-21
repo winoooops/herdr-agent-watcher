@@ -1,33 +1,55 @@
 use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
-use std::os::unix::io::AsRawFd;
-use std::os::unix::net::{UnixListener, UnixStream};
+use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+use crate::ipc;
 
 // Herdr reads can block for three seconds, and a full live shutdown was
 // measured at 4.36 seconds after the remaining iteration work. Eight seconds
 // leaves 3.64 seconds of headroom; the alternative failure leaves no daemon.
 const TAKEOVER_TIMEOUT: Duration = Duration::from_secs(8);
 
+#[cfg(unix)]
 fn try_flock(file: &File) -> bool {
+    use std::os::unix::io::AsRawFd;
     unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) == 0 }
 }
 
+#[cfg(windows)]
+fn try_flock(file: &File) -> bool {
+    use std::os::windows::io::AsRawHandle;
+    let handle = file.as_raw_handle();
+    let mut overlapped: windows_sys::Win32::System::IO::OVERLAPPED = unsafe { std::mem::zeroed() };
+    const LOCKFILE_EXCLUSIVE_LOCK: u32 = 0x00000002;
+    const LOCKFILE_FAIL_IMMEDIATELY: u32 = 0x00000001;
+    unsafe {
+        windows_sys::Win32::Storage::FileSystem::LockFileEx(
+            handle,
+            LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
+            0,
+            1,
+            0,
+            &mut overlapped,
+        ) != 0
+    }
+}
+
 fn request_shutdown(path: &std::path::Path, budget: Duration) -> bool {
-    let Ok(stream) = UnixStream::connect(path) else {
+    let Ok(mut stream) = ipc::connect(path) else {
         return false;
     };
-    let _ = stream.set_read_timeout(Some(budget.min(Duration::from_secs(2))));
-    let Ok(mut writer) = stream.try_clone() else {
-        return false;
-    };
-    if writer.write_all(b"shutdown\n").is_err() {
+    let _ = ipc::set_read_timeout(&stream, Some(budget.min(Duration::from_secs(2))));
+    if stream.write_all(b"shutdown\n").is_err() {
         return false;
     }
-    let mut line = String::new();
-    BufReader::new(stream).read_line(&mut line).is_ok() && line.trim() == "ok"
+    let _ = stream.flush();
+    // Read response line
+    match ipc::read_line(&mut stream) {
+        Ok(line) => line.trim() == "ok",
+        Err(_) => false,
+    }
 }
 
 pub struct Singleton {
@@ -71,22 +93,21 @@ pub(crate) fn claim_with(
 
     let control_path = options.control_socket_path();
     let _ = std::fs::remove_file(&control_path);
-    let listener = UnixListener::bind(&control_path).ok()?;
-    listener.set_nonblocking(true).ok()?;
+    let listener = ipc::bind(&control_path).ok()?;
+    ipc::set_listener_nonblocking(&listener, true).ok()?;
     let flag = shutdown.clone();
     let listener_thread = std::thread::spawn(move || {
         while !flag.load(Ordering::Relaxed) {
-            match listener.accept() {
-                Ok((stream, _)) => {
-                    let _ = stream.set_nonblocking(false);
-                    let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
-                    let mut line = String::new();
-                    let mut reader =
-                        BufReader::new(stream.try_clone().expect("clone control stream"));
-                    if reader.read_line(&mut line).is_ok() && line.trim() == "shutdown" {
-                        flag.store(true, Ordering::Relaxed);
-                        let mut writer = stream;
-                        let _ = writer.write_all(b"ok\n");
+            match ipc::accept(&listener) {
+                Ok(mut stream) => {
+                    let _ = ipc::set_nonblocking(&stream, false);
+                    let _ = ipc::set_read_timeout(&stream, Some(Duration::from_millis(500)));
+                    match ipc::read_line(&mut stream) {
+                        Ok(line) if line.trim() == "shutdown" => {
+                            flag.store(true, Ordering::Relaxed);
+                            let _ = stream.write_all(b"ok\n");
+                        }
+                        _ => {}
                     }
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {

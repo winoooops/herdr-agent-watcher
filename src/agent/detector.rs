@@ -193,12 +193,66 @@ fn read_platform_cmdline(pid: u32) -> Option<Vec<String>> {
     }
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(target_os = "windows")]
+fn read_platform_children(pid: u32) -> Option<Vec<u32>> {
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+        TH32CS_SNAPPROCESS,
+    };
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+    use std::mem::size_of;
+
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+    if snapshot == INVALID_HANDLE_VALUE {
+        return Some(Vec::new());
+    }
+
+    let mut entry = PROCESSENTRY32W {
+        dwSize: size_of::<PROCESSENTRY32W>() as u32,
+        ..Default::default()
+    };
+    let mut children = Vec::new();
+    let mut ok = unsafe { Process32FirstW(snapshot, &mut entry) } != 0;
+    while ok {
+        if entry.th32ParentProcessID == pid && entry.th32ProcessID != pid {
+            children.push(entry.th32ProcessID);
+        }
+        ok = unsafe { Process32NextW(snapshot, &mut entry) } != 0;
+    }
+    unsafe { windows_sys::Win32::Foundation::CloseHandle(snapshot) };
+    Some(children)
+}
+
+#[cfg(target_os = "windows")]
+fn read_platform_cmdline(pid: u32) -> Option<Vec<String>> {
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    use windows_sys::Win32::Foundation::CloseHandle;
+
+    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if process.is_null() {
+        return None;
+    }
+
+    let mut path = vec![0u16; 32_768];
+    let mut len = path.len() as u32;
+    let ok = unsafe { QueryFullProcessImageNameW(process, 0, path.as_mut_ptr(), &mut len) };
+    unsafe { CloseHandle(process) };
+
+    if ok == 0 {
+        return None;
+    }
+    let exe_path = String::from_utf16_lossy(&path[..len as usize]);
+    Some(vec![exe_path])
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 fn read_platform_children(_: u32) -> Option<Vec<u32>> {
     Some(Vec::new())
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 fn read_platform_cmdline(_: u32) -> Option<Vec<String>> {
     None
 }
@@ -206,11 +260,19 @@ fn read_platform_cmdline(_: u32) -> Option<Vec<String>> {
 /// Extract binary name from cmdline argv[0]
 ///
 /// Handles both absolute paths (/usr/bin/claude) and bare names (claude).
+/// On Windows, strips common executable extensions (.exe, .cmd, .bat) so
+/// the detector matches the same names as on Unix.
 fn extract_binary_name(cmdline: &[String]) -> Option<String> {
     let argv0 = cmdline.first()?;
     let path = Path::new(argv0);
     let filename = path.file_name()?.to_str()?;
-    Some(filename.to_string())
+    // Strip Windows executable extensions so "claude.exe" matches "claude".
+    let name = filename
+        .strip_suffix(".exe")
+        .or_else(|| filename.strip_suffix(".cmd"))
+        .or_else(|| filename.strip_suffix(".bat"))
+        .unwrap_or(filename);
+    Some(name.to_string())
 }
 
 /// Detect agent type from cmdline binary name

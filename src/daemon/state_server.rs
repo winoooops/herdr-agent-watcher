@@ -1,5 +1,4 @@
-use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::{UnixListener, UnixStream};
+use std::io::Write;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::RecvTimeoutError;
@@ -10,6 +9,7 @@ use serde_json::Value;
 
 use crate::daemon::state_wire::{Delta, Hello, StatusPath, WIRE_VERSION};
 use crate::daemon::store::TelemetryStore;
+use crate::ipc::{self, LocalStream};
 
 pub const HEARTBEAT_MS: u64 = 5_000;
 
@@ -66,16 +66,16 @@ impl StateServer {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error),
         }
-        let listener = UnixListener::bind(path)?;
-        listener.set_nonblocking(true)?;
+        let listener = ipc::bind(path)?;
+        ipc::set_listener_nonblocking(&listener, true)?;
         let socket = path.to_path_buf();
         let stop = shutdown.clone();
         let thread = std::thread::spawn(move || {
             let mut workers = Vec::new();
             while !stop.load(Ordering::Relaxed) {
-                match listener.accept() {
-                    Ok((stream, _)) => {
-                        let _ = stream.set_nonblocking(false);
+                match ipc::accept(&listener) {
+                    Ok(stream) => {
+                        let _ = ipc::set_nonblocking(&stream, false);
                         let store = store.clone();
                         let routes = routes.clone();
                         let stop = stop.clone();
@@ -119,26 +119,21 @@ impl Drop for StateServer {
 }
 
 fn handle_connection(
-    mut stream: UnixStream,
+    mut stream: LocalStream,
     store: Arc<TelemetryStore>,
     routes: crate::daemon::routes::BridgeRoutes,
     heartbeat_ms: u64,
     shutdown: Arc<AtomicBool>,
 ) {
-    let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
-    let _ = stream.set_write_timeout(Some(Duration::from_millis(500)));
-    let Ok(reader_stream) = stream.try_clone() else {
-        return;
+    let _ = ipc::set_read_timeout(&stream, Some(Duration::from_millis(500)));
+    let _ = ipc::set_write_timeout(&stream, Some(Duration::from_millis(500)));
+
+    // Read the initial request line without try_clone (not available on Windows
+    // named pipes). A byte-at-a-time read is fine for a single short JSON line.
+    let request = match ipc::read_line(&mut stream) {
+        Ok(line) => line,
+        Err(_) => return,
     };
-    let mut request = String::new();
-    if BufReader::new(reader_stream)
-        .read_line(&mut request)
-        .ok()
-        .filter(|read| *read > 0)
-        .is_none()
-    {
-        return;
-    }
     let Ok(request) = serde_json::from_str::<Value>(&request) else {
         return;
     };
@@ -150,7 +145,7 @@ fn handle_connection(
             let path = routes
                 .resolve(pane, session)
                 .map(|path| path.to_string_lossy().into_owned());
-            let _ = write_json_line(
+            let _ = ipc::write_json_line(
                 &mut stream,
                 &StatusPath {
                     version: WIRE_VERSION,
@@ -160,7 +155,7 @@ fn handle_connection(
         }
         Some("snapshot") => {
             let (seq, panes) = store.snapshot();
-            let _ = write_json_line(
+            let _ = ipc::write_json_line(
                 &mut stream,
                 &Hello {
                     version: WIRE_VERSION,
@@ -173,7 +168,7 @@ fn handle_connection(
         }
         Some("subscribe") => {
             let (id, receiver, seq, panes) = store.subscribe_full();
-            if write_json_line(
+            if ipc::write_json_line(
                 &mut stream,
                 &Hello {
                     version: WIRE_VERSION,
@@ -195,7 +190,7 @@ fn handle_connection(
                         .min(Duration::from_millis(100));
                     match receiver.recv_timeout(timeout) {
                         Ok(update) => {
-                            if write_json_line(
+                            if ipc::write_json_line(
                                 &mut stream,
                                 &Delta {
                                     seq: update.seq,
@@ -230,12 +225,6 @@ fn handle_connection(
     }
 }
 
-fn write_json_line(stream: &mut UnixStream, value: &impl serde::Serialize) -> std::io::Result<()> {
-    serde_json::to_writer(&mut *stream, value)?;
-    stream.write_all(b"\n")?;
-    stream.flush()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -260,7 +249,7 @@ mod tests {
         )
         .unwrap();
 
-        let mut client = UnixStream::connect(&socket).unwrap();
+        let mut client = ipc::connect(&socket).unwrap();
         client.write_all(b"{\"method\":\"snapshot\"}\n").unwrap();
         let mut line = String::new();
         BufReader::new(client).read_line(&mut line).unwrap();
@@ -268,12 +257,11 @@ mod tests {
         assert_eq!(hello.version, WIRE_VERSION);
         assert!(hello.panes.contains_key("p1"));
 
-        let mut client = UnixStream::connect(&socket).unwrap();
-        client
-            .set_read_timeout(Some(Duration::from_secs(2)))
-            .unwrap();
+        let mut client = ipc::connect(&socket).unwrap();
+        let _ = ipc::set_read_timeout(&client, Some(Duration::from_secs(2)));
         client.write_all(b"{\"method\":\"subscribe\"}\n").unwrap();
-        let mut reader = BufReader::new(client.try_clone().unwrap());
+        // Write first, then wrap in BufReader for reading (avoids try_clone)
+        let mut reader = BufReader::new(client);
         let mut first = String::new();
         reader.read_line(&mut first).unwrap();
         let hello: Hello = serde_json::from_str(&first).unwrap();
@@ -288,7 +276,6 @@ mod tests {
         assert!(delta.seq > hello.seq);
 
         drop(reader);
-        drop(client);
         std::thread::sleep(Duration::from_millis(350));
         assert_eq!(store.subscriber_count(), 0);
     }
@@ -306,11 +293,11 @@ mod tests {
         )
         .unwrap();
 
-        let mut malformed = UnixStream::connect(&socket).unwrap();
+        let mut malformed = ipc::connect(&socket).unwrap();
         malformed.write_all(b"not json\n").unwrap();
         drop(malformed);
 
-        let mut client = UnixStream::connect(&socket).unwrap();
+        let mut client = ipc::connect(&socket).unwrap();
         client.write_all(b"{\"method\":\"snapshot\"}\n").unwrap();
         let mut line = String::new();
         BufReader::new(client).read_line(&mut line).unwrap();
@@ -332,14 +319,14 @@ mod tests {
     }
 
     fn ask(socket: &std::path::Path, session: &str) -> serde_json::Value {
-        let mut stream = UnixStream::connect(socket).expect("connect");
+        let mut stream = ipc::connect(socket).expect("connect");
         writeln!(
             stream,
             r#"{{"method":"status-path","pane_id":"w1:p1","session_id":"{session}"}}"#
         )
         .expect("request");
         let mut line = String::new();
-        BufReader::new(stream.try_clone().expect("clone"))
+        BufReader::new(stream)
             .read_line(&mut line)
             .expect("reply");
         serde_json::from_str(&line).expect("json")

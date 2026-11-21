@@ -195,13 +195,16 @@ fn write_config_hooked(
     expected: Option<&str>,
     after_temp: &dyn Fn(),
 ) -> Result<(), String> {
-    use std::os::unix::fs::PermissionsExt;
     // Follow the symlink, so a config living in a dotfiles repo is updated
     // rather than replaced by a regular file.
     let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    let mode = std::fs::metadata(&target)
-        .map(|meta| meta.permissions().mode() & 0o777)
-        .unwrap_or(0o644);
+    #[cfg(unix)]
+    let mode = {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(&target)
+            .map(|meta| meta.permissions().mode() & 0o777)
+            .unwrap_or(0o644)
+    };
     let dir = target
         .parent()
         .ok_or_else(|| format!("no parent for {}", target.display()))?;
@@ -214,8 +217,12 @@ fn write_config_hooked(
         SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     ));
     std::fs::write(&tmp, body).map_err(|error| format!("write {}: {error}", tmp.display()))?;
-    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode))
-        .map_err(|error| format!("chmod {}: {error}", tmp.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode))
+            .map_err(|error| format!("chmod {}: {error}", tmp.display()))?;
+    }
     after_temp();
 
     if let Some(expected) = expected {
@@ -750,7 +757,6 @@ pub(crate) fn unbind() -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
 
     const DEFAULT_CONFIG: &str = include_str!("../../tests/fixtures/herdr-default-config.toml");
 
@@ -902,7 +908,9 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn the_mode_is_preserved_and_a_new_file_is_644() {
+        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let existing = dir.path().join("config.toml");
         std::fs::write(&existing, "a = 1\n").unwrap();
@@ -922,6 +930,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn a_symlink_is_followed_not_replaced() {
         let dir = tempfile::tempdir().unwrap();
         let real = dir.path().join("real.toml");

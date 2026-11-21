@@ -1,25 +1,24 @@
+pub mod compat;
 pub mod daemon;
+pub mod ipc;
 pub mod sidebar;
 
 #[cfg(test)]
 pub(crate) mod test_env;
 
-#[cfg(all(feature = "runtime", unix))]
+#[cfg(feature = "runtime")]
 pub mod agent;
-#[cfg(all(feature = "runtime", unix))]
+#[cfg(feature = "runtime")]
 pub mod agents;
-#[cfg(all(feature = "runtime", unix))]
+#[cfg(feature = "runtime")]
 pub mod aliases;
-#[cfg(all(feature = "runtime", unix))]
+#[cfg(feature = "runtime")]
 pub mod debug;
-#[cfg(all(feature = "runtime", unix))]
+#[cfg(feature = "runtime")]
 pub mod filesystem;
-#[cfg(all(feature = "runtime", unix))]
+#[cfg(feature = "runtime")]
 pub mod herdr;
-#[cfg(all(feature = "runtime", unix))]
+#[cfg(feature = "runtime")]
 pub mod runtime;
-#[cfg(all(feature = "runtime", unix))]
+#[cfg(feature = "runtime")]
 pub mod terminal;
-
-#[cfg(all(feature = "runtime", not(unix)))]
-compile_error!("the runtime feature requires a Unix target");

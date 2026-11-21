@@ -1,13 +1,13 @@
 pub mod state_wire;
 pub mod store;
 
-#[cfg(all(feature = "runtime", unix))]
+#[cfg(feature = "runtime")]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DaemonOptions {
     pub state_dir: std::path::PathBuf,
 }
 
-#[cfg(all(feature = "runtime", unix))]
+#[cfg(feature = "runtime")]
 impl DaemonOptions {
     pub fn new(state_dir: impl Into<std::path::PathBuf>) -> Self {
         Self {
@@ -44,35 +44,33 @@ impl DaemonOptions {
     }
 }
 
-#[cfg(all(feature = "runtime", unix))]
+#[cfg(feature = "runtime")]
 pub mod config;
-#[cfg(all(feature = "runtime", unix))]
+#[cfg(feature = "runtime")]
 pub(crate) mod routes;
 
-/// Unix-only by construction (it names a socket) and only ever called from
-/// runtime code. Gated with its callers, kept exactly as it is.
-#[cfg(all(feature = "runtime", unix))]
+#[cfg(feature = "runtime")]
 pub(crate) fn state_socket_path() -> std::path::PathBuf {
     DaemonOptions::from_env().state_socket_path()
 }
 
-#[cfg(all(feature = "runtime", unix))]
+#[cfg(feature = "runtime")]
 pub mod consent;
 pub mod prune;
-#[cfg(all(feature = "runtime", unix))]
+#[cfg(feature = "runtime")]
 pub mod reconcile;
-#[cfg(all(feature = "runtime", unix))]
+#[cfg(feature = "runtime")]
 pub mod run;
-#[cfg(all(feature = "runtime", unix))]
+#[cfg(feature = "runtime")]
 pub use run::{start, DaemonHandle};
-#[cfg(all(feature = "runtime", unix))]
+#[cfg(feature = "runtime")]
 pub mod singleton;
-#[cfg(all(feature = "runtime", unix))]
+#[cfg(feature = "runtime")]
 pub mod sink;
-#[cfg(all(feature = "runtime", unix))]
+#[cfg(feature = "runtime")]
 pub mod state_server;
 
-#[cfg(all(test, feature = "runtime", unix))]
+#[cfg(all(test, feature = "runtime"))]
 mod options_tests {
     use super::DaemonOptions;
     use crate::test_env::with_env;

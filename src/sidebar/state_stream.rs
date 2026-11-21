@@ -1,10 +1,11 @@
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, TryRecvError};
 use std::sync::Arc;
 use std::time::Duration;
+
+use crate::ipc::{self, LocalStream};
 
 const RECONNECT_EVERY: Duration = Duration::from_millis(400);
 const READ_POLL_EVERY: Duration = Duration::from_millis(100);
@@ -148,18 +149,20 @@ impl Drop for StateStream {
     }
 }
 
-fn subscribe(socket: &Path) -> Result<BufReader<UnixStream>, String> {
-    let mut stream = UnixStream::connect(socket).map_err(|error| {
+fn subscribe(socket: &Path) -> Result<BufReader<LocalStream>, String> {
+    let mut stream = ipc::connect(socket).map_err(|error| {
         format!(
             "herdr-agent-watcher daemon is not running\n(no state socket at {}: {error})",
             socket.display()
         )
     })?;
+    // Write the subscription request first, then hand the stream to BufReader.
+    // This avoids try_clone() which is not available on Windows named pipes.
     stream
         .write_all(b"{\"method\":\"subscribe\"}\n")
         .map_err(|_| "herdr-agent-watcher daemon closed the state socket".to_string())?;
-    stream
-        .set_read_timeout(Some(READ_POLL_EVERY))
+    let _ = stream.flush();
+    ipc::set_read_timeout(&stream, Some(READ_POLL_EVERY))
         .map_err(|error| format!("cannot configure the state socket: {error}"))?;
     Ok(BufReader::new(stream))
 }
@@ -167,24 +170,22 @@ fn subscribe(socket: &Path) -> Result<BufReader<UnixStream>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::net::UnixListener;
+    use std::io::{BufRead, BufReader, Write};
     use std::sync::mpsc;
     use std::time::Instant;
 
-    fn listener() -> (tempfile::TempDir, PathBuf, UnixListener) {
+    fn listener() -> (tempfile::TempDir, PathBuf, ipc::LocalListener) {
         let dir = tempfile::tempdir().expect("tempdir");
         let socket = dir.path().join("state.sock");
-        let listener = UnixListener::bind(&socket).expect("bind fake state socket");
+        let listener = ipc::bind(&socket).expect("bind fake state socket");
         (dir, socket, listener)
     }
 
-    fn serve_once(listener: UnixListener, line: &'static str) -> std::thread::JoinHandle<()> {
+    fn serve_once(listener: ipc::LocalListener, line: &'static str) -> std::thread::JoinHandle<()> {
         std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("accept subscriber");
-            let mut request = String::new();
-            BufReader::new(stream.try_clone().expect("clone stream"))
-                .read_line(&mut request)
-                .expect("read subscription");
+            let mut stream = ipc::accept(&listener).expect("accept subscriber");
+            // Read subscription request
+            let request = ipc::read_line(&mut stream).expect("read subscription");
             assert_eq!(request, "{\"method\":\"subscribe\"}\n");
             stream.write_all(line.as_bytes()).expect("write state line");
         })
@@ -215,11 +216,8 @@ mod tests {
         let (stale_ready_tx, stale_ready_rx) = mpsc::channel();
         let (close_stale_tx, close_stale_rx) = mpsc::channel();
         let first = std::thread::spawn(move || {
-            let (mut stream, _) = first_listener.accept().expect("accept first subscriber");
-            let mut request = String::new();
-            BufReader::new(stream.try_clone().expect("clone first stream"))
-                .read_line(&mut request)
-                .expect("read first subscription");
+            let mut stream = ipc::accept(&first_listener).expect("accept first subscriber");
+            let request = ipc::read_line(&mut stream).expect("read first subscription");
             stream
                 .write_all(b"{\"version\":2,\"seq\":1,\"panes\":{}}\n")
                 .expect("write first state line");
@@ -227,11 +225,8 @@ mod tests {
 
             // Accept one reconnect on the dying listener, but never send its
             // hello. A socket connection alone is not a recovered state feed.
-            let (stale, _) = first_listener.accept().expect("accept stale reconnect");
-            let mut request = String::new();
-            BufReader::new(stale.try_clone().expect("clone stale stream"))
-                .read_line(&mut request)
-                .expect("read stale subscription");
+            let mut stale = ipc::accept(&first_listener).expect("accept stale reconnect");
+            let _ = ipc::read_line(&mut stale);
             drop(first_listener);
             stale_ready_tx.send(()).expect("report stale reconnect");
             let _ = close_stale_rx.recv();
@@ -260,7 +255,7 @@ mod tests {
         first.join().expect("join first server");
 
         std::fs::remove_file(&socket).expect("remove first socket");
-        let second_listener = UnixListener::bind(&socket).expect("bind restarted state socket");
+        let second_listener = ipc::bind(&socket).expect("bind restarted state socket");
         let second = serve_once(second_listener, "{\"version\":2,\"seq\":2,\"panes\":{}}\n");
         assert_eq!(
             stream
@@ -290,11 +285,8 @@ mod tests {
         let (_dir, socket, listener) = listener();
         let (subscribed_tx, subscribed_rx) = mpsc::channel();
         let server = std::thread::spawn(move || {
-            let (stream, _) = listener.accept().expect("accept subscriber");
-            let mut request = String::new();
-            BufReader::new(stream)
-                .read_line(&mut request)
-                .expect("read subscription");
+            let mut stream = ipc::accept(&listener).expect("accept subscriber");
+            let _ = ipc::read_line(&mut stream).expect("read subscription");
             subscribed_tx.send(()).expect("report subscription");
         });
         let stream = StateStream::start(&socket).expect("start state stream");

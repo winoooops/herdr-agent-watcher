@@ -57,7 +57,6 @@ pub(crate) fn write_settings(
     value: &Value,
     expected: Option<&str>,
 ) -> Result<(), String> {
-    use std::os::unix::fs::PermissionsExt;
     let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     if let Some(expected) = expected {
         let now = std::fs::read_to_string(&target)
@@ -69,9 +68,13 @@ pub(crate) fn write_settings(
             ));
         }
     }
-    let mode = std::fs::metadata(&target)
-        .map(|meta| meta.permissions().mode() & 0o777)
-        .unwrap_or(0o600);
+    #[cfg(unix)]
+    let mode = {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(&target)
+            .map(|meta| meta.permissions().mode() & 0o777)
+            .unwrap_or(0o600)
+    };
     let dir = target
         .parent()
         .ok_or_else(|| format!("no parent for {}", target.display()))?;
@@ -86,8 +89,12 @@ pub(crate) fn write_settings(
         serde_json::to_string_pretty(value).map_err(|error| format!("serialize: {error}"))?;
     std::fs::write(&tmp, format!("{body}\n"))
         .map_err(|error| format!("write {}: {error}", tmp.display()))?;
-    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode))
-        .map_err(|error| format!("chmod {}: {error}", tmp.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode))
+            .map_err(|error| format!("chmod {}: {error}", tmp.display()))?;
+    }
     std::fs::rename(&tmp, &target)
         .map_err(|error| format!("rename to {}: {error}", target.display()))
 }
@@ -343,14 +350,17 @@ mod tests {
             assert!(enable(&path, &dir.path().join("record"), "/s", "/a").is_err());
             assert_eq!(std::fs::read_to_string(path).unwrap(), body);
         }
-        use std::os::unix::fs::PermissionsExt;
-        let dir = tempfile::tempdir().unwrap();
-        let path = seed(dir.path(), json!({"model":"opus"}));
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
-        let result = enable(&path, &dir.path().join("record"), "/s", "/a");
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
-        assert!(result.is_err());
-        assert_eq!(read(&path), json!({"model":"opus"}));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let dir = tempfile::tempdir().unwrap();
+            let path = seed(dir.path(), json!({"model":"opus"}));
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+            let result = enable(&path, &dir.path().join("record"), "/s", "/a");
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+            assert!(result.is_err());
+            assert_eq!(read(&path), json!({"model":"opus"}));
+        }
     }
 
     #[test]
@@ -362,6 +372,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn missing_file_mode_existing_mode_and_symlink_are_preserved() {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();

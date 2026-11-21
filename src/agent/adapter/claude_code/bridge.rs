@@ -8,6 +8,7 @@ use crate::aliases::{build_alias_lines, AgentAlias};
 use sha2::{Digest, Sha256};
 use std::ffi::OsStr;
 use std::fs;
+#[cfg(unix)]
 use std::io::Write;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -165,9 +166,13 @@ pub(crate) fn workspace_bridge_root(app_data_dir: &Path, cwd: &Path) -> PathBuf 
 }
 
 pub(crate) fn session_bridge_dir(app_data_dir: &Path, cwd: &Path, session_id: &str) -> PathBuf {
+    // Pane IDs like "w1:p4" contain colons which are illegal in Windows
+    // filenames. Replace them so the same ID maps to a valid directory name
+    // on every platform.
+    let safe_id = session_id.replace(':', "_");
     workspace_bridge_root(app_data_dir, cwd)
         .join(BRIDGE_SESSIONS_DIR)
-        .join(session_id)
+        .join(safe_id)
 }
 
 pub(crate) fn session_status_file(app_data_dir: &Path, cwd: &Path, session_id: &str) -> PathBuf {

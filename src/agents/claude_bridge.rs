@@ -92,7 +92,6 @@ fn shell_quote(value: &str) -> String {
 /// read half-written by whatever is executing or parsing it at that moment, and
 /// every file here is rewritten on every launch.
 pub(crate) fn write_atomic(path: &Path, contents: &str, mode: u32) -> Result<(), String> {
-    use std::os::unix::fs::PermissionsExt;
     let dir = path
         .parent()
         .ok_or_else(|| format!("no parent for {}", path.display()))?;
@@ -110,8 +109,14 @@ pub(crate) fn write_atomic(path: &Path, contents: &str, mode: u32) -> Result<(),
         SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
     ));
     std::fs::write(&tmp, contents).map_err(|error| format!("write {}: {error}", tmp.display()))?;
-    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode))
-        .map_err(|error| format!("chmod {}: {error}", tmp.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode))
+            .map_err(|error| format!("chmod {}: {error}", tmp.display()))?;
+    }
+    #[cfg(not(unix))]
+    let _ = mode;
     std::fs::rename(&tmp, path).map_err(|error| format!("rename to {}: {error}", path.display()))
 }
 
@@ -128,12 +133,12 @@ fn session_of(payload: &str) -> Result<String, String> {
         .ok_or_else(|| "payload carries no session_id".to_string())
 }
 
-fn connect_bounded(socket: &Path) -> Result<std::os::unix::net::UnixStream, String> {
+fn connect_bounded(socket: &Path) -> Result<crate::ipc::LocalStream, String> {
     let socket = socket.to_path_buf();
     let shown = socket.display().to_string();
     let (sender, receiver) = std::sync::mpsc::sync_channel(1);
     std::thread::spawn(move || {
-        let _ = sender.send(std::os::unix::net::UnixStream::connect(socket));
+        let _ = sender.send(crate::ipc::connect(&socket));
     });
     receiver
         .recv_timeout(SOCKET_TIMEOUT)
@@ -144,19 +149,16 @@ fn connect_bounded(socket: &Path) -> Result<std::os::unix::net::UnixStream, Stri
 fn resolve_status_path(socket: &Path, pane_id: &str, session: &str) -> Result<PathBuf, String> {
     use std::io::{BufRead, BufReader, Write};
     let mut stream = connect_bounded(socket)?;
-    stream
-        .set_read_timeout(Some(SOCKET_TIMEOUT))
-        .and_then(|()| stream.set_write_timeout(Some(SOCKET_TIMEOUT)))
-        .map_err(|error| format!("cannot bound the socket: {error}"))?;
+    let _ = crate::ipc::set_read_timeout(&stream, Some(SOCKET_TIMEOUT));
+    let _ = crate::ipc::set_write_timeout(&stream, Some(SOCKET_TIMEOUT));
     let request = serde_json::json!({
         "method": "status-path", "pane_id": pane_id, "session_id": session,
     });
     writeln!(stream, "{request}").map_err(|error| format!("request failed: {error}"))?;
-    let reader = stream
-        .try_clone()
-        .map_err(|error| format!("cannot read the reply: {error}"))?;
+    let _ = stream.flush();
+    // Read the response. Write first, then wrap in BufReader (avoids try_clone).
     let mut line = String::new();
-    BufReader::new(reader)
+    BufReader::new(stream)
         .read_line(&mut line)
         .map_err(|error| format!("no reply within the bound: {error}"))?;
     let reply: serde_json::Value =
@@ -897,17 +899,16 @@ mod tests {
     }
 
     fn fake_state_socket(dir: &std::path::Path, reply: Option<&str>) -> std::path::PathBuf {
-        use std::io::{BufRead, BufReader, Write};
+        use std::io::Write;
         let socket = dir.join("state.sock");
-        let listener = std::os::unix::net::UnixListener::bind(&socket).expect("bind");
+        let listener = crate::ipc::bind(&socket).expect("bind");
         let reply = reply.map(str::to_string);
         std::thread::spawn(move || {
-            let Ok((mut stream, _)) = listener.accept() else {
+            let Ok(mut stream) = crate::ipc::accept(&listener) else {
                 return;
             };
-            let mut line = String::new();
-            let cloned = stream.try_clone().expect("clone");
-            let _ = BufReader::new(cloned).read_line(&mut line);
+            // Read request line, then write reply (avoids try_clone)
+            let _ = crate::ipc::read_line(&mut stream);
             let body = serde_json::json!({"version": 2, "path": reply});
             let _ = writeln!(stream, "{body}");
         });
@@ -945,9 +946,9 @@ mod tests {
     fn a_socket_that_never_answers_gives_up() {
         let dir = tempfile::tempdir().expect("tempdir");
         let socket = dir.path().join("silent.sock");
-        let listener = std::os::unix::net::UnixListener::bind(&socket).expect("bind");
+        let listener = crate::ipc::bind(&socket).expect("bind");
         std::thread::spawn(move || {
-            let held = listener.accept();
+            let held = crate::ipc::accept(&listener);
             std::thread::sleep(std::time::Duration::from_secs(3));
             drop(held);
         });
@@ -1117,6 +1118,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn cwd_forms_that_name_one_directory_canonicalise_to_one_path() {
         let dir = tempfile::tempdir().expect("tempdir");
         let real = dir.path().join("work");
@@ -1290,6 +1292,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn settings_json_is_replaced_not_truncated_in_place() {
         // A rename gives the path a NEW inode; `fs::write` truncates the existing
         // one, and a reader in that window sees an empty file. Claude Code reads
@@ -1307,6 +1310,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn generated_scripts_are_executable() {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().expect("tempdir");

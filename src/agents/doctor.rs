@@ -185,23 +185,35 @@ pub(crate) fn window_size(status_path: &Path) -> Option<u64> {
 /// status line is being turned away.
 fn daemon_state(socket: &Path) -> Option<crate::daemon::state_wire::Hello> {
     use std::io::{BufRead, BufReader, Write};
-    let mut stream = std::os::unix::net::UnixStream::connect(socket).ok()?;
-    let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(750)));
-    let _ = stream.set_write_timeout(Some(std::time::Duration::from_millis(750)));
+    let mut stream = crate::ipc::connect(socket).ok()?;
+    let _ = crate::ipc::set_read_timeout(&stream, Some(std::time::Duration::from_millis(750)));
+    let _ = crate::ipc::set_write_timeout(&stream, Some(std::time::Duration::from_millis(750)));
     writeln!(stream, r#"{{"method":"snapshot"}}"#).ok()?;
-    let reader = stream.try_clone().ok()?;
+    let _ = stream.flush();
+    // Write first, then wrap in BufReader for reading (avoids try_clone).
     let mut line = String::new();
-    BufReader::read_line(&mut BufReader::new(reader), &mut line).ok()?;
+    BufReader::new(stream).read_line(&mut line).ok()?;
     serde_json::from_str(&line).ok()
 }
 
 fn executable_and_names(path: &Path, binary: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    let Ok(meta) = std::fs::metadata(path) else {
-        return false;
-    };
-    meta.permissions().mode() & 0o111 != 0
-        && std::fs::read_to_string(path)
+    #[cfg(unix)]
+    {
+        let Ok(meta) = std::fs::metadata(path) else {
+            return false;
+        };
+        use std::os::unix::fs::PermissionsExt;
+        if meta.permissions().mode() & 0o111 == 0 {
+            return false;
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        if !path.exists() {
+            return false;
+        }
+    }
+    std::fs::read_to_string(path)
             .map(|body| body.contains(&*binary.to_string_lossy()))
             .unwrap_or(false)
 }
@@ -554,23 +566,21 @@ mod tests {
 
     /// `refused` is the JSON object the daemon would put in its snapshot.
     fn socket_reporting(dir: &Path, refused: &str) -> PathBuf {
-        use std::io::{BufRead, BufReader, Write};
+        use std::io::Write;
         let socket = dir.join("state.sock");
-        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let listener = crate::ipc::bind(&socket).unwrap();
         let reply = format!(r#"{{"version":2,"seq":0,"panes":{{}},"refused":{refused}}}"#);
         std::thread::spawn(move || {
-            while let Ok((mut stream, _)) = listener.accept() {
-                let mut line = String::new();
-                let Ok(cloned) = stream.try_clone() else {
-                    continue;
-                };
-                let _ = BufReader::new(cloned).read_line(&mut line);
+            while let Ok(mut stream) = crate::ipc::accept(&listener) {
+                // Read request, then write reply (avoids try_clone)
+                let _ = crate::ipc::read_line(&mut stream);
                 let _ = writeln!(stream, "{reply}");
             }
         });
         socket
     }
 
+    #[cfg(unix)]
     fn healthy(dir: &Path, binary: &Path) -> (PathBuf, PathBuf, PathBuf) {
         use std::os::unix::fs::PermissionsExt;
         let statusline = dir.join("statusline.sh");
@@ -597,6 +607,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn run_with_config_problems(problems: &[String]) -> (tempfile::TempDir, Report) {
         let dir = tempfile::tempdir().unwrap();
         let binary = Path::new("/bin/herdr-agent-watcher");
@@ -658,6 +669,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn a_rejected_interval_is_reported() {
         let problems = vec!["daemon.interval_ms must be positive, found 0; using 1000".to_string()];
         let (_dir, report) = run_with_config_problems(&problems);
@@ -674,6 +686,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn a_clean_config_is_one_green_check() {
         let (_dir, report) = run_with_config_problems(&[]);
         let check = report
@@ -775,6 +788,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn emitted_fix_runs_with_multiword_downstream() {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
@@ -843,6 +857,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn assembled_report_covers_green_binding_shadow_and_unknown_cause() {
         let dir = tempfile::tempdir().unwrap();
         let binary = Path::new("/bin/herdr-agent-watcher");
@@ -909,6 +924,7 @@ mod tests {
     /// the write arrived, and the daemon turned it away because the session in
     /// the pane was replaced. Waiting will never fix it.
     #[test]
+    #[cfg(unix)]
     fn a_refused_session_is_named_and_sends_you_to_reopen_the_pane() {
         let dir = tempfile::tempdir().unwrap();
         let binary = Path::new("/bin/herdr-agent-watcher");
@@ -956,6 +972,7 @@ mod tests {
     /// the test above -- there the resolver returns None, so `size` was never
     /// `Some` while a refusal was outstanding.
     #[test]
+    #[cfg(unix)]
     fn a_refusal_outranks_a_stale_status_file() {
         let dir = tempfile::tempdir().unwrap();
         let binary = Path::new("/bin/herdr-agent-watcher");
@@ -997,6 +1014,7 @@ mod tests {
     /// Without this the previous tests pass against an implementation that
     /// always says "refused".
     #[test]
+    #[cfg(unix)]
     fn a_pane_with_no_refusal_still_reads_as_not_yet_rendered() {
         let dir = tempfile::tempdir().unwrap();
         let binary = Path::new("/bin/herdr-agent-watcher");
@@ -1020,6 +1038,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn shadowed_pane_emits_file_and_pasteable_block() {
         let dir = tempfile::tempdir().unwrap();
         let binary = Path::new("/bin/herdr-agent-watcher");

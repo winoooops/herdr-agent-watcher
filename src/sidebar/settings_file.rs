@@ -100,11 +100,14 @@ fn save_hooked(
     body: &str,
     after_temp: &dyn Fn(),
 ) -> Result<(), String> {
-    use std::os::unix::fs::PermissionsExt;
     let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    let mode = std::fs::metadata(&target)
-        .map(|meta| meta.permissions().mode() & 0o777)
-        .unwrap_or(0o644);
+    #[cfg(unix)]
+    let mode = {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(&target)
+            .map(|meta| meta.permissions().mode() & 0o777)
+            .unwrap_or(0o644)
+    };
     let dir = target
         .parent()
         .ok_or_else(|| format!("no parent for {}", target.display()))?;
@@ -117,8 +120,12 @@ fn save_hooked(
         SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     ));
     std::fs::write(&tmp, body).map_err(|error| format!("write {}: {error}", tmp.display()))?;
-    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode))
-        .map_err(|error| format!("chmod {}: {error}", tmp.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode))
+            .map_err(|error| format!("chmod {}: {error}", tmp.display()))?;
+    }
     after_temp();
 
     // Immediately before the rename, and covering both states.
@@ -364,6 +371,7 @@ sort = \"position\"
     }
 
     #[test]
+    #[cfg(unix)]
     fn an_unreadable_existing_file_is_not_treated_as_absent() {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
@@ -398,6 +406,7 @@ sort = \"position\"
     }
 
     #[test]
+    #[cfg(unix)]
     fn writing_preserves_the_mode() {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();

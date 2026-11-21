@@ -82,6 +82,7 @@ const INPUT_POLL_EVERY: Duration = Duration::from_millis(100);
 /// Matches herdr's own `mouse_scroll_lines` default of 3.
 const MOUSE_SCROLL_LINES: u16 = 3;
 
+#[cfg(unix)]
 fn terminal_is_gone(revents: i16) -> bool {
     revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0
 }
@@ -89,6 +90,7 @@ fn terminal_is_gone(revents: i16) -> bool {
 /// Wait on the tty itself before asking Crossterm to parse pending input.
 /// Crossterm 0.29 loops internally when a pty reports EOF as readable, so its
 /// timeout cannot protect us after the master disappears.
+#[cfg(unix)]
 fn poll_terminal(timeout: Duration) -> std::io::Result<bool> {
     use std::os::fd::AsRawFd;
 
@@ -116,6 +118,13 @@ fn poll_terminal(timeout: Duration) -> std::io::Result<bool> {
     // Zero cannot trap us in Crossterm's EOF loop because HUP/ERR was handled
     // above; it also lets Crossterm deliver resize signals after our wait.
     crossterm::event::poll(Duration::ZERO)
+}
+
+/// On Windows, ConPTY does not have the EOF-loop problem that requires the
+/// Unix libc::poll guard. Crossterm's poll is safe to call directly.
+#[cfg(not(unix))]
+fn poll_terminal(timeout: Duration) -> std::io::Result<bool> {
+    crossterm::event::poll(timeout)
 }
 
 fn keep_polling(result: &std::io::Result<bool>) -> bool {
@@ -2225,6 +2234,7 @@ fn truecolor() -> bool {
         .unwrap_or(false)
 }
 
+#[cfg(unix)]
 fn reexec_sidebar(
     executable: &std::path::Path,
     arguments: Vec<std::ffi::OsString>,
@@ -2237,6 +2247,20 @@ fn reexec_sidebar(
         .args(arguments)
         .exec();
     Err(format!("cannot start the updated sidebar: {error}"))
+}
+
+#[cfg(not(unix))]
+fn reexec_sidebar(
+    executable: &std::path::Path,
+    arguments: Vec<std::ffi::OsString>,
+) -> Result<(), String> {
+    std::fs::File::open(executable)
+        .map_err(|error| format!("cannot read {}: {error}", executable.display()))?;
+    std::process::Command::new(executable)
+        .args(arguments)
+        .spawn()
+        .map_err(|error| format!("cannot start the updated sidebar: {error}"))?;
+    Ok(())
 }
 
 fn reexec_or_fallback(
@@ -3422,6 +3446,7 @@ mod tests {
         assert_eq!(events.into_inner(), ["restore", "exec", "fallback"]);
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_tty_hangup_is_not_readable_input() {
         assert!(terminal_is_gone(libc::POLLHUP));
@@ -4373,6 +4398,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn the_panel_binds_migrates_unbinds_and_rejects_bad_edits_off_the_router() {
         use std::os::unix::fs::PermissionsExt;
 

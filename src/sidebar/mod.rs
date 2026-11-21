@@ -8,7 +8,6 @@ pub mod reducer;
 pub mod release;
 pub mod view;
 
-#[cfg(unix)]
 pub mod state_stream;
 
 pub(crate) mod bars;
@@ -23,8 +22,7 @@ pub(crate) mod select;
 /// module's types.
 pub mod style;
 
-#[cfg(unix)]
 pub mod settings_file;
 
-#[cfg(all(feature = "runtime", unix))]
+#[cfg(feature = "runtime")]
 pub mod tui;

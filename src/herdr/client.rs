@@ -1,10 +1,11 @@
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use serde_json::{json, Value};
+
+use crate::ipc;
 
 #[derive(Debug, thiserror::Error)]
 pub enum HerdrClientError {
@@ -58,15 +59,17 @@ impl HerdrClient {
     pub fn request(&self, method: &str, params: Value) -> Result<Value, HerdrClientError> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed).to_string();
         let request = json!({ "id": id, "method": method, "params": params });
-        let stream =
-            UnixStream::connect(&self.socket_path).map_err(|source| HerdrClientError::Connect {
+        let mut stream =
+            ipc::connect(&self.socket_path).map_err(|source| HerdrClientError::Connect {
                 path: self.socket_path.clone(),
                 source,
             })?;
-        stream.set_read_timeout(Some(Duration::from_secs(3)))?;
-        let mut writer = stream.try_clone()?;
-        writer.write_all(serde_json::to_string(&request)?.as_bytes())?;
-        writer.write_all(b"\n")?;
+        let _ = ipc::set_read_timeout(&stream, Some(Duration::from_secs(3)));
+        // Write the full request, then hand the stream to BufReader for the
+        // response. This avoids try_clone() which is unavailable on Windows.
+        stream.write_all(serde_json::to_string(&request)?.as_bytes())?;
+        stream.write_all(b"\n")?;
+        let _ = stream.flush();
         let mut line = String::new();
         BufReader::new(stream).read_line(&mut line)?;
         decode_response(&line)
