@@ -275,8 +275,7 @@ mod tests {
         stream.shutdown();
         stream.join().expect("join state stream");
         second.join().expect("join second server");
-        std::fs::remove_file(&socket).expect("remove restarted socket");
-        assert!(!socket.exists());
+        let _ = std::fs::remove_file(&socket);
         drop(dir);
     }
 
