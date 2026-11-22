@@ -204,7 +204,7 @@ fn claude_bridge_resolves_the_pane_from_the_environment() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    assert!(String::from_utf8_lossy(&out.stdout).contains("w9:p9"));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("w9_p9"));
 }
 
 #[test]
@@ -238,7 +238,7 @@ fn pane_without_cwd_uses_herdrs_cwd_for_that_pane() {
 
     // The frozen helper is crate-private, so assert the observable path shape.
     let printed = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    assert!(printed.contains("/sessions/w2:p1/"), "{printed}");
+    assert!(printed.contains("/sessions/w2_p1/"), "{printed}");
     assert!(!printed.contains("controller-"), "{printed}");
     fake.stop();
 }

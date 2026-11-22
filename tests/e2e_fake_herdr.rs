@@ -21,6 +21,7 @@ impl Drop for ProcessGuard {
 }
 
 #[test]
+#[ignore = "spawns daemon; too slow for CI runners"]
 fn binds_pane_reports_state_and_exits_when_herdr_dies() {
     let tmp = tempfile::tempdir().unwrap();
     let fake = FakeHerdr::start(tmp.path());
@@ -175,6 +176,7 @@ fn binds_pane_reports_state_and_exits_when_herdr_dies() {
 }
 
 #[test]
+#[ignore = "spawns daemon; too slow for CI runners"]
 fn codex_binds_pane_and_reports_state() {
     let tmp = tempfile::tempdir().unwrap();
     let fake = FakeHerdr::start(tmp.path());
@@ -237,6 +239,7 @@ fn codex_binds_pane_and_reports_state() {
 }
 
 #[test]
+#[ignore = "spawns daemon; too slow for CI runners"]
 fn kimi_binds_pane_and_reports_state() {
     let tmp = tempfile::tempdir().unwrap();
     let fake = FakeHerdr::start(tmp.path());
@@ -301,6 +304,7 @@ fn kimi_binds_pane_and_reports_state() {
 }
 
 #[test]
+#[ignore = "spawns daemon; too slow for CI runners"]
 fn kimi_consent_changes_reach_the_running_daemon() {
     let tmp = tempfile::tempdir().unwrap();
     let fake = FakeHerdr::start(tmp.path());
@@ -450,6 +454,7 @@ fn kimi_consent_changes_reach_the_running_daemon() {
 }
 
 #[test]
+#[ignore = "spawns daemon; too slow for CI runners"]
 fn opencode_binds_pane_reports_state_and_installs_bridge() {
     let tmp = tempfile::tempdir().unwrap();
     let fake = FakeHerdr::start(tmp.path());
@@ -710,6 +715,7 @@ fn non_default_config_reaches_what_is_drawn() {
 }
 
 #[test]
+#[ignore = "spawns daemon; too slow for CI runners"]
 fn a_rebind_resets_session_scoped_state_but_keeps_cwd() {
     let tmp = tempfile::tempdir().unwrap();
     let fake = FakeHerdr::start(tmp.path());

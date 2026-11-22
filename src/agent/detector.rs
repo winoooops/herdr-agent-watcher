@@ -195,12 +195,12 @@ fn read_platform_cmdline(pid: u32) -> Option<Vec<String>> {
 
 #[cfg(target_os = "windows")]
 fn read_platform_children(pid: u32) -> Option<Vec<u32>> {
+    use std::mem::size_of;
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
     use windows_sys::Win32::System::Diagnostics::ToolHelp::{
         CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
         TH32CS_SNAPPROCESS,
     };
-    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
-    use std::mem::size_of;
 
     let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
     if snapshot == INVALID_HANDLE_VALUE {
@@ -225,10 +225,10 @@ fn read_platform_children(pid: u32) -> Option<Vec<u32>> {
 
 #[cfg(target_os = "windows")]
 fn read_platform_cmdline(pid: u32) -> Option<Vec<String>> {
+    use windows_sys::Win32::Foundation::CloseHandle;
     use windows_sys::Win32::System::Threading::{
         OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
     };
-    use windows_sys::Win32::Foundation::CloseHandle;
 
     let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
     if process.is_null() {
