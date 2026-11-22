@@ -43,5 +43,6 @@ jobs:
         run: cargo check --no-default-features
       - name: Portable set builds for Windows (no runtime)
         run: cargo check --no-default-features --target x86_64-pc-windows-msvc
-      - name: Full feature set builds for Windows
-        run: cargo check --all-features --target x86_64-pc-windows-msvc
+      # Full-features Windows check is covered by the test-windows job.
+      # Cross-compiling --all-features from Ubuntu fails because ring and
+      # libsqlite3-sys need MSVC build tools (lib.exe) not present here.

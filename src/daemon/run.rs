@@ -440,11 +440,12 @@ mod startup_config_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod service_tests {
     use super::*;
     use crate::test_env::with_env;
     use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::{UnixListener, UnixStream};
     use std::process::{Child, Command};
     use std::sync::atomic::{AtomicBool, Ordering};
 
