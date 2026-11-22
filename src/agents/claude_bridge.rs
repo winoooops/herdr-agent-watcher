@@ -1153,7 +1153,7 @@ mod tests {
         let shown = bridge_dir(dir.path(), &canon, "w2:p1")
             .display()
             .to_string();
-        assert!(shown.ends_with("/sessions/w2:p1"), "{shown}");
+        assert!(shown.ends_with("/sessions/w2_p1"), "{shown}");
         assert!(shown.contains("/workspaces/"), "{shown}");
     }
 

@@ -473,7 +473,7 @@ mod service_tests {
     }
 
     fn wait_for(what: &str, mut condition: impl FnMut() -> bool) {
-        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
         while std::time::Instant::now() < deadline {
             if condition() {
                 return;

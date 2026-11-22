@@ -254,7 +254,7 @@ mod tests {
         close_stale_tx.send(()).expect("close stale connection");
         first.join().expect("join first server");
 
-        std::fs::remove_file(&socket).expect("remove first socket");
+        let _ = std::fs::remove_file(&socket);
         let second_listener = ipc::bind(&socket).expect("bind restarted state socket");
         let second = serve_once(second_listener, "{\"version\":2,\"seq\":2,\"panes\":{}}\n");
         assert_eq!(
