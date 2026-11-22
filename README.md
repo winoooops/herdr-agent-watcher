@@ -28,9 +28,12 @@ herdr plugin install winoooops/herdr-agent-watcher
 ```
 
 Requires Herdr 0.8.0+. Install fetches a prebuilt binary for macOS and Linux (x86_64 and
-arm64) and checks its SHA256. If no asset matches your platform, or anything about the
-download fails, it builds from source instead — that path needs Rust 1.88+, which Herdr
-reports rather than installs.
+arm64) and checks its SHA256. On Windows, or if no asset matches your platform, it builds
+from source — that path needs Rust 1.88+, which Herdr reports rather than installs.
+
+As of v0.3.0, the crate compiles and runs on Windows 10/11. Process detection uses
+`CreateToolhelp32Snapshot`, IPC uses named pipes via the `interprocess` crate, and the
+sidebar TUI uses `crossterm` polling.
 
 Installing into an already-running Herdr server does not start the daemon. Run it once:
 
