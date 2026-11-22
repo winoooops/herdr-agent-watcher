@@ -103,7 +103,13 @@ pub fn set_nonblocking(stream: &LocalStream, nonblocking: bool) -> io::Result<()
 pub fn set_listener_nonblocking(listener: &LocalListener, nonblocking: bool) -> io::Result<()> {
     #[cfg(unix)]
     {
-        listener.set_nonblocking(nonblocking)
+        use interprocess::local_socket::ListenerNonblockingMode;
+        let mode = if nonblocking {
+            ListenerNonblockingMode::Accept
+        } else {
+            ListenerNonblockingMode::Neither
+        };
+        listener.set_nonblocking(mode)
     }
 
     #[cfg(windows)]
@@ -125,7 +131,7 @@ pub fn set_read_timeout(
 ) -> io::Result<()> {
     #[cfg(unix)]
     {
-        stream.set_read_timeout(_timeout)
+        stream.set_recv_timeout(_timeout)
     }
 
     #[cfg(windows)]
@@ -142,7 +148,7 @@ pub fn set_write_timeout(
 ) -> io::Result<()> {
     #[cfg(unix)]
     {
-        stream.set_write_timeout(_timeout)
+        stream.set_send_timeout(_timeout)
     }
 
     #[cfg(windows)]
