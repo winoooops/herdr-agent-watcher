@@ -1,16 +1,16 @@
 id = "herdr-agent-watcher"
 name = "Agent Watcher"
-version = "0.2.9"
+version = "0.3.0"
 min_herdr_version = "0.8.0"
 description = "Coding-agent observability: transcript watchers, metrics, and notifications for Claude Code, Codex, Kimi Code, and OpenCode."
-platforms = ["macos", "linux"]
+platforms = ["macos", "linux", "windows"]
 
 [[build]]
 # Not a compile step by contract — it only has to leave a working binary at
 # target/release/herdr-agent-watcher. It fetches a verified release asset when
 # one matches the platform and compiles when anything goes wrong.
 command = ["sh", "scripts/fetch-or-build.sh"]
-platforms = ["macos", "linux"]
+platforms = ["macos", "linux", "windows"]
 
 [[startup]]
 command = ["target/release/herdr-agent-watcher", "daemon"]

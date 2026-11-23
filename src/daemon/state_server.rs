@@ -326,9 +326,7 @@ mod tests {
         )
         .expect("request");
         let mut line = String::new();
-        BufReader::new(stream)
-            .read_line(&mut line)
-            .expect("reply");
+        BufReader::new(stream).read_line(&mut line).expect("reply");
         serde_json::from_str(&line).expect("json")
     }
 

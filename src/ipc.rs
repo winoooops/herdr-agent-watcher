@@ -67,7 +67,10 @@ pub fn read_line(stream: &mut LocalStream) -> io::Result<String> {
         match stream.read(&mut byte) {
             Ok(0) => {
                 if line.is_empty() {
-                    return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "connection closed"));
+                    return Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "connection closed",
+                    ));
                 }
                 break;
             }
@@ -85,10 +88,7 @@ pub fn read_line(stream: &mut LocalStream) -> io::Result<String> {
 }
 
 /// Write a JSON value followed by a newline.
-pub fn write_json_line(
-    stream: &mut LocalStream,
-    value: &impl serde::Serialize,
-) -> io::Result<()> {
+pub fn write_json_line(stream: &mut LocalStream, value: &impl serde::Serialize) -> io::Result<()> {
     serde_json::to_writer(&mut *stream, value)?;
     stream.write_all(b"\n")?;
     stream.flush()

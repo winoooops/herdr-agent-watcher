@@ -214,8 +214,8 @@ fn executable_and_names(path: &Path, binary: &Path) -> bool {
         }
     }
     std::fs::read_to_string(path)
-            .map(|body| body.contains(&*binary.to_string_lossy()))
-            .unwrap_or(false)
+        .map(|body| body.contains(&*binary.to_string_lossy()))
+        .unwrap_or(false)
 }
 
 /// Tables that belong to THIS plugin's config.toml but were found in Herdr's.

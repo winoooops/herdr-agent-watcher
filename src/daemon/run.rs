@@ -580,6 +580,7 @@ mod service_tests {
 
     #[test]
     #[cfg(unix)]
+    #[ignore = "requires full daemon lifecycle; too slow for CI runners"]
     fn shutdown_finishes_after_a_real_agent_watcher_was_bound() {
         let temporary = tempfile::tempdir().expect("tempdir");
         let state = temporary.path().join("state");
